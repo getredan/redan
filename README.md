@@ -1,113 +1,67 @@
-# redan
+<div align="center">
+  <img src="assets/logo.png" alt="" width="200">
+</div>
 
-Secure, local-first execution environment for AI coding agents.
+# Redan
 
-MicroVM isolation with network-layer secret injection. One binary. No cloud. No daemon.
+Run AI coding agents in microVM isolation with network-layer secret
+injection.
 
-> *redan (n.): a V-shaped fieldwork forming a salient angle toward the enemy.*
+Agents get a real dev environment (node, git, python, your project
+files). They can't see your host credentials, can't reach hosts you
+didn't allow, and can't observe the real values of injected secrets.
 
-## What it does
-
-Your AI agent runs inside a lightweight VM (libkrun). It can read and write your project files normally, but:
-
-- **Can't see** your `~/.ssh`, `~/.aws`, shell history, or any host credentials
-- **Can't reach** hosts you didn't explicitly allow
-- **Can't leak** your API tokens - they're injected at the network layer, invisible to the agent
-- **Can't hide** what it did - everything is logged to a tamper-proof audit trail
-
-```bash
-redan exec -- claude
-# ✓ Agent runs in VM. Project files via virtio-fs.
-# ✓ API tokens injected by MITM proxy. Agent sees placeholders.
-# ✓ Network limited to allowlist. Raw IPs blocked.
-# ✓ Audit log on host. Agent can't touch it.
-```
-
-## Quick start
-
-```bash
-# Install
-curl -sSf https://redan.dev/install.sh | sh
-
-# Verify
-redan doctor
-
-# Run (zero-config - auto-detects project type)
-cd ~/my-project
-redan exec -- claude
-```
-
-## Configuration
-
-Optional. Zero-config works for common setups. Add `redan.toml` for precision:
-
-```toml
-image = "node:22"
-
-[network]
-allow = ["api.github.com", "api.openai.com", "registry.npmjs.org"]
-
-[secrets.GITHUB_TOKEN]
-source = "env"
-for = ["api.github.com"]
-```
-
-Or generate one interactively:
-
-```bash
-redan init
-```
-
-## Secret backends
-
-| Backend | Status | Use case |
-|---------|--------|----------|
-| Environment variables | MVP | Solo dev, CI |
-| HashiCorp Vault | MVP | Teams, enterprises |
-| AWS Secrets Manager | MVP | AWS-native teams |
-| 1Password CLI | v1.0 | Solo dev, biometric unlock |
-| Azure Key Vault | v1.0 | Azure-native teams |
-| GCP Secret Manager | v1.0 | GCP-native teams |
-| macOS Keychain | v1.0 | macOS developers |
+> *redan (n.): a V-shaped fieldwork forming a salient angle toward the
+> enemy.*
 
 ## How it works
 
-1. `redan exec` boots a libkrun microVM (~200-500ms)
-2. Your project directory is mounted via virtio-fs (read-write)
-3. All network traffic routes through a host-side MITM proxy
-4. The proxy enforces your allowlist and injects secrets into HTTP headers
+1. `redan exec` boots a [libkrun] microVM (<1s)
+2. Your project directory is mounted read-write via virtio-fs
+3. All network traffic routes through a userspace TCP/IP stack ([smoltcp])
+4. A MITM proxy intercepts TLS, injects secrets, enforces an allowlist
 5. The agent sees placeholder tokens, never real values
-6. Everything is logged to `$XDG_STATE_HOME/redan/sessions/`
+6. An audit log on the host records every network request
 
-## Requirements
-
-- Linux x86_64 with KVM (primary)
-- macOS aarch64 with HVF (conditional - validating in prototype)
-- libkrun
+```
+Guest VM                    Host
+┌──────────────┐           ┌───────────────────┐
+│ claude/codex │─virtio-net─▶ smoltcp TCP/IP    │
+│              │           │  ├─ synthetic DNS  │
+│ project/     │◀─virtio-fs─▶ ├─ TLS MITM      │
+│              │           │  ├─ secret inject  │
+│ placeholder  │           │  └─ audit log      │──▶ internet
+│ tokens only  │           │    (real secrets)   │
+└──────────────┘           └───────────────────┘
+```
 
 ## Status
 
-**Pre-alpha.** Running prototype spikes.
+**Pre-alpha.** The prototype chain is proven end-to-end: VM boot,
+virtio-fs mounts, synthetic DNS, TLS MITM, secret injection/scrubbing,
+and Claude Code making API calls through the proxy. Not yet packaged
+for distribution.
 
-## Enterprise
+## Requirements
 
-[redan-enterprise](https://github.com/TODO/redan-enterprise) adds organizational management:
-
-- Central policy server - push configs to developer machines
-- Remote audit forwarding - syslog, SIEM, CloudWatch, Datadog
-- Tamper-evident audit logs (HMAC chain)
-- Organization-wide policy enforcement
-- Agent identity management
-- Compliance reporting
+- Linux x86_64 with KVM
+- [libkrun] and [libkrunfw]
+- Rust 1.75+
 
 ## Acknowledgments
 
-- **[libkrun](https://github.com/containers/libkrun)** and **[libkrunfw](https://github.com/containers/libkrunfw)** - the microVM engine and guest firmware
-- **[Gondolin](https://github.com/earendil-works/gondolin)** - network-layer secret injection for agent sandboxes
-- **[microsandbox](https://github.com/zerocore-ai/microsandbox)** - libkrun-based sandboxes for AI agents
-- **[krunvm](https://github.com/containers/krunvm)** - CLI for creating libkrun microVMs from OCI images
-- **[passt](https://passt.top/)** - userspace network stack
+- [libkrun] and [libkrunfw] -- microVM engine and guest firmware
+- [smoltcp] -- userspace TCP/IP stack
+- [rustls] and [rcgen] -- TLS implementation and certificate generation
+- [Gondolin] -- network-layer secret injection pattern for agent sandboxes
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+[BSD-3-Clause](LICENSE)
+
+[libkrun]: https://github.com/containers/libkrun
+[libkrunfw]: https://github.com/containers/libkrunfw
+[smoltcp]: https://github.com/smoltcp-rs/smoltcp
+[rustls]: https://github.com/rustls/rustls
+[rcgen]: https://github.com/rustls/rcgen
+[Gondolin]: https://github.com/earendil-works/gondolin
