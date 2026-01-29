@@ -1,8 +1,4 @@
-<div align="center">
-  <img src="assets/logo.png" alt="" width="200">
-</div>
-
-# Redan
+# <img src="assets/logo.png" alt="" width="40" valign="middle"> Redan
 
 Run AI coding agents in microVM isolation with network-layer secret
 injection.
