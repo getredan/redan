@@ -4,33 +4,50 @@
 
 *redan (n.): a V-shaped fieldwork forming a salient angle toward the enemy.*
 
+## Status: Planning Complete — Ready for Prototype Spikes
+
+All sections drafted, oracle-reviewed by 4 models, findings integrated. Next step: PS-1 (libkrun VM boot + network interception).
+
 ## Planning Index
 
-| # | Section | Status | File |
-|---|---------|--------|------|
-| 1 | [Problem Analysis](01-problem-analysis.md) | ✅ Draft | Attack vectors, current mitigations, target invariants |
-| 2 | [VM Backend & Dependencies](02-vm-backend.md) | ✅ Draft | libkrun analysis, Gondolin model adoption, platform matrix |
-| 3 | [Technical Architecture (v1)](03-architecture.md) | ✅ Draft | Components, policy model, secret flow, agent integration |
-| 4 | [Security Model](04-security-model.md) | ✅ Draft | Threat model, trust boundaries, secret isolation proofs |
-| 4a | [Agent Identity & Secret Management](04a-secret-management.md) | ✅ Draft | Pluggable backends, lifecycle, audit, policy format |
-| 5 | [MVP Scope](05-mvp-scope.md) | ✅ Draft | User stories, happy path, unknowns, non-goals |
-| 6 | [Agent Integration Deep-Dive](06-agent-integration.md) | ✅ Draft | Layers 1-3, per-agent analysis, test plan |
-| 7 | [v2+ Architecture](07-v2-architecture.md) | ✅ Draft | Crux-based split, mobile/desktop shells, migration |
-| 8 | [Technical Risk Register](08-risk-register.md) | ✅ Draft | Risks, mitigations, kill criteria |
-| 9 | [Prototype Plan](09-prototype-plan.md) | ✅ Draft | Spikes, order, success criteria |
-| R1 | [Review: Codex (Skeptical Engineer)](review-codex.md) | ✅ | 13 findings, 2 Critical |
-| R2 | [Review: Kimi 2.5 (Product/UX)](review-kimi.md) | ✅ | 8 sections, adoption focus |
-| R3 | [Review: Sonnet 4.5 (Security Architect)](review-claude.md) | ✅ | 4 Critical, 11 High |
-| R4 | [Review: Opus 4.6 (Deep Security)](review-opus.md) | ✅ | 22 findings, attack trees |
-| R5 | [**Review Synthesis**](review-synthesis.md) | ✅ | Consolidated actions, risk updates |
+| # | Section | Status | Summary |
+|---|---------|--------|---------|
+| 1 | [Problem Analysis](01-problem-analysis.md) | ✅ Final | 6 attack vectors, 8 invariants (restated with caveats), agent gap analysis |
+| 2 | [VM Backend & Dependencies](02-vm-backend.md) | ✅ Final | libkrun, symlink prevention, IPv6 blocking, protocol table |
+| 3 | [Technical Architecture (v1)](03-architecture.md) | ✅ Final | Zero-config, minimal TOML, doctor, error UX, executable file protection |
+| 4 | [Security Model](04-security-model.md) | ✅ Final | MITM proxy, response scrubbing, no --no-sandbox, Host validation |
+| 4a | [Secret Management](04a-secret-management.md) | ✅ Final | env as separate tier, concrete bootstrap flows, pluggable backends |
+| 5 | [MVP Scope](05-mvp-scope.md) | ✅ Final | 9 must-have stories, zero-config, one agent, one backend, honest messaging |
+| 6 | [Agent Integration](06-agent-integration.md) | ✅ Final | Layer 1 (env injection) primary, MCP v1.1, Pi v1.1 |
+| 7 | [v2+ Architecture](07-v2-architecture.md) | ✅ Draft | Crux Core/Shell, Tauri desktop, mobile monitoring |
+| 8 | [Risk Register](08-risk-register.md) | ✅ Final | 1 critical (git hooks), 8 high, 5 medium. 3 mitigated. |
+| 9 | [Prototype Plan](09-prototype-plan.md) | ✅ Final | 6 spikes, 4 weeks, adversarial test suite, decision gates |
 
-## Architectural Decision Record
+## Oracle Reviews
 
-**Key divergence from initial planning prompt:** The competitive research (Feb 2026) recommends Rust + libkrun over building on Gondolin directly. This planning follows that recommendation while adopting Gondolin's network-layer secret injection model as a design pattern. See [Section 2](02-vm-backend.md) for full rationale.
+| Reviewer | Focus | File |
+|----------|-------|------|
+| Codex (o3) | Skeptical engineer: scope, DX, competitive reality | [review-codex.md](review-codex.md) |
+| Kimi 2.5 | Product/UX: adoption funnel, config complexity, env trap | [review-kimi.md](review-kimi.md) |
+| Sonnet 4.5 | Security architect: threat gaps, MITM risks, env injection | [review-claude.md](review-claude.md) |
+| Opus 4.6 | Deep security: attack trees, invariant violations, git hooks | [review-opus.md](review-opus.md) |
+| **Synthesis** | Consolidated findings, actions, risk updates | [review-synthesis.md](review-synthesis.md) |
+
+## Key Architectural Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| VM backend | libkrun (not Gondolin) | Library API, cross-platform, stable, Rust |
+| Secret model | Network-layer injection (Gondolin pattern) | Secrets never in VM (for header/query mode) |
+| Distribution | Single Rust binary | Zero deps, cargo-dist |
+| Config | Optional TOML + zero-config auto-detection | Low friction, progressive disclosure |
+| Audit | Host-only JSONL (tamper-proof from guest) | Agent can't modify audit trail |
+| Escape hatches | --allow-all-hosts (logged), NO --no-sandbox | Can't fully disable security |
+| License | Apache-2.0 | Enterprise-friendly |
 
 ## References
 
-- [Competitive Landscape Research](../../COMPETITIVE_LANDSCAPE_RESEARCH.md) (local copy)
+- [Competitive Landscape Research](../COMPETITIVE_LANDSCAPE_RESEARCH.md)
 - [libkrun](https://github.com/containers/libkrun)
 - [Gondolin](https://github.com/earendel-works/gondolin) (design inspiration)
 - [microsandbox](https://github.com/zerocore-ai/microsandbox) (closest competitor)

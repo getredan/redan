@@ -30,7 +30,7 @@ One command. Real security. No cloud account. No daemon.
 > As a developer, my `redan.toml` specifies `network.allow = ["api.github.com", "registry.npmjs.org"]`. My sandboxed session can reach those hosts and nothing else. Raw IP connections are blocked. Private ranges are blocked.
 
 **US-4: Secret injection from environment**
-> As a developer, I configure a secret with `source = "env"` and `inject_for = ["api.github.com"]`. Inside the sandbox, `$GITHUB_TOKEN` contains a placeholder. The real token is injected by the proxy only when the request targets `api.github.com`.
+> As a developer, I configure a secret with `source = "env"` and `for = ["api.github.com"]`. Inside the sandbox, `$GITHUB_TOKEN` contains a placeholder. The real token is injected by the proxy only when the request targets `api.github.com`.
 
 **US-5: Run a coding agent sandboxed**
 > As a developer, I run `redan exec -- claude` and Claude Code runs inside the VM. I interact with it normally. It cannot access my host credentials or unauthorized hosts.

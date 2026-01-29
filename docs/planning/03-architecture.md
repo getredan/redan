@@ -7,7 +7,7 @@
 │                        redan (single binary)                        │
 │                                                                     │
 │  ┌───────────────┐                                                  │
-│  │   CLI (clap)  │  redan exec, redan policy, redan secret, ...    │
+│  │   CLI (clap)  │  redan exec, redan init, redan doctor, ...      │
 │  └───────┬───────┘                                                  │
 │          │                                                          │
 │  ┌───────┴───────────────────────────────────────────────────────┐  │
@@ -627,6 +627,6 @@ REDAN_* env vars: REDAN_IMAGE, REDAN_CPUS, etc.
 
 3. **Image caching location:** `$XDG_CACHE_HOME/redan/images/`? How much disk space? Do we need garbage collection?
 
-4. **Warm pool vs cold boot UX:** If boot time is >300ms, developers will feel it on every invocation. How do we communicate boot progress without cluttering agent output? A brief `redan: booting vm...` on stderr?
+4. **Warm pool vs cold boot UX:** If boot time is >500ms, developers will feel it on every invocation. Brief `redan: booting... Xms` on stderr. Warm pool for v1.1 if needed.
 
 5. **How does Ctrl+C behave?** If the agent is mid-tool-call inside the VM and the user hits Ctrl+C, what's the expected behavior? Forward SIGINT to guest, let the agent handle it? Or kill the VM immediately?

@@ -31,7 +31,7 @@ The foundation. Any agent that runs in a terminal runs inside Redan.
 - **VM compatibility assessment:**
   - ✅ Single binary, easy to install in image
   - ⚠️ Its own sandbox (Docker/container) won't work inside our VM (no Docker)
-  - ⚠️ Must run in non-sandboxed mode (`--no-sandbox` or equivalent flag)
+  - ⚠️ Must run in non-sandboxed mode (disable Codex's own sandbox, rely on Redan's)
   - ⚠️ Needs OpenAI API access (allowlist + secret injection)
 - **Blockers:** Codex's sandboxed mode conflicts with running inside Redan. Need to disable Codex's sandbox and rely on Redan's.
 
@@ -76,7 +76,7 @@ The foundation. Any agent that runs in a terminal runs inside Redan.
 
 | Trade-off | Impact | Mitigation |
 |-----------|--------|------------|
-| Boot latency | 150-300ms before session starts | Progress indicator on stderr |
+| Boot latency | 200-500ms before session starts | Progress indicator on stderr |
 | No persistent state | Agent settings, package caches lost between sessions | Named volumes (v1.1) |
 | Image setup | Agent must be installed in OCI image | Pre-built images, or first-boot install script |
 | Filesystem performance | virtio-fs overhead on large directories | `.redanignore` (v1.1), benchmarking |

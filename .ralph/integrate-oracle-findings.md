@@ -38,13 +38,13 @@ Incorporate all oracle review findings into the planning documents. Resolve disa
 - [x] 16. Error messages: 3.2.3 what/why/fix pattern, 4 scenarios
 
 ### Phase 4: Risk & Prototype Updates
-- [ ] 17. Update 08-risk-register.md: add R13-R20 from synthesis, revise R6 to High
-- [ ] 18. Update 09-prototype-plan.md: expand PS-1, PS-2, PS-4, PS-5; add PS-6 adversarial suite; 4-week schedule
-- [ ] 19. Update 02-vm-backend.md: add IPv6 blocking (link-local, unique-local, multicast)
+- [x] 17. Risk register: R13 critical (git hooks), R14-R20 added, R6→High, R15/R17 mitigated
+- [x] 18. Prototype: 6 spikes, 4 weeks, PS-6 adversarial suite, decision gates
+- [x] 19. IPv6 + ICMP + QUIC + raw IP blocking in 02-vm-backend.md
 
 ### Phase 5: Coherence Pass
-- [ ] 20. Cross-reference all sections: no contradictions, no stale text, consistent terminology
-- [ ] 21. Update README.md with final status
+- [x] 20. Cross-referenced: fixed stale --no-sandbox refs, boot time, policy init, inject_for/for
+- [x] 21. README.md rewritten with final status, decision table, review index
 
 ## Verification
 - Each updated file: note what changed and why
