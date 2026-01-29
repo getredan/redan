@@ -1,14 +1,7 @@
 #!/bin/bash
 # Pre-commit hook: format check + lint + unit tests.
-# Runs via mise if available, falls back to cargo directly.
 set -e
 
-if command -v mise &>/dev/null; then
-    mise run format-check
-    mise run lint
-    mise run test
-else
-    cargo fmt -- --check
-    cargo clippy -- -D warnings
-    cargo test --lib
-fi
+mise run format-check
+mise run lint
+mise run test
