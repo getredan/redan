@@ -1,11 +1,14 @@
-# <img src="assets/logo.png" alt="" width="40" valign="middle"> Redan
+<p align="center">
+  <img src="assets/logo.png" alt="Redan" width="200">
+  <p align="center">Your agents run free. Your secrets stay put.</p>
+</p>
 
-Run AI coding agents in microVM isolation with network-layer secret
-injection.
+# What's Redan?
 
-Agents get a real dev environment (node, git, python, your project
-files). They can't see your host credentials, can't reach hosts you
-didn't allow, and can't observe the real values of injected secrets.
+Redan runs AI coding agents inside [libkrun] microVMs with network-layer
+secret injection. Agents get a real dev environment -- node, git, python,
+your project files -- but can't see host credentials, can't reach hosts
+you didn't allow, and never observe the real values of injected secrets.
 
 > *redan (n.): a V-shaped fieldwork forming a salient angle toward the
 > enemy.*
