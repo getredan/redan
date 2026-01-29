@@ -3,15 +3,6 @@ mod ffi;
 use std::ffi::CString;
 use std::time::Instant;
 
-/// PS-1: Can we boot a libkrun microVM and does TSI networking work?
-///
-/// This spike answers:
-/// 1. Does krun_start_enter work on this system?
-/// 2. How fast does the VM boot?
-/// 3. What does TSI networking look like from the guest?
-///
-/// Usage: cargo run
-/// Requires: libkrun + libkrunfw installed, /dev/kvm accessible
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let test = args.get(1).map(|s| s.as_str()).unwrap_or("boot");
@@ -27,18 +18,8 @@ fn main() {
     }
 }
 
-fn test_max_vcpus() {
-    let max = unsafe { ffi::krun_get_max_vcpus() };
-    println!("max vCPUs: {max}");
-}
-
-fn test_boot() {
-    println!("PS-1: libkrun boot test");
-    println!("=======================");
-
-    let start = Instant::now();
-
-    // Init logging
+/// Helper: create a VM context with Alpine rootfs, run a shell command, return exit code.
+fn run_guest_cmd(cmd: &str) -> i32 {
     let ret = unsafe {
         ffi::krun_init_log(
             ffi::KRUN_LOG_TARGET_DEFAULT,
@@ -49,131 +30,74 @@ fn test_boot() {
     };
     assert!(ret >= 0, "krun_init_log failed: {ret}");
 
-    // Create context
     let ctx_id = unsafe { ffi::krun_create_ctx() };
     assert!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
     let ctx_id = ctx_id as u32;
 
-    // 1 vCPU, 256MB RAM
     let ret = unsafe { ffi::krun_set_vm_config(ctx_id, 1, 256) };
     assert!(ret >= 0, "krun_set_vm_config failed: {ret}");
 
-    // Use Alpine minirootfs as guest root
     let root = CString::new("/tmp/redan-rootfs").unwrap();
     let ret = unsafe { ffi::krun_set_root(ctx_id, root.as_ptr()) };
     assert!(ret >= 0, "krun_set_root failed: {ret}");
 
-    // Set workdir
     let workdir = CString::new("/").unwrap();
     let ret = unsafe { ffi::krun_set_workdir(ctx_id, workdir.as_ptr()) };
     assert!(ret >= 0, "krun_set_workdir failed: {ret}");
 
-    // Match the working C test exactly: pass envp to krun_set_exec
-    let term = CString::new("TERM=xterm").unwrap();
+    // exec_path = /bin/busybox, argv = {"ash", "-c", cmd}
+    let exec_path = CString::new("/bin/busybox").unwrap();
+    let arg0 = CString::new("ash").unwrap();
+    let arg1 = CString::new("-c").unwrap();
+    let arg2 = CString::new(cmd).unwrap();
+    let argv: Vec<*const i8> = vec![
+        arg0.as_ptr(), arg1.as_ptr(), arg2.as_ptr(), std::ptr::null()
+    ];
+
     let path = CString::new("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").unwrap();
+    let term = CString::new("TERM=xterm").unwrap();
     let envp: Vec<*const i8> = vec![path.as_ptr(), term.as_ptr(), std::ptr::null()];
 
-    let exec_path = CString::new("/bin/busybox").unwrap();
-    let arg0 = CString::new("echo").unwrap();
-    let arg1 = CString::new("REDAN_BOOT_OK").unwrap();
-    let argv: Vec<*const i8> = vec![arg0.as_ptr(), arg1.as_ptr(), std::ptr::null()];
-
     let ret = unsafe {
-        ffi::krun_set_exec(
-            ctx_id,
-            exec_path.as_ptr(),
-            argv.as_ptr(),
-            envp.as_ptr(),
-        )
+        ffi::krun_set_exec(ctx_id, exec_path.as_ptr(), argv.as_ptr(), envp.as_ptr())
     };
     assert!(ret >= 0, "krun_set_exec failed: {ret}");
 
-    let setup_time = start.elapsed();
-    println!("setup time: {setup_time:?}");
-    println!("entering VM...");
+    unsafe { ffi::krun_start_enter(ctx_id) }
+}
 
-    // This blocks until the guest process exits
-    let ret = unsafe { ffi::krun_start_enter(ctx_id) };
-    let total_time = start.elapsed();
+fn test_max_vcpus() {
+    let max = unsafe { ffi::krun_get_max_vcpus() };
+    println!("max vCPUs: {max}");
+}
+
+fn test_boot() {
+    println!("PS-1: boot test");
+
+    let start = Instant::now();
+    let exit_code = run_guest_cmd("echo REDAN_BOOT_OK; uname -a; cat /etc/alpine-release");
+    let elapsed = start.elapsed();
+
     println!("---");
-    println!("krun_start_enter returned: {ret}");
-    println!("total time: {total_time:?}");
+    println!("exit code: {exit_code}");
+    println!("total time: {elapsed:?}");
 }
 
 fn test_network() {
     println!("PS-1: TSI network test");
     println!("======================");
+    println!("TSI is enabled by default (no krun_add_net_* calls).");
+    println!("Guest sockets are forwarded to host process as-is.");
+    println!();
 
-    let ret = unsafe {
-        ffi::krun_init_log(
-            ffi::KRUN_LOG_TARGET_DEFAULT,
-            ffi::KRUN_LOG_LEVEL_INFO,
-            ffi::KRUN_LOG_STYLE_AUTO,
-            0,
-        )
-    };
-    assert!(ret >= 0, "krun_init_log failed: {ret}");
+    // Avoid special chars that trigger InvalidAscii in libkrun's arg parser
+    let exit_code = run_guest_cmd(
+        "echo NET_INTERFACES; ip addr 2>/dev/null; \
+         echo DNS_TEST; nslookup api.github.com 2>/dev/null; \
+         echo HTTPS_TEST; wget -q -O - https://api.github.com/ 2>/dev/null; \
+         echo DONE"
+    );
 
-    let ctx_id = unsafe { ffi::krun_create_ctx() };
-    assert!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
-    let ctx_id = ctx_id as u32;
-
-    let ret = unsafe { ffi::krun_set_vm_config(ctx_id, 2, 512) };
-    assert!(ret >= 0, "krun_set_vm_config failed: {ret}");
-
-    let root = CString::new("/").unwrap();
-    let ret = unsafe { ffi::krun_set_root(ctx_id, root.as_ptr()) };
-    assert!(ret >= 0, "krun_set_root failed: {ret}");
-
-    // TSI is the default (no krun_add_net_* calls).
-    // Test what the guest sees for networking.
-    let exec_path = CString::new("/bin/sh").unwrap();
-    let arg0 = CString::new("sh").unwrap();
-    let arg1 = CString::new("-c").unwrap();
-
-    // Test sequence:
-    // 1. Show network interfaces
-    // 2. Try DNS resolution
-    // 3. Try HTTP connection
-    // 4. Show what process sees for its own connections
-    let script = r#"
-echo '=== NETWORK INTERFACES ==='
-ip addr 2>/dev/null || ifconfig 2>/dev/null || echo 'no ip/ifconfig'
-
-echo ''
-echo '=== DNS TEST ==='
-getent hosts api.github.com 2>/dev/null || echo 'getent failed'
-cat /etc/resolv.conf 2>/dev/null || echo 'no resolv.conf'
-
-echo ''
-echo '=== HTTP TEST (curl) ==='
-curl -sI --max-time 5 https://api.github.com/ 2>&1 | head -5 || echo 'curl failed'
-
-echo ''
-echo '=== RAW IP TEST ==='
-curl -sI --max-time 5 https://140.82.121.6/ 2>&1 | head -3 || echo 'raw IP curl failed'
-
-echo ''
-echo '=== DONE ==='
-"#;
-    let cmd = CString::new(script).unwrap();
-    let argv: Vec<*const i8> = vec![arg0.as_ptr(), arg1.as_ptr(), cmd.as_ptr(), std::ptr::null()];
-
-    let ret = unsafe {
-        ffi::krun_set_exec(
-            ctx_id,
-            exec_path.as_ptr(),
-            argv.as_ptr(),
-            std::ptr::null(),
-        )
-    };
-    assert!(ret >= 0, "krun_set_exec failed: {ret}");
-
-    println!("entering VM with TSI networking...");
-    let start = Instant::now();
-    let ret = unsafe { ffi::krun_start_enter(ctx_id) };
-    let total = start.elapsed();
     println!("---");
-    println!("krun_start_enter returned: {ret}");
-    println!("total time: {total:?}");
+    println!("exit code: {exit_code}");
 }
