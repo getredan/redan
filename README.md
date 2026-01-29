@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Redan" width="200">
+  <img src="assets/logo.jpg" alt="Redan" width="600">
   <p align="center">Your agents run free. Your secrets stay put.</p>
 </p>
 
