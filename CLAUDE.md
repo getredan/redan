@@ -1,4 +1,4 @@
-# redan — Agent Instructions
+# redan - Agent Instructions
 
 Secure, local-first AI agent execution environment. Rust + libkrun microVMs + network-layer secret injection.
 
@@ -14,12 +14,12 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 All AI-maintained planning, architecture, and review docs live in `~/Projects/redan-ai-slop/docs/planning/`. Read those before making architectural decisions. Key files:
 
-- `03-architecture.md` — CLI design, zero-config, redan.toml, error UX
-- `04-security-model.md` — MITM proxy, threat model, network policy
-- `04a-secret-management.md` — secret backends, injection modes, bootstrap flows
-- `05-mvp-scope.md` — MVP constraints, user stories, repo/license split
-- `08-risk-register.md` — 20 risks, mitigations, spike assignments
-- `09-prototype-plan.md` — 6 spikes over 4 weeks, decision gates
+- `03-architecture.md` - CLI design, zero-config, redan.toml, error UX
+- `04-security-model.md` - MITM proxy, threat model, network policy
+- `04a-secret-management.md` - secret backends, injection modes, bootstrap flows
+- `05-mvp-scope.md` - MVP constraints, user stories, repo/license split
+- `08-risk-register.md` - 20 risks, mitigations, spike assignments
+- `09-prototype-plan.md` - 6 spikes over 4 weeks, decision gates
 
 ## Tech stack
 

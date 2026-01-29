@@ -12,8 +12,8 @@ Your AI agent runs inside a lightweight VM (libkrun). It can read and write your
 
 - **Can't see** your `~/.ssh`, `~/.aws`, shell history, or any host credentials
 - **Can't reach** hosts you didn't explicitly allow
-- **Can't leak** your API tokens — they're injected at the network layer, invisible to the agent
-- **Can't hide** what it did — everything is logged to a tamper-proof audit trail
+- **Can't leak** your API tokens - they're injected at the network layer, invisible to the agent
+- **Can't hide** what it did - everything is logged to a tamper-proof audit trail
 
 ```bash
 redan exec -- claude
@@ -32,7 +32,7 @@ curl -sSf https://redan.dev/install.sh | sh
 # Verify
 redan doctor
 
-# Run (zero-config — auto-detects project type)
+# Run (zero-config - auto-detects project type)
 cd ~/my-project
 redan exec -- claude
 ```
@@ -84,7 +84,7 @@ See [docs/planning/](docs/planning/) for the full architecture.
 ## Requirements
 
 - Linux x86_64 with KVM (primary)
-- macOS aarch64 with HVF (conditional — validating in prototype)
+- macOS aarch64 with HVF (conditional - validating in prototype)
 - libkrun
 
 ## Status
@@ -102,8 +102,8 @@ See [docs/planning/](docs/planning/) for:
 
 [redan-enterprise](https://github.com/TODO/redan-enterprise) adds organizational management:
 
-- Central policy server — push configs to developer machines
-- Remote audit forwarding — syslog, SIEM, CloudWatch, Datadog
+- Central policy server - push configs to developer machines
+- Remote audit forwarding - syslog, SIEM, CloudWatch, Datadog
 - Tamper-evident audit logs (HMAC chain)
 - Organization-wide policy enforcement
 - Agent identity management
