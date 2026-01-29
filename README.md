@@ -22,16 +22,23 @@ you didn't allow, and never observe the real values of injected secrets.
 5. The agent sees placeholder tokens, never real values
 6. An audit log on the host records every network request
 
-```
-Guest VM                    Host
-┌──────────────┐           ┌───────────────────┐
-│ claude/codex │─virtio-net─▶ smoltcp TCP/IP    │
-│              │           │  ├─ synthetic DNS  │
-│ project/     │◀─virtio-fs─▶ ├─ TLS MITM      │
-│              │           │  ├─ secret inject  │
-│ placeholder  │           │  └─ audit log      │──▶ internet
-│ tokens only  │           │    (real secrets)   │
-└──────────────┘           └───────────────────┘
+```mermaid
+flowchart LR
+    subgraph vm [Guest VM]
+        agent[claude / codex]
+        files[project/]
+        placeholder[placeholder tokens only]
+    end
+    subgraph host [Host]
+        net[smoltcp TCP/IP]
+        dns[synthetic DNS]
+        tls[TLS MITM]
+        inject[secret inject]
+        audit[audit log]
+    end
+    agent -- virtio-net --> net
+    files <-- virtio-fs --> host
+    host -- real secrets --> internet((internet))
 ```
 
 ## Status
