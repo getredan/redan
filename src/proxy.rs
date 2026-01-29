@@ -72,7 +72,12 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
             }
 
             for port in done_ports {
-                connections.remove(&port);
+                let conn = connections.remove(&port).unwrap();
+                // Re-listen: smoltcp TCP sockets can't accept new connections
+                // after the previous one closes. We must abort + re-listen.
+                let sock = sockets.get_mut::<tcp::Socket>(conn.handle);
+                sock.abort();
+                sock.listen(port).unwrap();
             }
         }
 
