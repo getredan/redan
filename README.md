@@ -79,8 +79,6 @@ redan init
 5. The agent sees placeholder tokens, never real values
 6. Everything is logged to `$XDG_STATE_HOME/redan/sessions/`
 
-See [docs/planning/](docs/planning/) for the full architecture.
-
 ## Requirements
 
 - Linux x86_64 with KVM (primary)
@@ -89,14 +87,7 @@ See [docs/planning/](docs/planning/) for the full architecture.
 
 ## Status
 
-**Pre-alpha.** Architecture designed, oracle-reviewed. Running prototype spikes.
-
-See [docs/planning/](docs/planning/) for:
-- [Architecture](docs/planning/03-architecture.md)
-- [Security model](docs/planning/04-security-model.md)
-- [MVP scope](docs/planning/05-mvp-scope.md)
-- [Risk register](docs/planning/08-risk-register.md)
-- [Prototype plan](docs/planning/09-prototype-plan.md)
+**Pre-alpha.** Running prototype spikes.
 
 ## Enterprise
 
