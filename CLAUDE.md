@@ -7,7 +7,7 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 | Repo | Path | Purpose |
 |------|------|---------|
 | **getredan/redan** (this) | `~/Projects/redan/` | Open core (BSD-3-Clause). CLI, VM, proxy, secret backends, audit. |
-| getredan/redan-enterprise | `~/Projects/redan-enterprise/` | Enterprise management (BSL-1.1). Policy server, remote audit, compliance. |
+| getredan/redan-enterprise | `~/Projects/redan-enterprise/` | Enterprise management (FSL-1.1-MIT). Policy server, remote audit, compliance. |
 | getredan/redan-ai-slop | `~/Projects/redan-ai-slop/` | Private. AI-generated planning docs, oracle reviews, research. |
 
 ## Planning docs
