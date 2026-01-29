@@ -430,60 +430,27 @@ fn process_connection(sockets: &mut SocketSet, conn: &mut ProxyConn, ca: &MitmCa
                     println!("[host]   {line}");
                 }
 
-                // Forward to upstream
+                // Forward to upstream via a blocking helper.
+                // This is fine for a spike (one request at a time).
                 if let (Some(stream), Some(tls)) =
                     (conn.upstream.as_mut(), conn.upstream_tls.as_mut())
                 {
-                    tls.writer().write_all(&plaintext[..pt_bytes]).ok();
-                    let mut tls_out = Vec::new();
-                    tls.write_tls(&mut tls_out).ok();
-                    stream.write_all(&tls_out).ok();
-                    stream.flush().ok();
-
-                    // Read upstream response
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                        .ok();
-                    loop {
-                        let mut enc_buf = vec![0u8; 16384];
-                        let enc_n = match stream.read(&mut enc_buf) {
-                            Ok(0) => break,
-                            Ok(n) => n,
-                            Err(e)
-                                if e.kind() == std::io::ErrorKind::WouldBlock
-                                    || e.kind() == std::io::ErrorKind::TimedOut =>
-                            {
-                                break
+                    match relay_upstream(stream, tls, &plaintext[..pt_bytes]) {
+                        Ok(response) => {
+                            let resp_text = String::from_utf8_lossy(&response);
+                            println!("[host] upstream response ({} bytes):", response.len());
+                            for line in resp_text.lines().take(3) {
+                                println!("[host]   {line}");
                             }
-                            Err(_) => break,
-                        };
 
-                        let mut cursor = &enc_buf[..enc_n];
-                        tls.read_tls(&mut cursor).ok();
-                        match tls.process_new_packets() {
-                            Ok(_) => {}
-                            Err(e) => {
-                                println!("[host] upstream TLS error: {e}");
-                                break;
-                            }
+                            // Send back to guest through our server TLS
+                            guest_tls.writer().write_all(&response).ok();
+                            let mut guest_out = Vec::new();
+                            guest_tls.write_tls(&mut guest_out).ok();
+                            sock.send_slice(&guest_out).ok();
                         }
-
-                        let mut resp_plain = vec![0u8; 16384];
-                        match tls.reader().read(&mut resp_plain) {
-                            Ok(n) if n > 0 => {
-                                let resp_text = String::from_utf8_lossy(&resp_plain[..n]);
-                                println!("[host] upstream response ({n} bytes):");
-                                for line in resp_text.lines().take(3) {
-                                    println!("[host]   {line}");
-                                }
-
-                                // Send back to guest through our TLS
-                                guest_tls.writer().write_all(&resp_plain[..n]).ok();
-                                let mut guest_out = Vec::new();
-                                guest_tls.write_tls(&mut guest_out).ok();
-                                sock.send_slice(&guest_out).ok();
-                            }
-                            _ => {}
+                        Err(e) => {
+                            println!("[host] upstream relay error: {e}");
                         }
                     }
                 }
@@ -582,6 +549,89 @@ fn extract_sni(data: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+/// Complete a TLS handshake, send request, read full response.
+fn relay_upstream(
+    stream: &mut TcpStream,
+    tls: &mut rustls::ClientConnection,
+    request: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+
+    // Complete TLS handshake
+    while tls.is_handshaking() {
+        if tls.wants_write() {
+            tls.write_tls(stream)?;
+        }
+        if tls.wants_read() {
+            tls.read_tls(stream)?;
+            tls.process_new_packets()?;
+        }
+    }
+
+    // Send the HTTP request
+    tls.writer().write_all(request)?;
+    tls.write_tls(stream)?;
+    stream.flush()?;
+
+    // Read the full response
+    let mut response = Vec::new();
+    loop {
+        // Read encrypted data from upstream
+        match tls.read_tls(stream) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e.into()),
+        }
+
+        let state = tls.process_new_packets()?;
+
+        // Read decrypted plaintext
+        let mut buf = vec![0u8; 16384];
+        match tls.reader().read(&mut buf) {
+            Ok(n) if n > 0 => response.extend_from_slice(&buf[..n]),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+
+        // If the peer sent close_notify, we're done
+        if state.peer_has_closed() {
+            // Drain any remaining plaintext
+            loop {
+                match tls.reader().read(&mut buf) {
+                    Ok(n) if n > 0 => response.extend_from_slice(&buf[..n]),
+                    _ => break,
+                }
+            }
+            break;
+        }
+
+        // Simple heuristic: if we have data and it looks like a complete HTTP response
+        // (has headers + body based on Content-Length or chunked), stop.
+        if response.len() > 100 {
+            let resp_str = String::from_utf8_lossy(&response);
+            if resp_str.contains("\r\n\r\n") {
+                // Check if we have Content-Length and got all the body
+                if let Some(cl_line) = resp_str.lines().find(|l| l.to_lowercase().starts_with("content-length:")) {
+                    if let Ok(cl) = cl_line.split(':').nth(1).unwrap_or("0").trim().parse::<usize>() {
+                        if let Some(body_start) = resp_str.find("\r\n\r\n") {
+                            let body_len = response.len() - body_start - 4;
+                            if body_len >= cl {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(response)
 }
 
 /// Connect to an upstream server over TLS.
