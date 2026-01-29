@@ -67,14 +67,13 @@
 
 ```
 redan exec [OPTIONS] [--] <COMMAND>
+redan exec -- claude                        # zero-config: auto-detect project, boot VM
 redan exec --image python:3.12 -- python script.py
-redan exec --image node:22 -- npm test
-redan exec -- bash                          # interactive shell, default image
-redan exec --policy ./redan.toml -- claude  # run claude code inside VM
+redan exec --allow-host api.example.com -- bash
+redan exec --policy ./redan.toml -- claude
 
-redan policy init                  # generate redan.toml with sensible defaults
-redan policy check                 # validate redan.toml
-redan policy show                  # display effective policy (merged defaults + overrides)
+redan init                         # interactive setup wizard → minimal redan.toml
+redan doctor                       # check prerequisites (KVM/HVF, libkrun, etc.)
 
 redan secret list                  # list configured secrets (names only, never values)
 redan secret test                  # verify secret backends are reachable
@@ -82,77 +81,191 @@ redan secret test                  # verify secret backends are reachable
 redan image pull <image>           # pre-pull OCI image for faster boot
 redan image list                   # list cached images
 
-redan audit show                   # show audit log for current/recent sessions
-redan audit tail                   # stream audit log
+redan audit show [session_id]      # show audit log (latest or specific session)
+redan audit tail                   # stream current session's audit log
 ```
 
 **Design principles:**
-- `redan exec` is the primary command. Everything else is secondary.
-- Minimal flags for the common case. Policy file provides the config.
+- `redan exec` works with zero config. Everything else is optional.
+- Policy file adds precision. CLI flags add overrides. Neither is required.
 - Interactive by default — stdin/stdout/stderr attached to guest process.
 - Exit code from guest process propagated to host.
+
+### 3.2.1 Zero-Config Mode (Kimi review)
+
+When no `redan.toml` exists, `redan exec` auto-detects the project type and applies sensible defaults:
+
+| Detection signal | Image | Auto-allowed hosts |
+|-----------------|-------|-------------------|
+| `package.json` | `node:22` | `registry.npmjs.org`, `nodejs.org` |
+| `requirements.txt` / `pyproject.toml` | `python:3.12` | `pypi.org`, `files.pythonhosted.org` |
+| `Cargo.toml` | `rust:latest` | `crates.io`, `static.crates.io` |
+| `go.mod` | `golang:latest` | `proxy.golang.org`, `sum.golang.org` |
+| `.git/config` with github remote | (from above) | `github.com`, `api.github.com` |
+| `.git/config` with gitlab remote | (from above) | `gitlab.com` |
+| None of the above | `ubuntu:24.04` | (none — fully isolated) |
+
+**Behavior:**
+```
+redan exec -- bash
+# redan: no redan.toml found
+# redan: detected Node.js project (package.json)
+# redan: auto-allowing: registry.npmjs.org, github.com
+# redan: image: node:22 (auto-detected)
+# redan: no secrets configured
+# redan: booting... 210ms
+```
+
+Auto-detection is additive to default-deny. Only well-known package registries and code hosts are added. The developer can refine with `redan init` or a `redan.toml`.
+
+### 3.2.2 `redan doctor`
+
+Prerequisite checker. Run before first use or when troubleshooting.
+
+```
+redan doctor
+# ✓ redan 0.1.0
+# ✓ libkrun 1.6.0 (/usr/lib/libkrun.so)
+# ✓ KVM available (/dev/kvm, user in kvm group)
+# ✓ OCI tools available (skopeo 1.14.0)
+# ✓ Ready to use
+```
+
+**Error cases:**
+
+```
+redan doctor
+# ✓ redan 0.1.0
+# ✗ libkrun not found
+#   Install: sudo dnf install libkrun-devel  (Fedora)
+#            brew install libkrun            (macOS)
+#            See https://redan.dev/install
+# ✗ KVM not available
+#   Linux: sudo modprobe kvm && sudo usermod -aG kvm $USER
+#          Then log out and back in.
+#   macOS: KVM not used. HVF should be available automatically.
+#          If this persists, check System Settings → Privacy & Security.
+```
+
+### 3.2.3 Error Messages (Kimi review)
+
+All Redan errors follow a pattern: **what happened → why → how to fix.**
+
+**Blocked host:**
+```
+redan: ✗ blocked: api.npmjs.org:443 (not in allowlist)
+
+  The agent tried to reach api.npmjs.org which isn't allowed.
+
+  Quick fix (this session only):
+    redan exec --allow-host api.npmjs.org -- claude
+
+  Permanent fix (add to redan.toml):
+    [network]
+    allow = ["api.npmjs.org"]
+```
+
+**Secret backend unreachable:**
+```
+redan: ✗ Vault unreachable: https://vault.company.com (timeout 5s)
+
+  redan.toml configures Vault for STAGING_DB_PASSWORD,
+  but the server didn't respond.
+
+  Common fixes:
+    1. Connect to VPN
+    2. Check: vault status
+    3. Use local override: redan exec --secret STAGING_DB_PASSWORD=local ...
+```
+
+**VM boot failure (no KVM):**
+```
+redan: ✗ Cannot start VM: KVM not available
+
+  Hardware virtualization is required. Run 'redan doctor' for details.
+
+  Linux: sudo modprobe kvm && sudo usermod -aG kvm $USER
+  macOS: Requires Apple Silicon with macOS 14+
+```
+
+**MITM CA rejected:**
+```
+redan: ✗ npm install failed: certificate error
+
+  npm doesn't trust Redan's session certificate.
+  This is needed for network policy and secret injection.
+
+  Fix: redan will set NODE_EXTRA_CA_CERTS automatically.
+  If this persists, report at https://github.com/.../redan/issues
+```
 
 ## 3.3 Policy Model
 
 ### redan.toml
 
+**Minimal example** (generated by `redan init`):
+
 ```toml
-# redan.toml — project-level policy for Redan sessions
-
-[vm]
-image = "python:3.12-slim"    # OCI image for guest
-cpus = 2                       # vCPU count
-memory = "2G"                  # RAM allocation
-
-[vm.mounts]
-# Host paths mounted into guest via virtio-fs
-"/workspace" = { host = ".", writable = true }
-# Additional read-only mounts
-# "/data" = { host = "/shared/datasets", writable = false }
+# redan.toml — what this project's agents can access
+image = "node:22"
 
 [network]
-# Default: deny all. Only listed hosts are reachable.
-allow = [
+allow = ["api.github.com", "api.openai.com", "registry.npmjs.org"]
+
+[secrets.GITHUB_TOKEN]
+source = "env"
+for = ["api.github.com"]
+```
+
+That's it. 6 lines. Everything else has sensible defaults (2 vCPU, 2GB RAM, project dir mounted at `/workspace`).
+
+**Full reference** (all options, for docs — not generated by `redan init`):
+
+```toml
+# redan.toml — full reference
+
+image = "python:3.12-slim"     # OCI image (default: auto-detected or ubuntu:24.04)
+cpus = 2                       # vCPU count (default: 2)
+memory = "2G"                  # RAM (default: 2G)
+
+[network]
+allow = [                      # Hostnames only. Raw IPs always blocked.
     "api.github.com",
     "api.openai.com",
     "registry.npmjs.org",
     "pypi.org",
     "files.pythonhosted.org",
 ]
-
-[network.deny]
-# Explicit deny (overrides allow, useful for blocking subdomains)
-# deny = ["internal.github.com"]
-
-[secrets]
-# Each secret: name, backend source, and which hosts it can be injected for.
-# The guest sees $GITHUB_TOKEN as a placeholder. The real value is injected
-# by the host network proxy only when the request targets an allowed host.
+# deny = ["internal.github.com"]  # Overrides allow (useful for subdomains)
 
 [secrets.GITHUB_TOKEN]
-source = "env"                           # read from host env var
-inject_for = ["api.github.com"]          # only inject for these hosts
-header = "Authorization"                 # inject as this header
-format = "Bearer {value}"                # header value format
+source = "env"                 # "env" | "1password" | "vault" | "aws-sm" | "keychain"
+for = ["api.github.com"]       # Only inject for these hosts
+header = "Authorization"       # HTTP header to inject into (default: Authorization)
+format = "Bearer {value}"      # Header value format (default: Bearer {value})
 
 [secrets.OPENAI_API_KEY]
 source = "env"
-inject_for = ["api.openai.com"]
-header = "Authorization"
-format = "Bearer {value}"
+for = ["api.openai.com"]
 
-# Enterprise example: HashiCorp Vault
-# [secrets.STAGING_DB_PASSWORD]
+# inject_mode = "env" secrets (weaker — visible inside VM):
+# [secrets.DATABASE_URL]
+# source = "env"
+# inject_mode = "env"          # ⚠️ Real value visible in VM
+# env_var = "DATABASE_URL"
+
+# Enterprise backends (v1.0):
+# [secrets.STAGING_KEY]
 # source = "vault"
-# vault_path = "secret/data/staging/db"
-# vault_key = "password"
-# inject_for = ["staging-db.internal.company.com"]
+# vault_path = "secret/data/staging/api"
+# for = ["staging-api.company.com"]
 
-# Enterprise example: AWS Secrets Manager
-# [secrets.API_KEY]
-# source = "aws-sm"
-# aws_secret_id = "prod/api-key"
-# inject_for = ["api.internal.company.com"]
+[audit]
+level = "decisions"            # "all" | "decisions" | "errors"
+
+[audit.display]
+blocked_requests = true        # Show blocked connections on stderr
+secret_injections = true       # Show injection events on stderr (name only)
 
 [audit]
 # Audit logs written to $XDG_STATE_HOME/redan/sessions/<id>/audit.jsonl

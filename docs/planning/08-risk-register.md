@@ -1,5 +1,7 @@
 # 8. Technical Risk Register
 
+*Updated with oracle review findings. 8 new risks added (R13–R20). R6 revised to High.*
+
 ## Risk Assessment Matrix
 
 | Likelihood | Impact | Rating |
@@ -13,149 +15,173 @@
 
 ---
 
-## R1: libkrun TSI Networking Insufficient for MITM Proxy
+## Original Risks (updated)
 
-**Risk:** TSI (Transparent Socket Impersonation) may not give us enough control to intercept, terminate TLS, and inject secrets. TSI is designed to transparently map guest sockets to host sockets — it may not support interception at the right layer.
-
+### R1: TSI Networking Insufficient for MITM Proxy
 | | |
 |---|---|
-| Likelihood | Medium |
-| Impact | High |
 | Rating | 🟠 High |
-| Mitigation | Prototype spike (PS-1). If TSI doesn't work, use passt/gvproxy mode with virtio-net, which gives full packet-level control. This is more complex but definitely supports MITM. |
-| Kill criteria | If neither TSI nor passt mode supports reliable MITM proxying with <50ms added latency per request, reconsider the secret injection model entirely. |
+| Mitigation | PS-1 is do-or-die. If TSI doesn't work, use passt/gvproxy mode (full packet control). |
+| Kill criteria | If neither TSI nor passt supports reliable MITM with <50ms added latency. |
+| Validated by | PS-1 |
 
-## R2: virtio-fs Performance on Large Projects
-
-**Risk:** virtio-fs adds overhead vs native filesystem. Agent workflows are filesystem-heavy (tree-walking, grep, multiple file reads/writes per tool call). If overhead is noticeable (>2x slowdown), developer experience degrades.
-
+### R2: virtio-fs Performance on Large Projects
 | | |
 |---|---|
-| Likelihood | Medium |
-| Impact | Medium |
 | Rating | 🟡 Medium |
-| Mitigation | Benchmark during spike PS-2. If slow: implement `.redanignore` to exclude large directories, use read-only cache layers for unchanged files, consider 9p as alternative to virtio-fs. |
-| Kill criteria | If filesystem operations are >5x slower than native for typical agent workflows (grep across 10K files, read 100 files sequentially), need a fundamentally different approach. |
+| Mitigation | PS-2 benchmarking. If slow: `.redanignore`, read-only cache layers, 9p alternative. |
+| Kill criteria | >5x slowdown for typical agent workflows (grep 10K files, sequential reads). |
+| Validated by | PS-2 |
 
-## R3: Agents Don't Run Transparently in MicroVM
-
-**Risk:** Claude Code, Codex, or other agents make assumptions about the host environment that break inside a microVM — specific filesystem paths, kernel features, `/proc` layout, hardware detection, container detection heuristics.
-
+### R3: Agents Don't Run Transparently in MicroVM
 | | |
 |---|---|
-| Likelihood | High |
-| Impact | Medium |
 | Rating | 🟠 High |
-| Mitigation | Prototype spike PS-3. Test each target agent. Build compatibility shims for common issues. Document known incompatibilities. |
-| Kill criteria | If >50% of agent operations fail inside the VM and can't be fixed with environment setup or shims, Layer 1 (environment injection) is not viable as the primary approach. Pivot to MCP-only (Layer 3). |
+| Mitigation | PS-3: test Claude Code, Codex, bash. Build shims for common issues. |
+| Kill criteria | >50% of agent operations fail and can't be shimmed → pivot to MCP-only (Layer 3). |
+| Validated by | PS-3 |
 
-## R4: MITM Proxy Breaks Package Managers
-
-**Risk:** npm, pip, cargo, or git reject our ephemeral CA cert due to certificate pinning, bundled CA stores, or hardcoded CA expectations. This breaks package installation inside the VM.
-
+### R4: MITM Proxy Breaks Package Managers
 | | |
 |---|---|
-| Likelihood | Medium |
-| Impact | High |
 | Rating | 🟠 High |
-| Mitigation | Prototype spike PS-4. Test all major package managers with custom CA. Most respect system CA store. For those that don't: set per-tool environment variables (e.g., `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`). |
-| Kill criteria | If major package managers can't be made to work with MITM, switch to CONNECT proxy + `inject_mode = "env"` for all secrets. Weaker guarantees but functional. |
+| Mitigation | PS-4: test npm, pip, cargo, git with ephemeral CA. Set `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`. |
+| Kill criteria | Major package managers can't work with MITM → fall back to CONNECT proxy + env injection. |
+| Validated by | PS-4 |
 
-## R5: libkrun macOS HVF Instability
-
-**Risk:** libkrun on macOS (Apple Silicon, HVF) may be less stable or have different behavior than Linux KVM. Crashes, hangs, or subtle VM behavior differences.
-
+### R5: libkrun macOS HVF Instability
 | | |
 |---|---|
-| Likelihood | Medium |
-| Impact | Medium |
 | Rating | 🟡 Medium |
-| Mitigation | Prototype spike PS-5. Stress test on macOS. Report issues upstream (Red Hat maintains libkrun). Have a fallback: macOS-only users can still use Redan with Linux VMs via Colima/Lima if native HVF is problematic. |
-| Kill criteria | If macOS crashes >5% of sessions and upstream is unresponsive, drop macOS from v1 and position as Linux-first. |
+| Mitigation | PS-1 stress test on macOS. Report upstream. Fallback: Linux-only MVP. |
+| Kill criteria | macOS crashes >5% of sessions and upstream unresponsive → drop macOS from MVP. |
+| Validated by | PS-1 |
 
-## R6: Boot Time Exceeds Usable Threshold
-
-**Risk:** VM boot + image load + network proxy setup + virtio-fs mount exceeds 500ms, making `redan exec` feel sluggish compared to running commands directly.
-
+### R6: Boot Time Exceeds Usable Threshold *(revised from 🟢 to 🟠)*
 | | |
 |---|---|
-| Likelihood | Low |
-| Impact | Medium |
-| Rating | 🟢 Low |
-| Mitigation | microsandbox achieves <200ms. We should too. Optimize: pre-extract OCI layers, minimize guest kernel, lazy-init network proxy. If still slow: implement warm pool (background pre-booted VM). |
-| Kill criteria | If boot time can't get below 1 second even with warm pool, the product is not viable for interactive use. |
-
-## R7: Competitor Feature Convergence
-
-**Risk:** microsandbox adds secret management. Gondolin stabilizes and adds x86_64. Either makes Redan redundant.
-
-| | |
-|---|---|
-| Likelihood | Medium |
-| Impact | High |
 | Rating | 🟠 High |
-| Mitigation | Ship fast. The competitive moat is the combination: single binary + secret injection + pluggable backends + enterprise-ready. Neither competitor has signaled enterprise direction. Even if they add features, the integration and UX can differentiate. |
-| Kill criteria | If a competitor ships everything Redan offers before our v1, evaluate: contribute upstream instead of competing. |
+| Rationale for upgrade | Sonnet review: real-world estimate 500-800ms cold start including OCI layer extraction, proxy init, secret backend auth, guest kernel boot. Original 🟢 was optimistic. |
+| Mitigation | Target <500ms. If >500ms: implement warm pool for v1.0, not deferred to v1.1. |
+| Kill criteria | >1s even with warm pool → product not viable for interactive use. |
+| Validated by | PS-1 |
 
-## R8: OCI Image Handling Without Docker
-
-**Risk:** Pulling, unpacking, and managing OCI images without a Docker daemon is non-trivial. Existing Rust crates for OCI operations may be immature or buggy.
-
+### R7: Competitor Feature Convergence
 | | |
 |---|---|
-| Likelihood | Medium |
-| Impact | Medium |
+| Rating | 🟠 High |
+| Mitigation | Ship fast. Focus on enterprise secret management + single binary as differentiators. Codex review: "gap may be real but pain may not be" — validate with user feedback early. |
+| Kill criteria | Competitor ships everything Redan offers before v1 → evaluate contributing upstream. |
+
+### R8: OCI Image Handling Without Docker
+| | |
+|---|---|
 | Rating | 🟡 Medium |
-| Mitigation | Evaluate `oci-distribution` and `containers-image-proxy` Rust crates. Fallback: shell out to `skopeo pull` + `umoci unpack` (both are single binaries, easy to bundle). microsandbox handles this — study their approach. |
-| Kill criteria | None — this is solvable, just a question of how much effort. |
+| Mitigation | Evaluate Rust OCI crates. Fallback: bundle `skopeo` + `umoci`. Study microsandbox's approach. |
+| Kill criteria | None — solvable, question of effort. |
+| Validated by | PS-1 (OCI evaluation) |
 
-## R9: Secret Management Backend Authentication (Bootstrap)
-
-**Risk:** Host needs credentials to authenticate to Vault/AWS/Azure to fetch agent secrets. If these bootstrap credentials are misconfigured, expired, or unavailable, the agent can't access any secrets.
-
+### R9: Secret Management Backend Authentication (Bootstrap)
 | | |
 |---|---|
-| Likelihood | High |
-| Impact | Medium |
 | Rating | 🟠 High |
-| Mitigation | Clear error messages when backend auth fails. `redan secret test` command for pre-flight checks. For enterprise: document SSO/OIDC flows for bootstrap. For solo devs: `env` backend has no bootstrap — it's just env vars. |
-| Kill criteria | None — this is a UX problem, not a fundamental limitation. |
+| Mitigation | Clear error messages. `redan secret test` for pre-flight. Concrete bootstrap flows documented (Section 4a.4). For MVP: env backend has no bootstrap. |
+| Kill criteria | None — UX problem, not fundamental. |
 
-## R10: JS Network Stack as Attack Surface (Gondolin-specific, informational)
+### R10: (Informational) JS Network Stack as Attack Surface
+Not applicable to Redan (Rust proxy, not Gondolin's JS stack).
 
-**Not applicable to Redan** (we use Rust, not Gondolin's JS stack). Noted for completeness: Gondolin's network stack is written in JavaScript, which introduces a larger attack surface than a Rust implementation. Our Rust proxy benefits from memory safety and smaller attack surface.
-
-## R11: Host Process Memory Exposure
-
-**Risk:** Real secret values live in host process memory during the session. Local privilege escalation on the host could read `/proc/<redan_pid>/mem` and extract secrets.
-
+### R11: Host Process Memory Exposure
 | | |
 |---|---|
-| Likelihood | Low |
-| Impact | High |
 | Rating | 🟡 Medium |
-| Mitigation | Use `mlock()` to prevent secret pages from being swapped to disk. Use `madvise(MADV_DONTDUMP)` to exclude from core dumps. Use `zeroize` crate to clear secrets on drop. These are defense-in-depth — if the host is compromised, the attacker has bigger problems. |
-| Kill criteria | None — this is a known limitation of any process-based secret handling. Document it. |
+| Mitigation | `mlock()`, `madvise(MADV_DONTDUMP)`, `zeroize` crate. Defense-in-depth — if host is compromised, attacker has bigger problems. |
+| Kill criteria | None — inherent to any process-based secret handling. Document it. |
 
-## R12: Agent Execution Model Changes
-
-**Risk:** Claude Code, Codex, Cursor, or other agents change their execution model in ways that break VM compatibility. New sandboxing approaches, new tool execution patterns, new assumptions about the environment.
-
+### R12: Agent Execution Model Changes
 | | |
 |---|---|
-| Likelihood | High |
-| Impact | Medium |
 | Rating | 🟠 High |
-| Mitigation | Track agent changelogs. Run compatibility tests in CI against latest agent versions. Layer 1 (environment injection) is the most resilient — if it runs in Linux, it runs in our VM. Layer 3 (MCP) is protocol-stable. |
-| Kill criteria | None — adapt and maintain. This is ongoing product work, not a fundamental risk. |
+| Mitigation | Track changelogs. CI compat tests against latest agent versions. Layer 1 is most resilient. |
+| Kill criteria | None — ongoing product work. |
+
+---
+
+## New Risks (from oracle reviews)
+
+### R13: Git Hooks Persistence Attack *(Opus Finding 2)*
+| | |
+|---|---|
+| Rating | 🔴 Critical |
+| Description | Compromised agent writes malicious `.git/hooks/pre-commit` → VM tears down → developer runs `git commit` → hook executes on host with developer's full identity → credential exfiltration outside Redan. |
+| Extends to | `.github/workflows/`, `.vscode/tasks.json`, `Makefile`, `.husky/`, `package.json` scripts. |
+| Mitigation | Snapshot executable files at session start, diff at teardown, warn developer (Section 3.6.1). v1.1: mount `.git/hooks/` read-only. |
+| Kill criteria | None — mitigated by detection. Cannot fully prevent without breaking legitimate hook creation. |
+
+### R14: Symlink Traversal via virtio-fs *(Opus Finding 1)*
+| | |
+|---|---|
+| Rating | 🟠 High |
+| Description | Pre-existing symlinks in project directory point to host paths outside mount (e.g., `node_modules/` symlink → `~/`). If virtiofsd follows them, agent reads host files. |
+| Mitigation | Configure virtiofsd in chroot mode. Adversarial test in PS-2. (Section 2.2.1) |
+| Kill criteria | If libkrun's virtio-fs doesn't support symlink restriction → need alternative mount strategy. |
+| Validated by | PS-2 |
+
+### R15: Audit Log in Agent-Writable Directory *(Opus Finding 8)*
+| | |
+|---|---|
+| Rating | 🟠 High *(mitigated — moved to host-only path)* |
+| Description | Original design stored audit at `.redan/audit.jsonl` (inside project dir mounted in VM). Agent could tamper with own audit trail. |
+| Status | **FIXED.** Audit log moved to `$XDG_STATE_HOME/redan/sessions/<id>/audit.jsonl` (Section 3.7). Agent has no access. |
+
+### R16: OCI Image Supply Chain *(Opus Finding 19)*
+| | |
+|---|---|
+| Rating | 🟠 High |
+| Description | Stock OCI images from public registries could be compromised (registry takeover, typosquatting). Compromised image = compromised guest from the start. |
+| Mitigation | v1: document image integrity as user responsibility. Recommend digest pinning (`python:3.12@sha256:...`). v1.1: cosign/sigstore verification. |
+| Kill criteria | None — standard supply chain risk. |
+
+### R17: Raw IP Connections Bypass Hostname Policy *(Opus Finding 3)*
+| | |
+|---|---|
+| Rating | 🟠 High *(mitigated — raw IPs now blocked)* |
+| Description | Guest connects by IP address, bypassing hostname-based allowlist. |
+| Status | **FIXED.** All raw IP connections blocked by default (Section 3.3 network policy semantics). |
+
+### R18: Response Reflection Exposes Secrets *(All security oracles)*
+| | |
+|---|---|
+| Rating | 🟡 Medium |
+| Description | Authorized API echoes injected secret in response body → agent reads → writes to project file → persists on host disk. |
+| Mitigation | Response header scrubbing (v1). Body scrubbing deferred (v1.1). Documented residual risk: secrets may appear in response bodies. Combined with executable file warnings and network policy. |
+| Kill criteria | None — defense-in-depth. |
+
+### R19: Domain Fronting via Allowed Hosts *(Opus Finding 4)*
+| | |
+|---|---|
+| Rating | 🟡 Medium |
+| Description | Agent connects to allowed host but sends HTTP `Host: evil.com` header → CDN routes to attacker's backend. |
+| Mitigation | **FIXED.** Host header validation: proxy verifies `Host`/`:authority` matches TCP destination (Section 3.3). |
+
+### R20: HTTP Request Smuggling Through Proxy *(Opus Finding 7)*
+| | |
+|---|---|
+| Rating | 🟡 Medium |
+| Description | CL/TE desync between proxy and destination could allow crafted requests to bypass injection/policy. |
+| Mitigation | Use `hyper` for all HTTP parsing (well-tested, Rust). No custom parsers. Run OWASP smuggling test suite in CI. |
+| Kill criteria | None — standard proxy hardening. |
+
+---
 
 ## Risk Summary
 
 | Rating | Count | Risks |
 |--------|-------|-------|
-| 🔴 Critical | 0 | — |
-| 🟠 High | 6 | R1, R3, R4, R7, R9, R12 |
-| 🟡 Medium | 4 | R2, R5, R8, R11 |
-| 🟢 Low | 1 | R6 |
+| 🔴 Critical | 1 | R13 (git hooks persistence) |
+| 🟠 High | 8 | R1, R3, R4, R6, R7, R9, R12, R16 |
+| 🟠 High (mitigated) | 3 | R14 (symlinks), R15 (audit log), R17 (raw IP) |
+| 🟡 Medium | 5 | R2, R5, R8, R11, R18, R19, R20 |
+| 🟢 Low | 0 | — |
 
-**No critical risks.** Six high risks, all addressable via prototype spikes or execution speed. The biggest existential risk is R7 (competitor convergence) — mitigated by shipping fast and focusing on the enterprise secret management angle that no competitor has.
+**One critical risk (R13).** Mitigated by detection/warning — the architecture can't prevent all project file writes without breaking legitimate agent workflows. Six high risks requiring spike validation (R1, R3, R4, R6). Three high risks already mitigated by architectural changes from oracle review (R14, R15, R17).

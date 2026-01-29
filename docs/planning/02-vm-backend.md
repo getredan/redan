@@ -237,13 +237,29 @@ MITM has drawbacks (CA trust, certificate pinning breakage). Alternative approac
 
 | Protocol | Handling |
 |----------|---------|
-| HTTP/HTTPS | Full proxy with optional secret injection |
-| SSH | Allow/deny by host. Secret injection possible via agent forwarding from host. |
-| DNS | Resolve on host side. Guest DNS queries routed to host resolver. No direct external DNS. |
-| WebSocket | Treated as HTTP upgrade. Same host allowlist applies. |
-| gRPC | HTTP/2 based. Same handling as HTTPS. |
-| Raw TCP | Allow/deny by host:port. No content inspection. |
-| UDP | Block by default. Allow specific host:port if configured. |
+| HTTP/HTTPS | Full MITM proxy with secret injection and response header scrubbing |
+| SSH | Allow/deny by host. Consider host-side agent forwarding. |
+| DNS | Resolve on host side. Guest queries routed to host resolver. No direct external DNS. |
+| WebSocket | Treated as HTTP upgrade. Same host allowlist. |
+| gRPC | HTTP/2 based. Same as HTTPS. |
+| Raw TCP | Allow/deny by host:port. No content inspection. No secret injection. |
+| UDP | Block by default (MVP). |
+| QUIC/HTTP3 | Block in MVP (UDP-based, complex to proxy). |
+| ICMP | Block. Prevents ping-based exfiltration. |
+| Raw IP connections | **Always blocked.** Policy is hostname-based only. |
+
+### Blocked Address Ranges (enforced at proxy, not configurable)
+
+| Range | Protocol | Reason |
+|-------|----------|--------|
+| `127.0.0.0/8` | IPv4 | Localhost — prevent access to host services |
+| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | IPv4 | Private ranges — prevent LAN access |
+| `169.254.0.0/16` | IPv4 | Link-local — prevent cloud metadata access |
+| `100.64.0.0/10` | IPv4 | CGNAT — prevent carrier-grade NAT access |
+| `::1/128` | IPv6 | Localhost |
+| `fe80::/10` | IPv6 | Link-local |
+| `fc00::/7` | IPv6 | Unique-local (private) |
+| `ff00::/8` | IPv6 | Multicast — prevent mDNS/LLMNR leakage |
 
 ## 2.6 Comparison with microsandbox's Approach
 

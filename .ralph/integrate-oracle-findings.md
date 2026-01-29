@@ -31,11 +31,11 @@ Incorporate all oracle review findings into the planning documents. Resolve disa
 - [x] 11. Bootstrap flows: concrete per-backend (Vault, AWS, 1Password, env)
 
 ### Phase 3: DX & Scope Improvements
-- [ ] 12. Update 05-mvp-scope.md: tighten MVP scope per synthesis (one agent, one backend, conditional macOS)
-- [ ] 13. Update 03-architecture.md: add zero-config mode (auto-detect from project files)
-- [ ] 14. Update 03-architecture.md: simplify redan.toml default template (6-10 lines)
-- [ ] 15. Update 03-architecture.md: design `redan doctor` command
-- [ ] 16. Update 03-architecture.md: design actionable error messages for common failures
+- [x] 12. MVP scope rewritten: tighter constraints, honest security story, zero-config US-1
+- [x] 13. Zero-config: 3.2.1 auto-detection table (Node/Python/Rust/Go/git)
+- [x] 14. redan.toml: minimal 6-line + full reference separately
+- [x] 15. redan doctor: 3.2.2 prereq checks + error output
+- [x] 16. Error messages: 3.2.3 what/why/fix pattern, 4 scenarios
 
 ### Phase 4: Risk & Prototype Updates
 - [ ] 17. Update 08-risk-register.md: add R13-R20 from synthesis, revise R6 to High
