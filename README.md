@@ -111,12 +111,11 @@ See [docs/planning/](docs/planning/) for:
 
 ## Acknowledgments
 
-- **[libkrun](https://github.com/containers/libkrun)** - the microVM library at the heart of Redan. By [Sergio Lopez](https://github.com/slp) and the [containers](https://github.com/containers) org.
-- **[libkrunfw](https://github.com/containers/libkrunfw)** - guest kernel firmware consumed by libkrun.
-- **[Gondolin](https://github.com/earendil-works/gondolin)** - QEMU-based agent sandbox with network-layer secret injection via a JS network stack. Redan adopts the same core idea (inject secrets at the proxy, not in the VM) with a different implementation.
-- **[microsandbox](https://github.com/zerocore-ai/microsandbox)** by [Zerocore](https://github.com/zerocore-ai) - libkrun-based sandboxes for AI agents with a server/client architecture. Informed our decision to go single-process instead.
-- **[krunvm](https://github.com/containers/krunvm)** - CLI for creating libkrun microVMs from OCI images.
-- **[passt](https://passt.top/)** - userspace network stack by [Stefano Brivio](https://passt.top/). Alternative to TSI when packet-level control is needed.
+- **[libkrun](https://github.com/containers/libkrun)** and **[libkrunfw](https://github.com/containers/libkrunfw)** - the microVM engine and guest firmware
+- **[Gondolin](https://github.com/earendil-works/gondolin)** - network-layer secret injection for agent sandboxes
+- **[microsandbox](https://github.com/zerocore-ai/microsandbox)** - libkrun-based sandboxes for AI agents
+- **[krunvm](https://github.com/containers/krunvm)** - CLI for creating libkrun microVMs from OCI images
+- **[passt](https://passt.top/)** - userspace network stack
 
 ## License
 
