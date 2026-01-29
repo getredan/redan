@@ -10,8 +10,8 @@ secret injection. Agents get a real dev environment -- node, git, python,
 your project files -- but can't see host credentials, can't reach hosts
 you didn't allow, and never observe the real values of injected secrets.
 
-> *redan (n.): a V-shaped fieldwork forming a salient angle toward the
-> enemy.*
+> *redan (/ɹɪˈdæn/): a V-shaped fieldwork forming a salient angle toward
+> the enemy.*
 
 ## How it works
 
