@@ -1,2 +1,6 @@
 /target/
 **/target/
+
+# AI agent state
+.ralph/
+.claude/
