@@ -20,6 +20,16 @@ use net::VirtioNetDevice;
 const GATEWAY_IP: Ipv4Address = Ipv4Address::new(192, 168, 127, 1);
 const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
 
+/// A secret that the proxy knows how to inject.
+struct SecretBinding {
+    /// Placeholder token visible to the guest
+    placeholder: String,
+    /// Real secret value (only in host memory)
+    real_value: String,
+    /// Hosts this secret may be injected for
+    allowed_hosts: Vec<String>,
+}
+
 fn main() {
     env_logger::init();
     println!("PS-4: MITM proxy test");
@@ -28,6 +38,20 @@ fn main() {
     // Generate ephemeral CA
     let mitm_ca = MitmCa::generate();
     println!("[host] MITM CA generated");
+
+    // Configure a test secret. In production, this comes from redan.toml + secret backends.
+    let real_token = std::env::var("REDAN_TEST_TOKEN")
+        .unwrap_or_else(|_| "ghp_FAKE_TOKEN_FOR_TESTING_12345".to_string());
+    let placeholder = "redan_ph_github_a1b2c3d4".to_string();
+    let secrets = vec![SecretBinding {
+        placeholder: placeholder.clone(),
+        real_value: real_token,
+        allowed_hosts: vec!["api.github.com".into(), "httpbin.org".into()],
+    }];
+    println!(
+        "[host] secret configured: placeholder={placeholder}, allowed_hosts={:?}",
+        secrets[0].allowed_hosts
+    );
 
     // Write CA cert to a temp file that we'll inject into the guest rootfs
     let ca_pem_path = "/tmp/redan-ca.pem";
@@ -92,8 +116,7 @@ fn main() {
         };
         assert!(ret >= 0);
 
-        // Guest: configure network, make HTTPS request through our proxy.
-        // DNS not available (no UDP handler yet), so use /etc/hosts.
+        // Guest: configure network, use placeholder token in requests.
         let exec_path = CString::new("/bin/busybox").unwrap();
         let arg0 = CString::new("ash").unwrap();
         let arg1 = CString::new("-c").unwrap();
@@ -104,15 +127,11 @@ fn main() {
              echo '192.168.127.1 httpbin.org' >> /etc/hosts; \
              echo GUEST_NET_UP; \
              \
-             echo CA_CHECK; \
-             grep -c BEGIN /etc/ssl/certs/ca-certificates.crt; \
-             tail -5 /etc/ssl/certs/ca-certificates.crt; \
+             echo ECHO_TOKEN; \
+             echo $GITHUB_TOKEN; \
              \
-             echo TEST_HTTP; \
-             wget -q -O - http://192.168.127.1:80/ 2>&1; \
-             \
-             echo TEST_HTTPS; \
-             wget -q -O - https://httpbin.org/get 2>&1; \
+             echo TEST_SECRET_INJECTION; \
+             wget -q -O - --header X-Auth-Token:$GITHUB_TOKEN https://httpbin.org/get 2>&1; \
              \
              echo GUEST_DONE",
         )
@@ -125,13 +144,14 @@ fn main() {
         )
         .unwrap();
         let term = CString::new("TERM=xterm").unwrap();
-        // Point directly at our CA cert for the spike.
-        // In production, we'd prepend to the full bundle.
         let ssl_cert = CString::new("SSL_CERT_FILE=/etc/ssl/certs/redan-ca.pem").unwrap();
+        // Guest sees the placeholder, never the real token
+        let github_token = CString::new(format!("GITHUB_TOKEN={placeholder}")).unwrap();
         let envp: Vec<*const i8> = vec![
             path_env.as_ptr(),
             term.as_ptr(),
             ssl_cert.as_ptr(),
+            github_token.as_ptr(),
             std::ptr::null(),
         ];
 
@@ -149,7 +169,7 @@ fn main() {
     });
 
     // Host side: smoltcp + MITM proxy
-    run_proxy(host_sock, &mitm_ca);
+    run_proxy(host_sock, &mitm_ca, &secrets);
 
     println!("[host] waiting for VM...");
     match vm_thread.join() {
@@ -193,7 +213,7 @@ enum ConnState {
     Done,
 }
 
-fn run_proxy(host_sock: UnixStream, ca: &MitmCa) {
+fn run_proxy(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding]) {
     let mut device = VirtioNetDevice::new(host_sock);
 
     let config = Config::new(GATEWAY_MAC.into());
@@ -235,7 +255,7 @@ fn run_proxy(host_sock: UnixStream, ca: &MitmCa) {
             // Process active connections
             let mut done_ports: Vec<u16> = Vec::new();
             for (&port, conn) in connections.iter_mut() {
-                process_connection(&mut sockets, conn, ca);
+                process_connection(&mut sockets, conn, ca, secrets);
                 if conn.state == ConnState::Done {
                     done_ports.push(port);
                 }
@@ -300,7 +320,7 @@ fn check_accept(
     }
 }
 
-fn process_connection(sockets: &mut SocketSet, conn: &mut ProxyConn, ca: &MitmCa) {
+fn process_connection(sockets: &mut SocketSet, conn: &mut ProxyConn, ca: &MitmCa, secrets: &[SecretBinding]) {
     let sock = sockets.get_mut::<tcp::Socket>(conn.handle);
 
     match conn.state {
@@ -430,21 +450,49 @@ fn process_connection(sockets: &mut SocketSet, conn: &mut ProxyConn, ca: &MitmCa
                     println!("[host]   {line}");
                 }
 
+                // SECRET INJECTION: replace placeholders with real values
+                let hostname = conn.sni.as_deref().unwrap_or("");
+                let mut request_data = plaintext[..pt_bytes].to_vec();
+                for secret in secrets {
+                    if secret.allowed_hosts.iter().any(|h| h == hostname) {
+                        let before_len = request_data.len();
+                        let request_str = String::from_utf8_lossy(&request_data).to_string();
+                        if request_str.contains(&secret.placeholder) {
+                            let injected = request_str.replace(&secret.placeholder, &secret.real_value);
+                            request_data = injected.into_bytes();
+                            println!(
+                                "[host] SECRET INJECTED: replaced placeholder for {hostname} ({before_len} -> {} bytes)",
+                                request_data.len()
+                            );
+                        }
+                    }
+                }
+
                 // Forward to upstream via a blocking helper.
-                // This is fine for a spike (one request at a time).
                 if let (Some(stream), Some(tls)) =
                     (conn.upstream.as_mut(), conn.upstream_tls.as_mut())
                 {
-                    match relay_upstream(stream, tls, &plaintext[..pt_bytes]) {
+                    match relay_upstream(stream, tls, &request_data) {
                         Ok(response) => {
-                            let resp_text = String::from_utf8_lossy(&response);
-                            println!("[host] upstream response ({} bytes):", response.len());
+                            // RESPONSE SCRUBBING: replace real values with placeholders
+                            let mut scrubbed = response;
+                            for secret in secrets {
+                                let resp_str = String::from_utf8_lossy(&scrubbed).to_string();
+                                if resp_str.contains(&secret.real_value) {
+                                    let cleaned = resp_str.replace(&secret.real_value, &secret.placeholder);
+                                    scrubbed = cleaned.into_bytes();
+                                    println!("[host] RESPONSE SCRUBBED: real value removed");
+                                }
+                            }
+
+                            let resp_text = String::from_utf8_lossy(&scrubbed);
+                            println!("[host] upstream response ({} bytes):", scrubbed.len());
                             for line in resp_text.lines().take(3) {
                                 println!("[host]   {line}");
                             }
 
                             // Send back to guest through our server TLS
-                            guest_tls.writer().write_all(&response).ok();
+                            guest_tls.writer().write_all(&scrubbed).ok();
                             let mut guest_out = Vec::new();
                             guest_tls.write_tls(&mut guest_out).ok();
                             sock.send_slice(&guest_out).ok();
