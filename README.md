@@ -109,6 +109,17 @@ See [docs/planning/](docs/planning/) for:
 - Agent identity management
 - Compliance reporting
 
+## Acknowledgments
+
+Redan builds on great work by others:
+
+- **[libkrun](https://github.com/containers/libkrun)** - the microVM engine at the heart of Redan. Created by Sergio Lopez and the containers team. libkrun's TSI (Transparent Socket Impersonation) networking and virtio-fs support make the "invisible VM" experience possible.
+- **[libkrunfw](https://github.com/containers/libkrunfw)** - the guest kernel firmware bundled with libkrun.
+- **[Gondolin](https://github.com/earendil-works/gondolin)** - Nicholas Charriere's agent sandbox that pioneered network-layer secret injection. Redan adopts Gondolin's core insight: inject secrets at the network proxy, not in the execution environment. Different implementation (Rust + libkrun vs JS + Apple Virtualization), same security model.
+- **[microsandbox](https://github.com/zerocore-ai/microsandbox)** - closest existing project to Redan. Demonstrated that libkrun works well for AI agent sandboxing. Their daemon architecture informed our decision to go the other way (single process, no daemon).
+- **[krunvm](https://github.com/containers/krunvm)** - CLI tool for managing libkrun microVMs. Reference for how to use the libkrun API.
+- **[passt](https://passt.top/)** - userspace network stack that provides an alternative to TSI when full packet-level control is needed.
+
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).

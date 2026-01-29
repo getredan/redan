@@ -1,0 +1,11 @@
+[package]
+name = "redan"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Secure, local-first execution environment for AI coding agents"
+repository = "https://github.com/getredan/redan"
+
+[dependencies]
+
+[dev-dependencies]
