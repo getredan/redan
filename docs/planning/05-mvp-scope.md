@@ -47,30 +47,33 @@ One command. Real security. No cloud account. No daemon.
 **US-9: Image selection**
 > As a developer, I specify `--image python:3.12` or rely on auto-detection (project has `package.json` → node image).
 
+**US-10: Vault backend**
+> As a platform engineer, I configure `source = "vault"` with agent-scoped policies. Redan authenticates via `VAULT_TOKEN` or AppRole.
+
+**US-11: AWS Secrets Manager backend**
+> As a platform engineer, I configure `source = "aws-sm"` with agent-specific IAM role. Redan uses standard AWS credential chain.
+
+**US-12: Secret health check**
+> As a developer, `redan secret test` verifies backends are reachable and secrets are retrievable before starting a session.
+
 ### Should-Have (v1.0, post-MVP)
 
-**US-10: 1Password CLI backend**
+**US-13: 1Password CLI backend**
 > As a solo developer, I configure `source = "1password"` and my secrets are retrieved via `op` CLI with biometric unlock. No secrets in shell environment.
-
-**US-11: Vault backend**
-> As a platform engineer, I configure `source = "vault"` with agent-scoped policies.
-
-**US-12: AWS Secrets Manager backend**
-> As a platform engineer, I configure `source = "aws-sm"` with agent-specific IAM role.
-
-**US-13: Secret health check**
-> As a developer, `redan secret test` verifies backends are reachable and secrets are retrievable.
 
 **US-14: Global config**
 > As a developer, I set defaults in `~/.config/redan/config.toml` that apply to all projects unless overridden.
 
+**US-15: Azure Key Vault / GCP Secret Manager**
+> As a platform engineer, I configure `source = "azure-kv"` or `source = "gcp-sm"` with native IAM.
+
 ### Nice-to-Have (v1.x)
 
-**US-15: MCP server** — expose sandboxed execution as MCP tools.
-**US-16: Pi extension** — transparent tool call interception for Pi users.
-**US-17: Warm pool** — pre-booted VM for instant startup.
-**US-18: Named volumes** — persistent package caches across sessions.
-**US-19: `.redanignore`** — exclude large directories from virtio-fs mount.
+**US-16: MCP server** — expose sandboxed execution as MCP tools.
+**US-17: Pi extension** — transparent tool call interception for Pi users.
+**US-18: Warm pool** — pre-booted VM for instant startup.
+**US-19: Named volumes** — persistent package caches across sessions.
+**US-20: `.redanignore`** — exclude large directories from virtio-fs mount.
 
 ## 5.3 Happy Path Walkthrough
 
@@ -156,41 +159,56 @@ GITHUB_TOKEN=ghp_xxx redan exec -- claude
 
 **One command:** `redan exec`
 **One config format:** `redan.toml` (optional — zero-config works)
-**One secret backend:** `env`
+**Three secret backends:** `env`, Vault, AWS Secrets Manager
 **One agent verified:** Claude Code (others may work but aren't tested)
 **One primary platform:** Linux x86_64 (macOS aarch64 conditional on spike results)
 **One protocol class:** HTTPS via MITM proxy (non-HTTP blocked in MVP)
 
-## 5.6 What's NOT in v1
+## 5.6 What's NOT in MVP
 
-| Feature | Why Not | When |
-|---------|---------|------|
-| Enterprise secret backends (Vault, AWS, Azure, GCP) | Scope. env is sufficient for MVP validation. | v1.0 |
-| 1Password CLI backend | Scope. Strongest solo-dev backend but adds effort. | v1.0 |
-| MCP server | Scope. Layer 1 (env injection) is the MVP. | v1.1 |
-| Pi extension | Scope. Requires tracking Pi's extension API. | v1.1 |
-| Warm pool | Boot time acceptable for MVP (<500ms target). | v1.1 |
-| Crux architecture | v2 refactor. Not needed for CLI. | v2 |
-| Desktop GUI (Tauri) | CLI is sufficient. Let feedback drive this. | v2 |
-| Mobile monitoring | Requires Crux + API server. | v2 |
-| Windows native | WSL2 is the interim story. | v2 |
-| Docker-in-VM | Fundamentally hard. Different use case. | Out of scope |
-| Non-HTTP protocol secret injection | Block non-HTTP in MVP. env injection for v1.0. | v1.0 |
-| Response body scrubbing | Header scrubbing only. Bodies too expensive. | v1.1 |
-| Audit log signing (HMAC) | Best-effort integrity for MVP. | v1.1 |
+| Feature | Why Not | When | Repo |
+|---------|---------|------|------|
+| 1Password CLI backend | Fast-follow after MVP | v1.0 | redan |
+| Azure Key Vault | Fast-follow | v1.0 | redan |
+| GCP Secret Manager | Fast-follow | v1.0 | redan |
+| macOS Keychain | Fast-follow | v1.0 | redan |
+| MCP server | Layer 1 is the MVP | v1.1 | redan |
+| Pi extension | Requires tracking Pi's extension API | v1.1 | redan |
+| Warm pool | Boot time acceptable for MVP | v1.1 | redan |
+| Central policy server | Enterprise feature | v1.0 | redan-enterprise |
+| Remote audit forwarding | Enterprise feature | v1.0 | redan-enterprise |
+| HMAC-chained audit logs | Enterprise feature | v1.0 | redan-enterprise |
+| Org-wide policy enforcement | Enterprise feature | v1.0 | redan-enterprise |
+| Agent identity management | Enterprise feature | v1.1 | redan-enterprise |
+| Compliance dashboards | Enterprise feature | v1.1 | redan-enterprise |
+| Crux architecture | v2 refactor | v2 | redan |
+| Desktop GUI (Tauri) | Let feedback drive this | v2 | redan |
+| Windows native | WSL2 is interim | v2 | redan |
+| Docker-in-VM | Different use case | Out of scope | — |
+
+## 5.7 Repository & License Structure
+
+| Repo | License | Contains |
+|------|---------|----------|
+| `redan/redan` | BSD-3-Clause | CLI, VM, proxy, all secret backends, local audit, MCP server |
+| `redan/redan-enterprise` | BSL-1.1 | Policy server, remote audit, HMAC signing, org enforcement, compliance |
+
+**Principle:** Every feature a developer or small team needs is in the open-source core. Enterprise adds organizational management and compliance — things that only matter when you have 50+ developers using Redan and need central policy, audit forwarding, and reporting.
+
+**Backend boundary:** All secret backends (env, Vault, AWS SM, Azure KV, GCP SM, 1Password, Keychain) are in the open core. The enterprise repo never touches secret retrieval — it manages policies and audit streams.
 
 ## Key Decisions
 
-1. **Zero-config mode is MVP.** `redan exec` works without `redan.toml` via auto-detection. Config is additive, not mandatory. ✅
+1. **Zero-config mode is MVP.** `redan exec` works without `redan.toml`. Config is additive. ✅
 
-2. **`redan init` replaces `redan policy init`.** Interactive wizard, minimal output. ✅
+2. **Three secret backends in MVP:** env, Vault, AWS SM. Others fast-follow. ✅
 
-3. **`redan doctor` for prereqs.** Catches KVM/libkrun issues before the developer wastes time. ✅
+3. **BSD-3-Clause for open core.** Following Tailscale/Sentry model. ✅
 
-4. **`env` is the only secret backend for MVP.** Honest about its limitations. 1Password/Vault are v1.0. ✅
+4. **BSL-1.1 for enterprise.** Prevents competitors from hosting as SaaS. Converts to open source after change date. ✅
 
 5. **Linux x86_64 primary. macOS conditional.** Don't hold MVP for cross-platform parity. ✅
 
-6. **Boot time target revised to <500ms** (up from <300ms per Sonnet review). Acceptable for interactive use. ✅
+6. **Boot time target <500ms.** Acceptable for interactive use. ✅
 
 7. **redan.toml committed to repo** (default). Policy as code. No secrets in the file. ✅

@@ -43,7 +43,18 @@ All sections drafted, oracle-reviewed by 4 models, findings integrated. Next ste
 | Config | Optional TOML + zero-config auto-detection | Low friction, progressive disclosure |
 | Audit | Host-only JSONL (tamper-proof from guest) | Agent can't modify audit trail |
 | Escape hatches | --allow-all-hosts (logged), NO --no-sandbox | Can't fully disable security |
-| License | Apache-2.0 | Enterprise-friendly |
+| License | BSD-3-Clause (open core) | Tailscale/Sentry model |
+| MVP backends | env, Vault, AWS SM | Three backends cover most users |
+| Enterprise | Separate repo (BSL-1.1) | Policy server, remote audit, compliance |
+
+## Repository Structure
+
+| Repo | License | Purpose |
+|------|---------|---------|
+| **redan** (this repo) | BSD-3-Clause | CLI, VM, proxy, all secret backends, local audit |
+| **redan-enterprise** | BSL-1.1 | Policy server, remote audit, HMAC signing, org enforcement |
+
+See [redan-enterprise planning](../../../redan-enterprise/docs/planning/) for enterprise specs.
 
 ## References
 
