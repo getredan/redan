@@ -6,6 +6,24 @@ license = "BSD-3-Clause"
 description = "Secure, local-first execution environment for AI coding agents"
 repository = "https://github.com/getredan/redan"
 
+[lib]
+name = "redan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "redan"
+path = "src/main.rs"
+
 [dependencies]
+smoltcp = { version = "0.12.0", features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "log"] }
+rustls = "0.23.36"
+rustls-pemfile = "2.2"
+rcgen = "0.14.7"
+webpki-roots = "1.0"
+log = "0.4.29"
+env_logger = "0.11.8"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+clap = { version = "4.5", features = ["derive"] }
 
 [dev-dependencies]

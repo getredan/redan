@@ -1,0 +1,31 @@
+[tasks.check]
+description = "Fast local gate: format + lint + test"
+run = "mise run format && mise run lint && mise run test"
+
+[tasks.format]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks.format-check]
+description = "Verify formatting"
+run = "cargo fmt -- --check"
+
+[tasks.lint]
+description = "Lint with clippy"
+run = "cargo clippy -- -D warnings"
+
+[tasks.test]
+description = "Run unit tests"
+run = "cargo test --lib"
+
+[tasks.test-integration]
+description = "Run integration tests (requires KVM + /tmp/redan-rootfs)"
+run = "cargo test --test integration -- --ignored"
+
+[tasks.build]
+description = "Build release binary"
+run = "cargo build --release"
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "cargo clean"
