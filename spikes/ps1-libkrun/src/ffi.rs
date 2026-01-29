@@ -45,4 +45,14 @@ unsafe extern "C" {
 
     // Console output
     pub fn krun_set_console_output(ctx_id: u32, filepath: *const c_char) -> i32;
+
+    // virtio-net with unix stream socket (replaces TSI)
+    pub fn krun_add_net_unixstream(
+        ctx_id: u32,
+        c_path: *const c_char,
+        fd: c_int,
+        c_mac: *const u8,
+        features: u32,
+        flags: u32,
+    ) -> i32;
 }
