@@ -18,7 +18,11 @@
 | 7 | [v2+ Architecture](07-v2-architecture.md) | ✅ Draft | Crux-based split, mobile/desktop shells, migration |
 | 8 | [Technical Risk Register](08-risk-register.md) | ✅ Draft | Risks, mitigations, kill criteria |
 | 9 | [Prototype Plan](09-prototype-plan.md) | ✅ Draft | Spikes, order, success criteria |
-| R | [Oracle Reviews](reviews/) | ⬜ Pending | Codex review, Claude review, synthesis |
+| R1 | [Review: Codex (Skeptical Engineer)](review-codex.md) | ✅ | 13 findings, 2 Critical |
+| R2 | [Review: Kimi 2.5 (Product/UX)](review-kimi.md) | ✅ | 8 sections, adoption focus |
+| R3 | [Review: Sonnet 4.5 (Security Architect)](review-claude.md) | ✅ | 4 Critical, 11 High |
+| R4 | [Review: Opus 4.6 (Deep Security)](review-opus.md) | ✅ | 22 findings, attack trees |
+| R5 | [**Review Synthesis**](review-synthesis.md) | ✅ | Consolidated actions, risk updates |
 
 ## Architectural Decision Record
 
