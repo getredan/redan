@@ -37,7 +37,7 @@
 │  └─────────────┘                                                   │
 │                                                                     │
 │  ┌─────────────┐                                                   │
-│  │ Audit Log   │  Structured JSONL to file or stdout               │
+│  │ Audit Log   │  Structured JSONL to host-only path (not in VM)   │
 │  └─────────────┘                                                   │
 └─────────────────────────────────────────────────────────────────────┘
           │ virtio-vsock (TSI)     │ virtio-fs
@@ -155,16 +155,15 @@ format = "Bearer {value}"
 # inject_for = ["api.internal.company.com"]
 
 [audit]
-enabled = true
-file = ".redan/audit.jsonl"             # relative to project root
-# stdout = true                         # also print policy decisions to stderr
+# Audit logs written to $XDG_STATE_HOME/redan/sessions/<id>/audit.jsonl
+# NOT in the project directory (agent cannot tamper with its own audit trail)
 level = "decisions"                      # "all" | "decisions" | "secrets" | "errors"
 
 [audit.display]
 # Show blocked requests to the user in real-time (stderr)
 blocked_requests = true
 # Show secret injections (name only, never value)
-secret_injections = false
+secret_injections = true
 ```
 
 ### Policy Resolution Order
@@ -178,11 +177,21 @@ secret_injections = false
 ### Network Policy Semantics
 
 - Default deny: no network access unless explicitly allowed
-- Allow is a list of hostnames (not IPs — DNS resolution happens on the host)
+- Allow is a list of **hostnames** (not IPs — DNS resolution happens on the host)
+- **Raw IP connections always blocked.** Guest connecting to `93.184.216.34:443` is denied even if a hostname resolving to that IP is allowlisted. Connections must go through hostname → DNS → IP resolution on the host side. This prevents policy bypass via direct IP addressing.
 - Wildcards: `*.github.com` matches `api.github.com`, `raw.github.com`, etc.
 - Port defaults to 443 for HTTPS, 80 for HTTP. Explicit: `api.github.com:8443`
 - Deny list takes precedence over allow list
-- Localhost/private ranges always blocked (prevent SSRF to host services)
+- **Host header validation:** MITM proxy verifies HTTP `Host`/`:authority` header matches the TCP-level destination hostname. Mismatches are blocked and logged as suspicious (prevents domain fronting).
+- Blocked address ranges (always, not configurable):
+  - IPv4 localhost: `127.0.0.0/8`
+  - IPv4 private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+  - IPv4 link-local: `169.254.0.0/16`
+  - IPv6 localhost: `::1/128`
+  - IPv6 link-local: `fe80::/10`
+  - IPv6 unique-local: `fc00::/7`
+  - IPv6 multicast: `ff00::/8`
+  - CGNAT: `100.64.0.0/10`
 
 ### Secret Injection Semantics
 
@@ -338,14 +347,15 @@ Guest processes run as a non-root user (`agent`, UID 1000). virtio-fs maps this 
 redan exec -- claude
 
 1. INIT
-   ├─ Parse redan.toml (or defaults)
+   ├─ Parse redan.toml (or auto-detect project type if no config)
    ├─ Resolve policy (defaults → global → project → CLI)
    ├─ Initialize secret manager (connect to backends, prefetch if configured)
-   └─ Pull OCI image if not cached
+   ├─ Pull OCI image if not cached
+   └─ Snapshot executable project files (see 3.6.1)
 
 2. BOOT
    ├─ Create libkrun VM context
-   ├─ Configure: vCPUs, RAM, network (TSI), virtio-fs mounts
+   ├─ Configure: vCPUs, RAM, network (TSI/passt), virtio-fs mounts
    ├─ Set guest environment variables (placeholders for secrets)
    ├─ Start network proxy (tokio task)
    ├─ Boot VM (krun_start_enter or background thread)
@@ -354,19 +364,58 @@ redan exec -- claude
 3. RUN
    ├─ Attach host stdin/stdout/stderr to guest process
    ├─ Network proxy handles all guest traffic:
-   │   ├─ Policy check per connection
-   │   ├─ Secret injection per request
+   │   ├─ Policy check per connection (hostname AND Host header match)
+   │   ├─ Secret injection per request (header scrubbing on response)
    │   └─ Audit logging per decision
    └─ Agent runs until exit or timeout
 
 4. TEARDOWN
    ├─ Guest process exits → capture exit code
-   ├─ Flush audit log
+   ├─ Diff executable project files against snapshot (see 3.6.1)
+   ├─ Warn if executable files modified
+   ├─ Flush audit log (to host-only path)
    ├─ Stop network proxy
    ├─ Destroy VM context
    ├─ Clear secret cache from memory (zeroize)
    └─ Exit with guest process exit code
 ```
+
+### 3.6.1 Executable File Protection
+
+**Problem (Opus Finding 2 — Critical):** A compromised agent can write malicious git hooks or CI configs that execute on the host AFTER the Redan session ends. The VM boundary doesn't help because these files run outside Redan.
+
+**Mechanism:** On session start, Redan snapshots (hashes) executable project files. On teardown, it diffs against the snapshot and warns:
+
+**Monitored paths:**
+```
+.git/hooks/*
+.github/workflows/*
+.gitlab-ci.yml
+.vscode/tasks.json
+Makefile, Justfile, Taskfile.yml
+.husky/*
+package.json (scripts section)
+pyproject.toml (scripts section)
+```
+
+**On modification detected:**
+```
+redan: ⚠️  SECURITY: Modified files that execute on your host:
+  .git/hooks/pre-commit  (NEW — did not exist before session)
+  .github/workflows/deploy.yml  (CHANGED)
+
+  These files run OUTSIDE Redan when you use git, make, npm, etc.
+  Review before running any project commands:
+    git diff .git/hooks/pre-commit
+    git diff .github/workflows/deploy.yml
+```
+
+**Audit log entry:**
+```jsonl
+{"ts":"...","event":"executable_file_modified","session_id":"abc123","files":[".git/hooks/pre-commit",".github/workflows/deploy.yml"],"action":"warned_user"}
+```
+
+**v1.1 enhancement:** Option to mount `.git/hooks/` read-only. Configurable monitored paths via `redan.toml`.
 
 ### Signal Handling
 
@@ -377,28 +426,51 @@ redan exec -- claude
 | SIGWINCH | Forward terminal resize to guest |
 | SIGHUP | Forward to guest |
 
-## 3.7 Audit Log Format
+## 3.7 Audit Log
 
-JSONL (one JSON object per line), written to configured file and optionally to stderr for real-time display.
+### Storage
+
+Audit logs are written to a **host-only path** inaccessible from inside the VM:
+
+```
+$XDG_STATE_HOME/redan/sessions/<session_id>/audit.jsonl
+```
+
+This prevents a compromised agent from tampering with its own audit trail. The project directory (`.redan/`) is NOT used for logs — only for config.
+
+View logs via CLI:
+```bash
+redan audit show                    # latest session
+redan audit show <session_id>       # specific session
+redan audit tail                    # stream current session
+```
+
+### Format
+
+JSONL (one JSON object per line). Expanded schema per oracle review feedback:
 
 ```jsonl
 {"ts":"2026-02-08T10:30:00Z","event":"session_start","session_id":"abc123","image":"python:3.12","policy":"./redan.toml"}
 {"ts":"2026-02-08T10:30:00.150Z","event":"vm_boot","session_id":"abc123","boot_ms":148}
-{"ts":"2026-02-08T10:30:05Z","event":"net_allow","session_id":"abc123","host":"api.github.com","port":443}
-{"ts":"2026-02-08T10:30:05Z","event":"secret_inject","session_id":"abc123","secret":"GITHUB_TOKEN","host":"api.github.com"}
+{"ts":"2026-02-08T10:30:05Z","event":"net_allow","session_id":"abc123","host":"api.github.com","port":443,"method":"GET","path":"/repos/owner/repo","status":200,"latency_ms":42}
+{"ts":"2026-02-08T10:30:05Z","event":"secret_inject","session_id":"abc123","secret":"GITHUB_TOKEN","host":"api.github.com","inject_mode":"header"}
 {"ts":"2026-02-08T10:30:10Z","event":"net_deny","session_id":"abc123","host":"evil.com","port":443,"reason":"not_in_allowlist"}
-{"ts":"2026-02-08T10:35:00Z","event":"session_end","session_id":"abc123","exit_code":0,"duration_s":300}
+{"ts":"2026-02-08T10:30:11Z","event":"net_deny","session_id":"abc123","host":"93.184.216.34","port":443,"reason":"raw_ip_blocked"}
+{"ts":"2026-02-08T10:35:00Z","event":"session_end","session_id":"abc123","exit_code":0,"duration_s":300,"files_modified":["src/main.py"],"executable_files_modified":[".git/hooks/pre-commit"]}
 ```
 
-**Blocked request display** (when `audit.display.blocked_requests = true`):
+Fields added per Sonnet/Opus review: `method`, `path` (no query string — may contain secrets), `status`, `latency_ms`, `inject_mode`, `files_modified`, `executable_files_modified`.
+
+### Real-time Display (stderr)
 
 ```
 redan: ✗ blocked connection to evil.com:443 (not in allowlist)
+redan: ✗ blocked connection to 93.184.216.34:443 (raw IP blocked)
 redan: ✗ blocked connection to 169.254.169.254:80 (private range)
 redan: ✓ GITHUB_TOKEN injected for api.github.com
 ```
 
-This gives the developer visibility without cluttering the agent's output. Displayed on stderr so it doesn't interfere with agent stdout.
+Always displayed on stderr. Configurable verbosity via `audit.display` in config.
 
 ## 3.8 Configuration Layering
 

@@ -82,6 +82,29 @@ Platform availability:
 
 For platforms without packages, our install script builds from source (Rust toolchain required — acceptable for a Rust-based tool).
 
+## 2.2.1 virtio-fs Security Configuration
+
+**Symlink traversal prevention (Opus Finding 1 — High):**
+
+virtio-fs mounts share a host directory with the guest. If virtiofsd follows symlinks that point outside the shared directory, the guest can escape the mount boundary and read host files.
+
+**Required configuration:**
+- virtiofsd (or libkrun's internal equivalent) MUST be configured to prevent symlink traversal outside the shared root
+- Use `--sandbox chroot` mode (virtiofsd chroots into the shared directory, symlinks outside resolve to nothing)
+- If libkrun's virtio-fs implementation doesn't support symlink restriction: this is a PS-2 finding that blocks the architecture
+
+**Adversarial test (PS-2):**
+1. Create a project directory containing `symlink-to-ssh → ~/.ssh/`
+2. Mount via virtio-fs
+3. From guest: `cat /workspace/symlink-to-ssh/id_ed25519`
+4. Expected result: ENOENT or permission denied
+5. If the SSH key is readable: **STOP — fix before proceeding**
+
+**Additionally:**
+- Hardlinks across mount boundaries must be blocked
+- `.` and `..` traversal through the mount root must be tested
+- Pre-existing symlinks in the project (e.g., in `node_modules`) that point outside the project directory must not be followable from the guest
+
 ## 2.3 Platform Support Matrix
 
 ### v1 Targets

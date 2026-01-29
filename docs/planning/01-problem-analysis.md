@@ -168,18 +168,20 @@ This isn't a theoretical concern. It's the default mode of operation for every m
 - **Sandbox:** Workspace runs in cloud containers (different threat model). VS Code agent mode — no sandbox.
 - **Key gap:** VS Code agent mode inherits the editor's process permissions.
 
-## 1.4 Summary: What Redan Must Guarantee
+## 1.4 Summary: What Redan Guarantees
 
-| # | Invariant | Mechanism |
-|---|-----------|-----------|
-| I-1 | Agent cannot read host credentials | VM filesystem boundary — host home dir not mounted |
-| I-2 | Agent cannot reach unauthorized hosts | VM-level network enforcement via virtual NIC (not proxy env vars) |
-| I-3 | Real secrets never visible inside VM | Host-side network-layer injection (Gondolin model) |
-| I-4 | Secrets only injected for authorized hosts | Per-secret host allowlist enforced at injection point |
-| I-5 | Agent identity is separate from developer identity | Scoped credentials from secret management backend |
-| I-6 | All policy decisions are auditable | Structured logging of every network request, secret injection, policy evaluation |
-| I-7 | Project file changes are controlled | Write-back channel from VM to host with optional review |
-| I-8 | No persistent host modification | Agent writes go to VM filesystem; project sync is explicit |
+*Restated per oracle review (Opus invariant analysis). Honest about what holds and what doesn't.*
+
+| # | Invariant | Mechanism | Caveats |
+|---|-----------|-----------|---------|
+| I-1 | Agent cannot read host credentials | VM filesystem boundary — host home dir not mounted. Symlink traversal prevented by virtiofsd chroot mode. | Holds unconditionally. |
+| I-2 | Agent cannot reach unauthorized hosts | VM-level network enforcement via virtual NIC. Raw IP connections blocked. Host header validated against TCP destination. | Holds unconditionally. DNS covert channel for project data (not secrets) is a residual risk. |
+| I-3 | Secrets not visible inside VM **(header/query injection)** | Host-side network-layer injection. Response headers scrubbed for exact match. | **Does NOT hold for `inject_mode = "env"`.** Env-injected secrets are visible to guest processes. Response bodies may contain echoed secrets from authorized APIs. |
+| I-4 | Secrets only injected for authorized hosts | Per-secret host allowlist enforced at proxy injection point. | Holds unconditionally at proxy level. |
+| I-5 | Agent identity separate from developer identity | Scoped credentials from enterprise secret backends (Vault, AWS SM). | **Does NOT hold with `env` backend.** env uses the developer's own credentials. Identity separation requires enterprise backend setup. |
+| I-6 | All policy decisions are auditable | Structured JSONL logging to **host-only path** (not accessible from VM). | Holds. Audit log is tamper-proof from guest perspective. Not cryptographically signed (v1.1). |
+| I-7 | Project files shared in real-time | virtio-fs provides bidirectional access. Changes by agent are immediately visible on host. | Git provides the review mechanism. No approval gate on writes. |
+| I-8 | Agent cannot modify host files outside project directory | VM filesystem boundary. Only `/workspace` (project dir) is writable from guest. | **Executable project files** (.git/hooks, CI configs, Makefiles) are writable and persist. Redan detects and warns on modification. |
 
 ## Key Decisions
 

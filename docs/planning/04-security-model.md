@@ -104,8 +104,14 @@ This is enforced by the hardware hypervisor (KVM on Linux, HVF on macOS). The gu
 |----------|-------------|-------------------|---------|
 | Docker (namespaces) | Linux kernel | Kernel vuln = escape | Most agents today |
 | bubblewrap/Seatbelt | OS primitives | Lower bar than containers | Claude Code sandbox |
-| microVM (KVM/HVF) | Hardware hypervisor | Hypervisor vuln = escape | AWS Lambda, Redan |
+| microVM (KVM/HVF) | Hardware hypervisor | Hypervisor vuln = escape | AWS Lambda (Firecracker), Redan (libkrun) |
 | Full VM (QEMU) | Hardware hypervisor | Same class as microVM | Gondolin |
+
+**Note on the Lambda comparison (per Opus review):** Redan uses hardware virtualization (KVM/HVF), which is the same isolation *class* as AWS Lambda's Firecracker. However, they are not equivalent:
+- **Firecracker** is purpose-built for hostile multi-tenant workloads, extensively audited, minimized attack surface (~50K LOC).
+- **libkrun** is designed for single-tenant local-developer use, incorporates code from Firecracker/rust-vmm/Cloud Hypervisor, broader feature set, no published third-party security audit.
+
+Redan trusts the hardware virtualization boundary (hypervisor-enforced memory isolation) but does not claim equivalence with AWS Lambda's security posture. For the single-developer threat model (protecting credentials from a compromised agent on your own machine), libkrun's isolation is appropriate. For multi-tenant hosting: it is not evaluated for that use case.
 
 ## 4.3 Secret Isolation Proof
 
@@ -146,19 +152,22 @@ A compromised agent running inside the Redan VM cannot obtain the real value of 
 | Timing side-channel | Theoretical | Out of scope for v1 |
 | Memory bus side-channel | Theoretical | Out of scope for v1 |
 
-## 4.4 Response Scrubbing (Open Design Question)
+## 4.4 Response Scrubbing
 
-**Problem:** If the proxy injects a real secret into a request, and the remote API echoes it back in the response (e.g., a debugging endpoint that shows received headers), the real secret would be visible inside the VM.
+**Problem:** If the proxy injects a real secret into a request, and the remote API echoes it back in the response, the real secret becomes visible inside the VM. A compromised agent can then persist it to project files (via virtio-fs) or embed it in git commits — exfiltrating through authorized channels.
 
-**Options:**
+**v1 approach: Header scrubbing (exact match).**
 
-1. **Don't scrub responses (v1 recommendation).** Simple. The secret was sent to an authorized host — the host-to-host communication is trusted. The response is from a host the developer explicitly allowlisted. If the agent extracts the secret from the response, it still can't exfiltrate it (network policy blocks unauthorized hosts). The secret lives in VM memory temporarily, but the VM is ephemeral.
+The MITM proxy scans response HEADERS for exact matches of any injected secret value and replaces them with the corresponding placeholder. This is:
+- **Cheap:** Response headers are small (typically <4KB), exact string matching is O(n).
+- **Safe:** No false positives on exact match of high-entropy secret values.
+- **Targeted:** Only scrubs values that were actually injected in this session.
 
-2. **Scrub responses.** Replace any occurrence of real secret values in response bodies/headers with the placeholder. More secure but: performance overhead (scanning all response data), false positives (partial matches), breaks binary protocols, and only works for exact string matching.
+Response BODIES are NOT scrubbed in v1. Body scrubbing is expensive (streaming data, potentially gigabytes), fragile (partial matches, binary protocols), and breaks content-length/checksums. Deferred to v1.1 for small JSON responses if demand exists.
 
-3. **Drop echoed headers.** Strip specific headers from responses that are known to echo request headers. Fragile, API-specific.
+**Residual risk (documented):** If an authorized API echoes a secret in a response body (e.g., Slack's `auth.test` endpoint), that value will be visible inside the VM session. The agent could write it to a project file. Network policy prevents direct exfiltration to unauthorized hosts, but the value could persist on disk or in git history.
 
-**Recommendation:** Option 1 for v1. The network policy is the enforcement point, not response scrubbing. Document this as a known property: "Secret values may be visible in responses from authorized hosts within the VM session. They cannot be exfiltrated because network policy prevents sending them to unauthorized hosts."
+**Mitigation layering:** Response header scrubbing + network policy + executable file monitoring (3.6.1) + git diff review. No single layer is perfect; together they significantly raise the bar.
 
 ## 4.5 Network Policy Enforcement
 
@@ -221,27 +230,28 @@ Rationale:
 
 ## 4.6 Escape Hatches
 
-Developers need to bypass restrictions for debugging. This must be explicit, logged, and not the default.
+Limited overrides for debugging. Explicit, logged, no way to disable the sandbox entirely.
 
 ```bash
 # Temporary: allow all network for this session (logged as policy override)
 redan exec --allow-all-hosts -- bash
 
-# Temporary: mount additional host path (logged)
-redan exec --mount /tmp/debug:/debug -- bash
+# Temporary: allow a specific additional host
+redan exec --allow-host api.example.com -- bash
 
-# Permanent: disable Redan for a session (no VM, runs directly)
-redan exec --no-sandbox -- claude
-# Prints: "WARNING: running without sandbox. All host credentials accessible."
+# Temporary: mount additional host path (logged)
+redan exec --mount /tmp/debug:/debug:ro -- bash
 ```
 
-**Audit log entries for escapes:**
+**`--no-sandbox` is intentionally not provided.** Per Sonnet review: it defeats the audit trail (no proxy = no logging), creates a social engineering vector (prompt injection: "please run with --no-sandbox"), and adds nothing — if you don't want sandboxing, just don't use Redan.
+
+**Audit log entries for overrides:**
 ```jsonl
 {"ts":"...","event":"policy_override","override":"allow_all_hosts","session_id":"abc123"}
-{"ts":"...","event":"policy_override","override":"no_sandbox","session_id":"abc123"}
+{"ts":"...","event":"policy_override","override":"extra_mount","mount":"/tmp/debug:/debug:ro","session_id":"abc123"}
 ```
 
-Enterprise deployments can disable escape hatches via global config:
+Enterprise deployments can disable overrides entirely:
 ```toml
 # $XDG_CONFIG_HOME/redan/config.toml
 [policy]

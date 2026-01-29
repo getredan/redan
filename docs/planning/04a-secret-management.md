@@ -278,9 +278,36 @@ format = "{value}"
 
 **This is inherently recursive.** The host must have SOME credential to start the chain. The key insight is that the **host's bootstrap credential is broad** (can access many secrets) while the **agent's injected credentials are narrow** (scoped per-host, per-session). Redan reduces the attack surface even though it can't eliminate the bootstrap.
 
-**Enterprise mitigation:** Use workload identity / machine identity where possible. The developer's laptop authenticates to Vault/AWS/Azure via SSO + short-lived tokens from the identity provider. No long-lived credentials on disk. This is the same pattern cloud-hosted dev environments use.
+The bootstrap credential lives on the host filesystem or in the developer's session. This is inherent and cannot be solved — document it, don't hide it.
 
-**Solo developer mitigation:** Environment variables or keychain are acceptable. The developer already has these credentials — Redan's job is to prevent the agent from accessing them directly. The agent gets scoped placeholders, not the developer's broad tokens.
+### Concrete Bootstrap Flows (per Opus/Sonnet review)
+
+**Vault (enterprise):**
+1. Developer runs `vault login -method=oidc` → browser SSO flow → short-lived Vault token
+2. Token cached at `~/.vault-token` (on host disk — inherent, documented)
+3. Redan reads `~/.vault-token`, uses it to read agent secrets from configured paths
+4. **Scoping option A (MVP/v1.0):** Redan uses the developer's Vault token directly. Simple, but Redan has the developer's full Vault permissions.
+5. **Scoping option B (v1.1):** Redan exchanges the developer's token for a scoped agent token via Vault's token creation with restricted policies. Requires Vault policy setup by security team.
+6. **Risk:** If `~/.vault-token` is readable by the agent (it isn't — host home dir not mounted in VM), the agent could access Vault directly. Since the VM can't see `~/.vault-token`, this is safe.
+
+**AWS (enterprise):**
+1. Developer runs `aws sso login` → browser SSO → cached session token in `~/.aws/sso/cache/`
+2. Redan uses standard AWS credential chain: SSO cache → env vars → credentials file → instance profile
+3. Redan calls `sts:AssumeRole` to get temporary credentials for the agent-specific IAM role
+4. **Recommendation:** Use SSO + assume_role. Don't fall back to `~/.aws/credentials` (long-lived keys). Redan should short-circuit the credential chain: check SSO cache first, then env vars, skip credentials file unless explicitly configured.
+
+**1Password (solo developer, v1.0):**
+1. Developer runs `op signin` or uses biometric unlock
+2. Redan calls `op read "op://vault/item/field"` to retrieve secrets
+3. 1Password session is tied to the developer's OS session (Touch ID, etc.)
+4. **No bootstrap credential on disk** — 1Password uses biometric/password unlock
+
+**env (MVP):**
+1. Developer exports `GITHUB_TOKEN=ghp_xxx` in their shell
+2. Redan reads from `process.env`
+3. **Honest limitation:** The secret exists in the developer's shell environment. Redan prevents the agent from reading it directly and prevents exfiltration via network, but a compromised shell session already has the value.
+
+**Solo developer mitigation:** env or keychain are acceptable. The developer already has these credentials — Redan's job is to prevent the AGENT from accessing them directly, not to protect against a compromised developer workstation.
 
 ## 4a.5 Injection Modes
 
@@ -309,25 +336,37 @@ inject_for = ["api.example.com"]
 
 Proxy appends `?api_key=<real_value>` (or `&api_key=...` if query string exists).
 
-### Environment Variable Injection (for non-HTTP)
+### Environment Variable Injection (for non-HTTP) — WEAKER SECURITY TIER
+
+> **⚠️ This injection mode provides weaker guarantees than header/query injection.**
+> Invariant I-3 (secrets not visible in VM) does NOT hold for env-injected secrets.
+> Use only when no network-layer alternative exists.
 
 ```toml
 [secrets.DATABASE_URL]
-inject_mode = "env"
+inject_mode = "env"                  # ← explicit opt-in to weaker mode
 env_var = "DATABASE_URL"
 format = "postgres://agent:{value}@staging-db.company.com:5432/app"
 ```
 
-For database connections and other non-HTTP protocols, we can't do network-layer injection. Instead, the **real value** is set as a guest environment variable. This is weaker — the value is in the VM's process environment — but necessary for non-HTTP use cases.
+For database connections and other non-HTTP protocols, the real value is set as a guest environment variable via `krun_set_env()`.
 
-**When `inject_mode = "env"`:**
-- The real value IS passed into the VM via `krun_set_env()`
-- The secret is visible to `env` or `/proc/self/environ` inside the VM
-- This is explicitly documented as a weaker guarantee
-- The network policy still prevents exfiltration (agent can't send it to unauthorized hosts)
-- Use this only when the secret must be used by a non-HTTP client inside the VM
+**What this means in practice:**
+- The secret IS visible to `env`, `/proc/self/environ`, `os.environ` inside the VM
+- A compromised agent can read the value and attempt to persist it (write to project files)
+- The network policy still prevents exfiltration to unauthorized hosts
+- The secret could end up in project files, git commits, or terminal output
 
-**Audit log distinguishes:** `{inject_mode: "env", warning: "secret visible in guest environment"}`
+**When to use:** Database connections where IAM auth isn't available, non-HTTP APIs, model provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY) where the agent's HTTP client can't be proxied.
+
+**When NOT to use:** Any secret that can be injected via HTTP headers or query parameters. The config parser warns if an env-mode secret has `inject_for` hosts that suggest header injection would work.
+
+**Audit log:** Env-injected secrets are logged distinctly:
+```jsonl
+{"event":"secret_configured","secret":"DATABASE_URL","inject_mode":"env","security_tier":"reduced","warning":"secret visible in guest environment"}
+```
+
+**v1.1 investigation:** Host-side protocol proxies (like pgbouncer for Postgres, or an HTTP proxy for model APIs) that eliminate the need for env injection in common cases.
 
 ## 4a.6 Policy Format for Teams
 
