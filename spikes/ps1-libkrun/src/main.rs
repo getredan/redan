@@ -42,7 +42,7 @@ fn test_boot() {
     let ret = unsafe {
         ffi::krun_init_log(
             ffi::KRUN_LOG_TARGET_DEFAULT,
-            ffi::KRUN_LOG_LEVEL_INFO,
+            ffi::KRUN_LOG_LEVEL_ERROR,
             ffi::KRUN_LOG_STYLE_AUTO,
             0,
         )
@@ -54,28 +54,36 @@ fn test_boot() {
     assert!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
     let ctx_id = ctx_id as u32;
 
-    // 2 vCPUs, 512MB RAM (minimal)
-    let ret = unsafe { ffi::krun_set_vm_config(ctx_id, 2, 512) };
+    // 1 vCPU, 256MB RAM
+    let ret = unsafe { ffi::krun_set_vm_config(ctx_id, 1, 256) };
     assert!(ret >= 0, "krun_set_vm_config failed: {ret}");
 
-    // Use host root filesystem as guest root (simplest possible test)
-    let root = CString::new("/").unwrap();
+    // Use Alpine minirootfs as guest root
+    let root = CString::new("/tmp/redan-rootfs").unwrap();
     let ret = unsafe { ffi::krun_set_root(ctx_id, root.as_ptr()) };
     assert!(ret >= 0, "krun_set_root failed: {ret}");
 
-    // Run a simple command
-    let exec_path = CString::new("/bin/sh").unwrap();
-    let arg0 = CString::new("sh").unwrap();
-    let arg1 = CString::new("-c").unwrap();
-    let cmd = CString::new("echo 'REDAN_BOOT_OK'; uname -a; echo \"boot_time: ready\"").unwrap();
-    let argv: Vec<*const i8> = vec![arg0.as_ptr(), arg1.as_ptr(), cmd.as_ptr(), std::ptr::null()];
+    // Set workdir
+    let workdir = CString::new("/").unwrap();
+    let ret = unsafe { ffi::krun_set_workdir(ctx_id, workdir.as_ptr()) };
+    assert!(ret >= 0, "krun_set_workdir failed: {ret}");
+
+    // Match the working C test exactly: pass envp to krun_set_exec
+    let term = CString::new("TERM=xterm").unwrap();
+    let path = CString::new("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").unwrap();
+    let envp: Vec<*const i8> = vec![path.as_ptr(), term.as_ptr(), std::ptr::null()];
+
+    let exec_path = CString::new("/bin/busybox").unwrap();
+    let arg0 = CString::new("echo").unwrap();
+    let arg1 = CString::new("REDAN_BOOT_OK").unwrap();
+    let argv: Vec<*const i8> = vec![arg0.as_ptr(), arg1.as_ptr(), std::ptr::null()];
 
     let ret = unsafe {
         ffi::krun_set_exec(
             ctx_id,
             exec_path.as_ptr(),
             argv.as_ptr(),
-            std::ptr::null(), // inherit env
+            envp.as_ptr(),
         )
     };
     assert!(ret >= 0, "krun_set_exec failed: {ret}");

@@ -6,6 +6,8 @@ use std::os::raw::{c_char, c_int};
 // Log levels
 pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
 pub const KRUN_LOG_LEVEL_INFO: u32 = 3;
+pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
+pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 
 // Log style
 pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
@@ -40,4 +42,7 @@ unsafe extern "C" {
     pub fn krun_disable_implicit_vsock(ctx_id: u32) -> i32;
     pub fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32;
     pub fn krun_add_vsock_port(ctx_id: u32, port: u32, filepath: *const c_char) -> i32;
+
+    // Console output
+    pub fn krun_set_console_output(ctx_id: u32, filepath: *const c_char) -> i32;
 }

@@ -12,6 +12,7 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 ## Rules
 
-- Always run `cargo run`, `cargo test`, and any long-running process inside tmux. Never run directly - you can't monitor or kill a hanging process otherwise.
+- **NEVER run the VM binary directly.** Always use tmux. `krun_start_enter` blocks forever and you can't Ctrl-C it. This includes `cargo run`, `strace`, or anything that invokes the binary. Use `tmux send-keys` to launch, `tmux capture-pane` to read output, `pkill -9` to stop.
 - `git -c commit.gpgsign=false commit` (GPG signing unavailable on this machine)
 - Spikes go in `spikes/ps<N>-<name>/` as disposable Cargo projects
+- Document all spike findings in `~/Projects/redan-ai-slop/docs/spikes/` so context survives compaction
