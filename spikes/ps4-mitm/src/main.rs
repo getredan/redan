@@ -1,4 +1,5 @@
 mod ca;
+mod dns;
 mod ffi;
 mod net;
 
@@ -10,9 +11,9 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, IpCidr, Ipv4Address};
 
 use ca::MitmCa;
 use net::VirtioNetDevice;
@@ -124,8 +125,11 @@ fn main() {
             "ip link set eth0 up; \
              ip addr add 192.168.127.2/24 dev eth0; \
              ip route add default via 192.168.127.1; \
-             echo '192.168.127.1 httpbin.org' >> /etc/hosts; \
+             echo 'nameserver 192.168.127.1' > /etc/resolv.conf; \
              echo GUEST_NET_UP; \
+             \
+             echo TEST_DNS; \
+             nslookup httpbin.org 2>&1 || true; \
              \
              echo ECHO_TOKEN; \
              echo $GITHUB_TOKEN; \
@@ -227,11 +231,24 @@ fn run_proxy(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding]) {
     let mut sockets = SocketSet::new(vec![]);
     let mut connections: HashMap<u16, ProxyConn> = HashMap::new();
 
+    // UDP socket for DNS on port 53
+    let dns_rx = udp::PacketBuffer::new(
+        vec![udp::PacketMetadata::EMPTY; 4],
+        vec![0; 2048],
+    );
+    let dns_tx = udp::PacketBuffer::new(
+        vec![udp::PacketMetadata::EMPTY; 4],
+        vec![0; 2048],
+    );
+    let mut dns_sock = udp::Socket::new(dns_rx, dns_tx);
+    dns_sock.bind(53).unwrap();
+    let dns_handle = sockets.add(dns_sock);
+
     // Listen on ports 80 and 443
     let http_handle = add_tcp_listener(&mut sockets, 80);
     let https_handle = add_tcp_listener(&mut sockets, 443);
 
-    println!("[host] proxy listening on :80 and :443");
+    println!("[host] proxy listening on :53 (dns), :80, :443");
 
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(45);
@@ -247,6 +264,9 @@ fn run_proxy(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding]) {
         device.flush_tx();
 
         if matches!(result, PollResult::SocketStateChanged) {
+            // Handle DNS queries
+            process_dns(&mut sockets, dns_handle);
+
             // Check for new connections on port 80
             check_accept(&mut sockets, http_handle, 80, false, &mut connections);
             // Check for new connections on port 443
@@ -270,6 +290,18 @@ fn run_proxy(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding]) {
         // For the spike, just rely on the timeout
 
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+fn process_dns(sockets: &mut SocketSet, handle: SocketHandle) {
+    let sock = sockets.get_mut::<udp::Socket>(handle);
+    while sock.can_recv() {
+        if let Ok((data, sender)) = sock.recv() {
+            if let Some((hostname, response)) = dns::handle_query(data, GATEWAY_IP) {
+                println!("[host] DNS: {hostname} -> {GATEWAY_IP}");
+                sock.send_slice(&response, sender).ok();
+            }
+        }
     }
 }
 
