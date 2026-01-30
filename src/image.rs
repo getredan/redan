@@ -142,7 +142,12 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
 
     if !packages.is_empty() {
         let pkg_list = packages.join(" ");
-        setup_parts.push(format!("apk update && apk add --no-cache {pkg_list}"));
+        // apk exits non-zero on chown failures (guest UID != root on host).
+        // The packages install fine, just with host-user ownership.
+        // Use || true so subsequent --run commands still execute.
+        setup_parts.push(format!(
+            "apk update && (apk add --no-cache {pkg_list} || true)"
+        ));
     }
 
     for cmd in run_commands {
@@ -182,7 +187,7 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
         vm_handle.net_sock.try_clone().expect("clone net_sock"),
         &ca,
         &[],                      // no secrets during build
-        Duration::from_secs(300), // 5 min timeout for builds
+        Duration::from_secs(600), // 10 min timeout for builds
     );
 
     // Verify build completed

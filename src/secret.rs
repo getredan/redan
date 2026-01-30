@@ -120,7 +120,11 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
 /// Forces upstream to return uncompressed responses so that scrub()
 /// can match literal secret bytes. Without this, gzip/br/zstd encoded
 /// responses bypass scrubbing entirely.
-pub fn strip_accept_encoding(data: &[u8]) -> Vec<u8> {
+/// Rewrite outgoing request headers: strip Accept-Encoding (forces
+/// uncompressed responses for scrubbing) and force Connection: close
+/// (so upstream closes after the response, preventing keep-alive stalls
+/// on responses with no Content-Length or Transfer-Encoding).
+pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
     let header_end = find_header_end(data).unwrap_or(data.len());
     let request_line_end = data[..header_end]
         .windows(2)
@@ -131,18 +135,28 @@ pub fn strip_accept_encoding(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     result.extend_from_slice(&data[..request_line_end]);
 
-    // Copy headers, skipping Accept-Encoding (case-insensitive)
     let headers = &data[request_line_end..header_end];
     let headers_str = String::from_utf8_lossy(headers);
+    let mut has_connection = false;
     for line in headers_str.split("\r\n") {
         if line.is_empty() {
             continue;
         }
-        if line.to_lowercase().starts_with("accept-encoding:") {
+        let lower = line.to_lowercase();
+        if lower.starts_with("accept-encoding:") {
+            continue;
+        }
+        if lower.starts_with("connection:") {
+            // Replace whatever Connection value with "close"
+            result.extend_from_slice(b"Connection: close\r\n");
+            has_connection = true;
             continue;
         }
         result.extend_from_slice(line.as_bytes());
         result.extend_from_slice(b"\r\n");
+    }
+    if !has_connection {
+        result.extend_from_slice(b"Connection: close\r\n");
     }
 
     // Body separator + body

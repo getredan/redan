@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
@@ -81,6 +82,7 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
             log::info!("proxy timeout");
             break;
         }
+        let mut has_pending = false;
 
         let timestamp = SmolInstant::now();
         let result = iface.poll(timestamp, &mut device, &mut sockets);
@@ -111,6 +113,9 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
                             sni: None,
                             is_tls: listener.is_tls,
                             pending_guest_data: Vec::new(),
+                            pending_response: Vec::new(),
+                            response_offset: 0,
+                            upstream_rx: None,
                             state: ConnState::WaitingForData,
                         },
                     );
@@ -133,7 +138,36 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
             }
         }
 
-        std::thread::sleep(Duration::from_millis(1));
+        // Process connections that need attention regardless of socket
+        // state changes: response drains need poll() to advance the TCP
+        // window, and upstream waits need channel checks.
+        {
+            let mut done_handles: Vec<SocketHandle> = Vec::new();
+            for (&handle, conn) in connections.iter_mut() {
+                if conn.state == ConnState::SendingResponse
+                    || conn.state == ConnState::WaitingForUpstream
+                {
+                    process_connection(&mut sockets, conn, ca, secrets);
+                    has_pending = true;
+                }
+                if conn.state == ConnState::Done {
+                    done_handles.push(handle);
+                }
+            }
+            for handle in done_handles {
+                connections.remove(&handle);
+                sockets.remove(handle);
+            }
+        }
+
+        if has_pending {
+            // Yield briefly to avoid burning CPU, but stay responsive.
+            // Pure busy-loop wastes 100% CPU; 100us is enough for the
+            // TCP window to advance without noticeable throughput loss.
+            std::thread::sleep(Duration::from_micros(100));
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 
@@ -168,8 +202,11 @@ fn process_dns(sockets: &mut SocketSet, handle: SocketHandle) {
 // --- TCP ---
 
 fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
-    let rx_buf = tcp::SocketBuffer::new(vec![0; 65535]);
-    let tx_buf = tcp::SocketBuffer::new(vec![0; 65535]);
+    // 256KB buffers for better throughput on large responses.
+    // The guest side (e.g. apk, npm) can send/receive at higher rates
+    // without the TCP window stalling.
+    let rx_buf = tcp::SocketBuffer::new(vec![0; 262144]);
+    let tx_buf = tcp::SocketBuffer::new(vec![0; 262144]);
     let mut sock = tcp::Socket::new(rx_buf, tx_buf);
     sock.listen(port).unwrap();
     sockets.add(sock)
@@ -185,6 +222,13 @@ struct ProxyConn {
     sni: Option<String>,
     is_tls: bool,
     pending_guest_data: Vec<u8>,
+    /// Response data waiting to be sent to the guest.
+    /// Drained incrementally as smoltcp's TCP window allows.
+    pending_response: Vec<u8>,
+    /// How many bytes of pending_response have been sent.
+    response_offset: usize,
+    /// Channel for receiving upstream response from worker thread.
+    upstream_rx: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
     state: ConnState,
 }
 
@@ -193,6 +237,10 @@ enum ConnState {
     WaitingForData,
     TlsHandshake,
     Proxying,
+    /// Upstream relay running in background thread.
+    WaitingForUpstream,
+    /// Response buffered, draining to guest through smoltcp.
+    SendingResponse,
     /// sock.close() called, waiting for TCP FIN exchange to complete.
     Closing,
     Done,
@@ -230,6 +278,39 @@ fn process_connection(
 
         ConnState::TlsHandshake | ConnState::Proxying => {
             handle_tls_data(sock, conn, secrets);
+        }
+
+        ConnState::WaitingForUpstream => {
+            // Check if the background thread has finished
+            if let Some(rx) = &conn.upstream_rx {
+                match rx.try_recv() {
+                    Ok(Ok(response)) => {
+                        conn.upstream_rx = None;
+                        conn.pending_response = response;
+                        conn.response_offset = 0;
+                        conn.state = ConnState::SendingResponse;
+                        drain_response(sock, conn);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("upstream relay error: {e}");
+                        conn.upstream_rx = None;
+                        sock.close();
+                        conn.state = ConnState::Closing;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // Still waiting, keep polling
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        log::warn!("upstream thread died");
+                        sock.close();
+                        conn.state = ConnState::Closing;
+                    }
+                }
+            }
+        }
+
+        ConnState::SendingResponse => {
+            drain_response(sock, conn);
         }
 
         ConnState::Closing => {
@@ -513,78 +594,124 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     }
 
     let hostname = conn.sni.as_deref().unwrap_or("");
-    // Strip Accept-Encoding so upstream returns uncompressed responses.
-    // Compressed bodies bypass literal-byte scrubbing entirely.
-    let request = crate::secret::strip_accept_encoding(&request);
+    // Rewrite headers: strip Accept-Encoding (uncompressed for scrubbing),
+    // force Connection: close (upstream closes after response, preventing
+    // keep-alive stalls on responses with no Content-Length).
+    let request = crate::secret::rewrite_request_headers(&request);
     let (request_data, inject_count) = crate::secret::inject(&request, hostname, secrets);
     if inject_count > 0 {
         log::info!("SECRET INJECTED: {inject_count} replacement(s) for {hostname}");
     }
 
-    // Forward to upstream
-    if let (Some(stream), Some(tls_conn)) = (conn.upstream.as_mut(), conn.upstream_tls.as_mut()) {
-        match tls::relay_upstream(stream, tls_conn, &request_data) {
-            Ok(response) => {
-                let (scrubbed, scrub_count) = crate::secret::scrub(&response, secrets);
-                if scrub_count > 0 {
-                    log::info!("RESPONSE SCRUBBED: {scrub_count} value(s) removed");
-                }
+    // Forward to upstream in a background thread so the smoltcp event
+    // loop keeps running (other connections, DNS, etc.). The response
+    // arrives via channel and gets drained incrementally.
+    if let (Some(stream), Some(tls_conn)) = (conn.upstream.take(), conn.upstream_tls.take()) {
+        let (tx, rx) = mpsc::channel();
+        let secrets: Vec<SecretBinding> = secrets.to_vec();
 
-                log::info!(
-                    "upstream response ({} bytes): {}",
-                    scrubbed.len(),
-                    String::from_utf8_lossy(&scrubbed)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                );
-
-                // Rewrite Connection header: we close after each
-                // request, so tell the client not to reuse.
-                let scrubbed = rewrite_connection_close(&scrubbed);
-
-                // Write response back through guest TLS in chunks.
-                // Large responses (>16KB) overflow rustls internal buffers
-                // if written all at once. Flush TLS records to smoltcp
-                // between chunks.
-                for chunk in scrubbed.chunks(16384) {
-                    if let Err(e) = guest_tls.writer().write_all(chunk) {
-                        log::warn!("guest TLS write failed: {e}");
-                        break;
+        std::thread::spawn(move || {
+            let mut stream = stream;
+            let mut tls_conn = tls_conn;
+            let result = tls::relay_upstream(&mut stream, &mut tls_conn, &request_data)
+                .map(|response| {
+                    let (scrubbed, scrub_count) = crate::secret::scrub(&response, &secrets);
+                    if scrub_count > 0 {
+                        log::info!("RESPONSE SCRUBBED: {scrub_count} value(s) removed");
                     }
-                    let mut guest_out = Vec::new();
-                    if let Err(e) = guest_tls.write_tls(&mut guest_out) {
-                        log::warn!("guest TLS encrypt failed: {e}");
-                        break;
-                    }
-                    for tcp_chunk in guest_out.chunks(65535) {
-                        if let Err(e) = sock.send_slice(tcp_chunk) {
-                            log::warn!("smoltcp send failed: {e}");
-                            break;
-                        }
-                    }
-                }
+                    log::info!(
+                        "upstream response ({} bytes): {}",
+                        scrubbed.len(),
+                        String::from_utf8_lossy(&scrubbed)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                    );
+                    rewrite_connection_close(&scrubbed)
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
 
-                // Send TLS close_notify so the client knows we're done
-                guest_tls.send_close_notify();
-                let mut close_out = Vec::new();
-                if let Err(e) = guest_tls.write_tls(&mut close_out) {
-                    log::warn!("close_notify encrypt failed: {e}");
-                }
-                if let Err(e) = sock.send_slice(&close_out) {
-                    log::warn!("close_notify send failed: {e}");
-                }
+        conn.upstream_rx = Some(rx);
+        conn.state = ConnState::WaitingForUpstream;
+    } else {
+        sock.close();
+        conn.state = ConnState::Closing;
+    }
+}
+
+/// Drain buffered response data to the guest through TLS + smoltcp.
+///
+/// Called repeatedly from the main poll loop. Each call writes as much
+/// as the smoltcp TCP send buffer will accept, then returns. The next
+/// iface.poll() transmits that data, advancing the TCP window for the
+/// next drain_response() call.
+fn drain_response(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
+    let guest_tls = match conn.guest_tls.as_mut() {
+        Some(t) => t,
+        None => {
+            conn.state = ConnState::Done;
+            return;
+        }
+    };
+
+    // Write as many 16KB chunks as the TCP send buffer will accept.
+    // Each call fills the buffer, then returns. The next iface.poll()
+    // transmits the data and opens the window for more.
+    loop {
+        let remaining = &conn.pending_response[conn.response_offset..];
+        if remaining.is_empty() {
+            // All data sent. Send TLS close_notify and close TCP.
+            guest_tls.send_close_notify();
+            let mut close_out = Vec::new();
+            if let Err(e) = guest_tls.write_tls(&mut close_out) {
+                log::warn!("close_notify encrypt failed: {e}");
             }
-            Err(e) => {
-                log::warn!("upstream relay error: {e}");
+            sock.send_slice(&close_out).ok();
+            sock.close();
+            conn.state = ConnState::Closing;
+            return;
+        }
+
+        let send_cap = sock.send_capacity() - sock.send_queue();
+        // TLS adds ~40 bytes overhead per record
+        let chunk_size = remaining.len().min(16384).min(send_cap.saturating_sub(256));
+        if chunk_size == 0 {
+            log::trace!(
+                "drain stalled: {}/{} bytes sent, send_cap={}, queue={}",
+                conn.response_offset,
+                conn.pending_response.len(),
+                send_cap,
+                sock.send_queue()
+            );
+            return; // TCP window full, try again after next poll
+        }
+
+        let chunk = &remaining[..chunk_size];
+        if let Err(e) = guest_tls.writer().write_all(chunk) {
+            log::warn!("guest TLS write failed: {e}");
+            sock.close();
+            conn.state = ConnState::Closing;
+            return;
+        }
+        conn.response_offset += chunk_size;
+
+        // Encrypt and push to smoltcp
+        let mut out = Vec::new();
+        if let Err(e) = guest_tls.write_tls(&mut out) {
+            log::warn!("guest TLS encrypt failed: {e}");
+            sock.close();
+            conn.state = ConnState::Closing;
+            return;
+        }
+        for tcp_chunk in out.chunks(65535) {
+            if let Err(e) = sock.send_slice(tcp_chunk) {
+                log::warn!("smoltcp send failed: {e}");
+                return;
             }
         }
     }
-
-    // Initiate graceful TCP close. Transitions to Closing state
-    // to let smoltcp finish the FIN exchange before we re-listen.
-    sock.close();
-    conn.state = ConnState::Closing;
 }
 
 #[cfg(test)]

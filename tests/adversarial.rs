@@ -38,7 +38,7 @@
 //! ```
 
 use redan::dns;
-use redan::secret::{SecretBinding, inject, scrub, strip_accept_encoding};
+use redan::secret::{SecretBinding, inject, rewrite_request_headers, scrub};
 use redan::tls::extract_sni;
 use smoltcp::wire::Ipv4Address;
 
@@ -841,7 +841,7 @@ fn e04_websocket_upgrade_detected() {
 /// can't match literal secret bytes in the compressed stream.
 /// CWE-838, RFC 7231.
 #[test]
-fn h01_strip_accept_encoding() {
+fn h01_rewrite_request_headers() {
     let req = http_request(
         "GET",
         "/api",
@@ -850,14 +850,25 @@ fn h01_strip_accept_encoding() {
             ("Accept", "application/json"),
             ("Accept-Encoding", "gzip, deflate, br"),
             ("Authorization", "Bearer token"),
+            ("Connection", "keep-alive"),
         ],
         "",
     );
-    let stripped = strip_accept_encoding(&req);
-    let text = String::from_utf8_lossy(&stripped);
+    let rewritten = rewrite_request_headers(&req);
+    let text = String::from_utf8_lossy(&rewritten);
     assert!(
         !text.to_lowercase().contains("accept-encoding"),
         "Accept-Encoding header must be removed"
+    );
+    assert!(
+        text.contains("Connection: close"),
+        "Connection must be forced to close"
+    );
+    // Only one Connection header
+    assert_eq!(
+        text.matches("Connection:").count(),
+        1,
+        "must not duplicate Connection header"
     );
     // Other headers preserved
     assert!(text.contains("Authorization: Bearer token"));

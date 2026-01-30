@@ -123,7 +123,10 @@ pub fn relay_upstream(
     request: &[u8],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    // Per-read timeout. Large responses (multi-MB tarballs) may have
+    // gaps between chunks from CDNs. 120s is generous but prevents
+    // infinite hangs.
+    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
 
     // Complete TLS handshake
     while tls.is_handshaking() {
