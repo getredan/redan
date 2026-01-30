@@ -15,18 +15,12 @@ fn rootfs_path() -> &'static str {
     "/tmp/redan-rootfs"
 }
 
-fn skip_if_no_kvm() {
-    if !Path::new("/dev/kvm").exists() {
-        eprintln!("SKIP: /dev/kvm not available");
-        return;
-    }
+fn has_kvm() -> bool {
+    Path::new("/dev/kvm").exists()
 }
 
-fn skip_if_no_rootfs() {
-    if !Path::new(rootfs_path()).join("bin/busybox").exists() {
-        eprintln!("SKIP: {} not available", rootfs_path());
-        return;
-    }
+fn has_rootfs() -> bool {
+    Path::new(rootfs_path()).join("bin/busybox").exists()
 }
 
 /// Boot a VM, resolve DNS, make an HTTPS request through the MITM proxy,
@@ -34,8 +28,14 @@ fn skip_if_no_rootfs() {
 #[test]
 #[ignore]
 fn end_to_end_secret_injection() {
-    skip_if_no_kvm();
-    skip_if_no_rootfs();
+    if !has_kvm() {
+        eprintln!("SKIP: no KVM");
+        return;
+    }
+    if !has_rootfs() {
+        eprintln!("SKIP: no rootfs");
+        return;
+    }
 
     let ca = MitmCa::generate();
     vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem());
@@ -86,8 +86,14 @@ fn end_to_end_secret_injection() {
 #[test]
 #[ignore]
 fn synthetic_dns_resolution() {
-    skip_if_no_kvm();
-    skip_if_no_rootfs();
+    if !has_kvm() {
+        eprintln!("SKIP: no KVM");
+        return;
+    }
+    if !has_rootfs() {
+        eprintln!("SKIP: no rootfs");
+        return;
+    }
 
     let ca = MitmCa::generate();
     vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem());

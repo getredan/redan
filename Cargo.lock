@@ -653,6 +653,7 @@ dependencies = [
 name = "redan"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "env_logger",
  "log",
