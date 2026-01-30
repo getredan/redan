@@ -83,8 +83,6 @@ For tests and security-sensitive code, get second opinions from oracle models.
 | **kimi** | Kimi | Security review, second opinion | `kimi -p '...' < file` via tmux |
 | **mistral** | Mistral Large | Security review, pair review | `pi` with Mistral Large model via tmux |
 
-Use **Mistral Large** (not Codestral) for reviews. Mistral Large handles reasoning, multi-step analysis, and context. Codestral is for raw code generation, not review.
-
 Use at least two independent reviewers for: proxy logic, secret handling, VM isolation, TLS implementation.
 
 ```bash
