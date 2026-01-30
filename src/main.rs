@@ -4,6 +4,7 @@ use std::time::Duration;
 use clap::Parser;
 
 use redan::ca::MitmCa;
+use redan::image;
 use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::vm;
@@ -13,9 +14,14 @@ use redan::vm;
 enum Cli {
     /// Execute a command inside a microVM
     Exec {
-        /// Root filesystem path
-        #[arg(long, default_value = "/tmp/redan-rootfs")]
-        rootfs: String,
+        /// Named image to use (from `redan image create`).
+        /// Mutually exclusive with --rootfs.
+        #[arg(long, conflicts_with = "rootfs")]
+        image: Option<String>,
+
+        /// Root filesystem path (for manual rootfs management).
+        #[arg(long)]
+        rootfs: Option<String>,
 
         /// Shell command to run in the guest.
         /// If omitted in interactive mode, defaults to /bin/sh.
@@ -41,6 +47,38 @@ enum Cli {
         #[arg(long = "mount", value_name = "HOST:GUEST")]
         mounts: Vec<String>,
     },
+
+    /// Manage rootfs images
+    Image {
+        #[command(subcommand)]
+        action: ImageAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ImageAction {
+    /// Create a new image from Alpine base
+    Create {
+        /// Image name
+        name: String,
+
+        /// Packages to install via apk (space-separated)
+        #[arg(long, value_delimiter = ' ', num_args = 1..)]
+        packages: Vec<String>,
+
+        /// Additional commands to run during build
+        #[arg(long = "run", value_name = "CMD")]
+        run_commands: Vec<String>,
+    },
+
+    /// List local images
+    List,
+
+    /// Remove an image
+    Remove {
+        /// Image name
+        name: String,
+    },
 }
 
 fn main() {
@@ -49,6 +87,7 @@ fn main() {
 
     match cli {
         Cli::Exec {
+            image: image_name,
             rootfs,
             command,
             interactive,
@@ -56,6 +95,21 @@ fn main() {
             secrets,
             mounts,
         } => {
+            let rootfs_path = match (&image_name, &rootfs) {
+                (Some(name), _) => {
+                    let p = image::image_path(name);
+                    if !p.exists() {
+                        eprintln!("image '{name}' not found. Run: redan image create {name} ...");
+                        std::process::exit(1);
+                    }
+                    p.to_string_lossy().into_owned()
+                }
+                (_, Some(path)) => path.clone(),
+                (None, None) => {
+                    eprintln!("specify --image <name> or --rootfs <path>");
+                    std::process::exit(1);
+                }
+            };
             let command = command.unwrap_or_else(|| {
                 if interactive {
                     "/bin/sh".to_string()
@@ -63,8 +117,73 @@ fn main() {
                     "echo 'no --command specified'".to_string()
                 }
             });
-            exec(&rootfs, &command, interactive, timeout, &secrets, &mounts);
+            exec(
+                &rootfs_path,
+                &command,
+                interactive,
+                timeout,
+                &secrets,
+                &mounts,
+            );
         }
+
+        Cli::Image { action } => match action {
+            ImageAction::Create {
+                name,
+                packages,
+                run_commands,
+            } => match image::create(&name, &packages, &run_commands) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("image create failed: {e}");
+                    std::process::exit(1);
+                }
+            },
+            ImageAction::List => {
+                let images = image::list();
+                if images.is_empty() {
+                    eprintln!(
+                        "no images. Create one with: redan image create <name> --packages 'nodejs npm'"
+                    );
+                } else {
+                    for name in images {
+                        let path = image::image_path(&name);
+                        let size = dir_size(&path).unwrap_or(0);
+                        println!("{name:20} {}", humanize_bytes(size));
+                    }
+                }
+            }
+            ImageAction::Remove { name } => match image::remove(&name) {
+                Ok(()) => eprintln!("removed image \'{name}\'"),
+                Err(e) => {
+                    eprintln!("remove failed: {e}");
+                    std::process::exit(1);
+                }
+            },
+        },
+    }
+}
+
+fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    for entry in walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    Ok(total)
+}
+
+fn humanize_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 

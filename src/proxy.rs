@@ -543,19 +543,25 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
                 // request, so tell the client not to reuse.
                 let scrubbed = rewrite_connection_close(&scrubbed);
 
-                // Write response back through guest TLS
-                if let Err(e) = guest_tls.writer().write_all(&scrubbed) {
-                    log::warn!("guest TLS write failed: {e}");
-                }
-                let mut guest_out = Vec::new();
-                if let Err(e) = guest_tls.write_tls(&mut guest_out) {
-                    log::warn!("guest TLS encrypt failed: {e}");
-                }
-
-                for chunk in guest_out.chunks(65535) {
-                    if let Err(e) = sock.send_slice(chunk) {
-                        log::warn!("smoltcp send failed: {e}");
+                // Write response back through guest TLS in chunks.
+                // Large responses (>16KB) overflow rustls internal buffers
+                // if written all at once. Flush TLS records to smoltcp
+                // between chunks.
+                for chunk in scrubbed.chunks(16384) {
+                    if let Err(e) = guest_tls.writer().write_all(chunk) {
+                        log::warn!("guest TLS write failed: {e}");
                         break;
+                    }
+                    let mut guest_out = Vec::new();
+                    if let Err(e) = guest_tls.write_tls(&mut guest_out) {
+                        log::warn!("guest TLS encrypt failed: {e}");
+                        break;
+                    }
+                    for tcp_chunk in guest_out.chunks(65535) {
+                        if let Err(e) = sock.send_slice(tcp_chunk) {
+                            log::warn!("smoltcp send failed: {e}");
+                            break;
+                        }
                     }
                 }
 

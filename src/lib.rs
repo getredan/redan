@@ -1,6 +1,7 @@
 pub mod ca;
 pub mod dns;
 pub mod ffi;
+pub mod image;
 pub mod net;
 pub mod proxy;
 pub mod secret;
