@@ -207,8 +207,7 @@ fn response_complete(data: &[u8]) -> bool {
 
     // Chunked Transfer-Encoding: terminal chunk is "0\r\n\r\n"
     if headers.contains("transfer-encoding: chunked") {
-        return data[body_start..].ends_with(b"0\r\n\r\n")
-            || data[body_start..].ends_with(b"0\r\n\r\n");
+        return data[body_start..].ends_with(b"0\r\n\r\n");
     }
 
     false

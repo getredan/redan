@@ -123,8 +123,9 @@ impl Vm {
             };
             assert!(ret >= 0, "krun_set_exec failed: {ret}");
 
-            // Keep guest_sock alive until VM exits
-            std::mem::forget(guest_sock);
+            // Keep guest_sock alive for the duration of the VM.
+            // ManuallyDrop over mem::forget to make intent explicit.
+            let _guest_sock = std::mem::ManuallyDrop::new(guest_sock);
 
             log::info!("entering VM");
             unsafe { ffi::krun_start_enter(ctx_id) }

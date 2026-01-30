@@ -5,14 +5,12 @@
 use std::os::raw::{c_char, c_int};
 
 pub const KRUN_LOG_LEVEL_OFF: u32 = 0;
-pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
 pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
 pub const KRUN_LOG_TARGET_DEFAULT: c_int = -1;
 
 unsafe extern "C" {
     pub fn krun_init_log(target_fd: c_int, level: u32, style: u32, options: u32) -> i32;
     pub fn krun_create_ctx() -> i32;
-    pub fn krun_free_ctx(ctx_id: u32) -> i32;
     pub fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32;
     pub fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
     pub fn krun_set_exec(

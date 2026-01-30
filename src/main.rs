@@ -198,3 +198,70 @@ fn exec(
         Duration::from_secs(timeout_secs),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_secret_basic() {
+        let (name, binding) = parse_secret("TOKEN=secret123:api.github.com").unwrap();
+        assert_eq!(name, "TOKEN");
+        assert_eq!(binding.real_value, "secret123");
+        assert_eq!(binding.allowed_hosts, vec!["api.github.com"]);
+        assert!(binding.placeholder.starts_with("redan_ph_token_"));
+    }
+
+    #[test]
+    fn parse_secret_value_with_colons() {
+        // Colon in value: `KEY=postgres://user:pass@host:5432:db.example.com`
+        let (name, binding) =
+            parse_secret("DB_URL=postgres://user:pass@host:5432:db.example.com").unwrap();
+        assert_eq!(name, "DB_URL");
+        assert_eq!(binding.real_value, "postgres://user:pass@host:5432");
+        assert_eq!(binding.allowed_hosts, vec!["db.example.com"]);
+    }
+
+    #[test]
+    fn parse_secret_multiple_hosts() {
+        let (_, binding) = parse_secret("KEY=val:api.github.com, registry.npmjs.org").unwrap();
+        assert_eq!(
+            binding.allowed_hosts,
+            vec!["api.github.com", "registry.npmjs.org"]
+        );
+    }
+
+    #[test]
+    fn parse_secret_empty_name_fails() {
+        assert!(parse_secret("=value:host.com").is_err());
+    }
+
+    #[test]
+    fn parse_secret_empty_value_fails() {
+        assert!(parse_secret("KEY=:host.com").is_err());
+    }
+
+    #[test]
+    fn parse_secret_empty_hosts_fails() {
+        assert!(parse_secret("KEY=value:").is_err());
+    }
+
+    #[test]
+    fn parse_secret_no_colon_fails() {
+        assert!(parse_secret("KEY=value").is_err());
+    }
+
+    #[test]
+    fn parse_mount_with_guest_path() {
+        let (host, guest) = parse_mount("/home/chris/project:/workspace");
+        assert_eq!(host, "/home/chris/project");
+        assert_eq!(guest, "/workspace");
+    }
+
+    #[test]
+    fn parse_mount_default_guest_path() {
+        let (host, guest) = parse_mount("/home/chris/project");
+        assert_eq!(host, "/home/chris/project");
+        assert_eq!(guest, "/workspace");
+    }
+}

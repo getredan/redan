@@ -211,26 +211,12 @@ fn process_connection(
     }
 }
 
-fn handle_http(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[SecretBinding]) {
+fn handle_http(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, _secrets: &[SecretBinding]) {
     let request = String::from_utf8_lossy(&conn.pending_guest_data);
     log::info!("HTTP request: {}", request.lines().next().unwrap_or(""));
 
-    // Extract Host header for secret injection
-    let host = request
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("host:"))
-        .and_then(|l| l.split(':').nth(1))
-        .map(|h| h.trim().to_string())
-        .unwrap_or_default();
-
-    let (injected, inject_count) = crate::secret::inject(&conn.pending_guest_data, &host, secrets);
-    if inject_count > 0 {
-        log::info!("SECRET INJECTED: {inject_count} replacement(s) for {host}");
-    }
-
-    // For now, respond with a static intercept marker for HTTP.
-    // Production: forward to upstream and relay response.
-    let _ = injected; // TODO: forward injected request upstream
+    // TODO: forward to upstream with secret injection when HTTP proxying is implemented.
+    // For now, respond with a static marker. No secret injection on plaintext HTTP.
     let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nREDAN_HTTP_INTERCEPT_OK\n";
     sock.send_slice(response.as_bytes()).ok();
     sock.close();
@@ -286,21 +272,34 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
 }
 
 /// Rewrite `Connection: keep-alive` to `Connection: close` in HTTP
-/// response headers. We close the smoltcp socket after each response,
-/// so the client must not attempt to reuse the connection.
+/// response headers (case-insensitive). We close the smoltcp socket
+/// after each response, so the client must not attempt to reuse.
 fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(data);
-    if let Some(header_end) = text.find("\r\n\r\n") {
-        let headers = &data[..header_end];
-        let body = &data[header_end..];
-        let headers_str = String::from_utf8_lossy(headers);
-        let rewritten = headers_str.replace("Connection: keep-alive", "Connection: close");
-        let mut result = rewritten.into_bytes();
-        result.extend_from_slice(body);
-        result
-    } else {
-        data.to_vec()
+    let Some(header_end) = text.find("\r\n\r\n") else {
+        return data.to_vec();
+    };
+    let headers_str = String::from_utf8_lossy(&data[..header_end]);
+    let body = &data[header_end..];
+
+    // Case-insensitive replacement
+    let mut rewritten = String::with_capacity(headers_str.len());
+    for line in headers_str.split("\r\n") {
+        if line.to_lowercase().starts_with("connection:") {
+            rewritten.push_str("Connection: close");
+        } else {
+            rewritten.push_str(line);
+        }
+        rewritten.push_str("\r\n");
     }
+    // Remove trailing \r\n (we'll get it from body which starts with \r\n\r\n)
+    if rewritten.ends_with("\r\n") {
+        rewritten.truncate(rewritten.len() - 2);
+    }
+
+    let mut result = rewritten.into_bytes();
+    result.extend_from_slice(body);
+    result
 }
 
 /// Check if accumulated data contains a complete HTTP request.
@@ -448,4 +447,50 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     // to let smoltcp finish the FIN exchange before we re-listen.
     sock.close();
     conn.state = ConnState::Closing;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_request_complete_get() {
+        let req = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn http_request_complete_post_with_body() {
+        let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn http_request_incomplete_post() {
+        let req = b"POST /api HTTP/1.1\r\nContent-Length: 100\r\n\r\nhello";
+        assert!(!http_request_complete(req));
+    }
+
+    #[test]
+    fn http_request_incomplete_no_headers_end() {
+        let req = b"GET / HTTP/1.1\r\nHost: example.com";
+        assert!(!http_request_complete(req));
+    }
+
+    #[test]
+    fn rewrite_connection_close_case_insensitive() {
+        let resp = b"HTTP/1.1 200 OK\r\nconnection: keep-alive\r\n\r\nbody";
+        let result = rewrite_connection_close(resp);
+        let text = String::from_utf8_lossy(&result);
+        assert!(text.contains("Connection: close"));
+        assert!(!text.to_lowercase().contains("keep-alive"));
+        assert!(text.ends_with("body"));
+    }
+
+    #[test]
+    fn rewrite_connection_close_no_header() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
+        let result = rewrite_connection_close(resp);
+        assert_eq!(result, resp);
+    }
 }
