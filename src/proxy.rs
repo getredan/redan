@@ -161,6 +161,8 @@ enum ConnState {
     WaitingForData,
     TlsHandshake,
     Proxying,
+    /// sock.close() called, waiting for TCP FIN exchange to complete.
+    Closing,
     Done,
 }
 
@@ -196,6 +198,13 @@ fn process_connection(
 
         ConnState::TlsHandshake | ConnState::Proxying => {
             handle_tls_data(sock, conn, secrets);
+        }
+
+        ConnState::Closing => {
+            // Wait for TCP close sequence to complete
+            if !sock.is_active() {
+                conn.state = ConnState::Done;
+            }
         }
 
         ConnState::Done => {}
@@ -273,6 +282,24 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
         && n > 0
     {
         sock.send_slice(&out).ok();
+    }
+}
+
+/// Rewrite `Connection: keep-alive` to `Connection: close` in HTTP
+/// response headers. We close the smoltcp socket after each response,
+/// so the client must not attempt to reuse the connection.
+fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(data);
+    if let Some(header_end) = text.find("\r\n\r\n") {
+        let headers = &data[..header_end];
+        let body = &data[header_end..];
+        let headers_str = String::from_utf8_lossy(headers);
+        let rewritten = headers_str.replace("Connection: keep-alive", "Connection: close");
+        let mut result = rewritten.into_bytes();
+        result.extend_from_slice(body);
+        result
+    } else {
+        data.to_vec()
     }
 }
 
@@ -382,16 +409,18 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
                     log::info!("RESPONSE SCRUBBED: {scrub_count} value(s) removed");
                 }
 
-                let resp_text = String::from_utf8_lossy(&scrubbed);
-                let first_line = resp_text.lines().next().unwrap_or("");
-                log::info!("upstream response ({} bytes): {first_line}", scrubbed.len());
+                log::info!(
+                    "upstream response ({} bytes): {}",
+                    scrubbed.len(),
+                    String::from_utf8_lossy(&scrubbed)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                );
 
-                // Log response body for /v1/messages to debug Claude Code issues
-                if text.contains("/v1/messages") && !text.contains("count_tokens") {
-                    for line in resp_text.lines() {
-                        log::debug!("  | {line}");
-                    }
-                }
+                // Rewrite Connection header: we close after each
+                // request, so tell the client not to reuse.
+                let scrubbed = rewrite_connection_close(&scrubbed);
 
                 // Write response back through guest TLS, may need
                 // multiple send_slice calls for large responses
@@ -402,6 +431,12 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
                 for chunk in guest_out.chunks(65535) {
                     sock.send_slice(chunk).ok();
                 }
+
+                // Send TLS close_notify so the client knows we're done
+                guest_tls.send_close_notify();
+                let mut close_out = Vec::new();
+                guest_tls.write_tls(&mut close_out).ok();
+                sock.send_slice(&close_out).ok();
             }
             Err(e) => {
                 log::warn!("upstream relay error: {e}");
@@ -409,6 +444,8 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
         }
     }
 
+    // Initiate graceful TCP close. Transitions to Closing state
+    // to let smoltcp finish the FIN exchange before we re-listen.
     sock.close();
-    conn.state = ConnState::Done;
+    conn.state = ConnState::Closing;
 }
