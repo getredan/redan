@@ -64,6 +64,10 @@ fn parse_qname(packet: &[u8], start: usize) -> Option<(String, usize)> {
         if len & 0xC0 == 0xC0 {
             return None;
         }
+        // RFC 1035 s2.3.4: labels are 63 octets or less
+        if len > 63 {
+            return None;
+        }
         if pos + 1 + len > packet.len() {
             return None;
         }
@@ -192,5 +196,24 @@ mod tests {
     fn rejects_truncated_packet() {
         let gw = Ipv4Address::new(192, 168, 127, 1);
         assert!(handle_query(&[0; 5], gw).is_none());
+    }
+
+    #[test]
+    fn rejects_oversized_label() {
+        let gw = Ipv4Address::new(192, 168, 127, 1);
+        // Build a query with a 64-byte label (exceeds 63 max)
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&0x1234u16.to_be_bytes());
+        pkt.extend_from_slice(&0x0100u16.to_be_bytes());
+        pkt.extend_from_slice(&1u16.to_be_bytes());
+        pkt.extend_from_slice(&[0u8; 6]); // ANCOUNT, NSCOUNT, ARCOUNT
+        // Label: length 64 + 64 bytes of 'a'
+        pkt.push(64);
+        pkt.extend_from_slice(&[b'a'; 64]);
+        pkt.push(0); // root
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+
+        assert!(handle_query(&pkt, gw).is_none());
     }
 }

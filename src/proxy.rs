@@ -36,13 +36,27 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
     });
 
     let mut sockets = SocketSet::new(vec![]);
-    let mut connections: HashMap<u16, ProxyConn> = HashMap::new();
+    let mut connections: HashMap<SocketHandle, ProxyConn> = HashMap::new();
 
     // DNS
     let dns_handle = add_udp_listener(&mut sockets, 53);
-    // HTTP + HTTPS
-    let http_handle = add_tcp_listener(&mut sockets, 80);
-    let https_handle = add_tcp_listener(&mut sockets, 443);
+
+    // Listener sockets: each port has a dedicated socket that stays in
+    // LISTEN state. When a connection arrives, the listener transitions
+    // to ESTABLISHED; we move it to `connections` and create a fresh
+    // listener for the next connection.
+    let mut listeners: Vec<Listener> = vec![
+        Listener {
+            handle: add_tcp_listener(&mut sockets, 80),
+            port: 80,
+            is_tls: false,
+        },
+        Listener {
+            handle: add_tcp_listener(&mut sockets, 443),
+            port: 443,
+            is_tls: true,
+        },
+    ];
 
     log::info!("proxy listening on :53 (dns), :80, :443");
 
@@ -60,29 +74,59 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
 
         if matches!(result, PollResult::SocketStateChanged) {
             process_dns(&mut sockets, dns_handle);
-            check_accept(&mut sockets, http_handle, 80, false, &mut connections);
-            check_accept(&mut sockets, https_handle, 443, true, &mut connections);
 
-            let mut done_ports: Vec<u16> = Vec::new();
-            for (&port, conn) in connections.iter_mut() {
-                process_connection(&mut sockets, conn, ca, secrets);
-                if conn.state == ConnState::Done {
-                    done_ports.push(port);
+            // Check each listener for new connections. When a listener
+            // socket transitions to established, promote it to an active
+            // connection and spawn a replacement listener.
+            for listener in &mut listeners {
+                let sock = sockets.get_mut::<tcp::Socket>(listener.handle);
+                if sock.may_recv() && sock.state() != tcp::State::Listen {
+                    log::info!(
+                        "connection on :{} from {:?}",
+                        listener.port,
+                        sock.remote_endpoint()
+                    );
+                    let conn_handle = listener.handle;
+                    connections.insert(
+                        conn_handle,
+                        ProxyConn {
+                            handle: conn_handle,
+                            upstream: None,
+                            upstream_tls: None,
+                            guest_tls: None,
+                            sni: None,
+                            is_tls: listener.is_tls,
+                            pending_guest_data: Vec::new(),
+                            state: ConnState::WaitingForData,
+                        },
+                    );
+                    // Swap in a fresh listener so we can accept the next connection
+                    listener.handle = add_tcp_listener(&mut sockets, listener.port);
                 }
             }
 
-            for port in done_ports {
-                let conn = connections.remove(&port).unwrap();
-                // Re-listen: smoltcp TCP sockets can't accept new connections
-                // after the previous one closes. We must abort + re-listen.
-                let sock = sockets.get_mut::<tcp::Socket>(conn.handle);
-                sock.abort();
-                sock.listen(port).unwrap();
+            let mut done_handles: Vec<SocketHandle> = Vec::new();
+            for (&handle, conn) in connections.iter_mut() {
+                process_connection(&mut sockets, conn, ca, secrets);
+                if conn.state == ConnState::Done {
+                    done_handles.push(handle);
+                }
+            }
+
+            for handle in done_handles {
+                connections.remove(&handle);
+                sockets.remove(handle);
             }
         }
 
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+struct Listener {
+    handle: SocketHandle,
+    port: u16,
+    is_tls: bool,
 }
 
 // --- DNS ---
@@ -115,32 +159,6 @@ fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     let mut sock = tcp::Socket::new(rx_buf, tx_buf);
     sock.listen(port).unwrap();
     sockets.add(sock)
-}
-
-fn check_accept(
-    sockets: &mut SocketSet,
-    listen_handle: SocketHandle,
-    port: u16,
-    is_tls: bool,
-    connections: &mut HashMap<u16, ProxyConn>,
-) {
-    let sock = sockets.get_mut::<tcp::Socket>(listen_handle);
-    if sock.may_recv() && !connections.contains_key(&port) {
-        log::info!("connection on :{port} from {:?}", sock.remote_endpoint());
-        connections.insert(
-            port,
-            ProxyConn {
-                handle: listen_handle,
-                upstream: None,
-                upstream_tls: None,
-                guest_tls: None,
-                sni: None,
-                is_tls,
-                pending_guest_data: Vec::new(),
-                state: ConnState::WaitingForData,
-            },
-        );
-    }
 }
 
 // --- Connection state machine ---
