@@ -114,18 +114,9 @@ impl Vm {
                 krun_check!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
             }
 
-            // Interactive console: pass host stdin/stdout/stderr to guest.
-            // libkrun's init redirects these to the guest process.
-            if config.interactive {
-                use std::os::unix::io::AsRawFd;
-                let stdin_fd = std::io::stdin().as_raw_fd();
-                let stdout_fd = std::io::stdout().as_raw_fd();
-                let stderr_fd = std::io::stderr().as_raw_fd();
-                let ret = unsafe {
-                    ffi::krun_add_virtio_console_default(ctx_id, stdin_fd, stdout_fd, stderr_fd)
-                };
-                krun_check!(ret >= 0, "krun_add_virtio_console_default failed: {ret}");
-            }
+            // The implicit console uses the host process's stdio.
+            // Interactive mode adds raw terminal on the host (caller handles).
+            // Non-interactive: console output goes to host stdout as-is.
 
             // exec: ash -c "<command>"
             let exec_path = CString::new("/bin/busybox").unwrap();
