@@ -105,13 +105,17 @@ pub fn connect_upstream(
 }
 
 /// Complete a TLS handshake, send request, read full response.
+///
+/// Handles both Content-Length and chunked Transfer-Encoding responses.
+/// For chunked encoding (including SSE streams), reads until the terminal
+/// chunk (`0\r\n\r\n`) or the peer closes the connection.
 pub fn relay_upstream(
     stream: &mut TcpStream,
     tls: &mut rustls::ClientConnection,
     request: &[u8],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
     // Complete TLS handshake
     while tls.is_handshaking() {
@@ -143,14 +147,17 @@ pub fn relay_upstream(
 
         let state = tls.process_new_packets()?;
 
-        match tls.reader().read(&mut buf) {
-            Ok(n) if n > 0 => response.extend_from_slice(&buf[..n]),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => break,
+        loop {
+            match tls.reader().read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
         }
 
         if state.peer_has_closed() {
+            // Drain remaining plaintext
             loop {
                 match tls.reader().read(&mut buf) {
                     Ok(n) if n > 0 => response.extend_from_slice(&buf[..n]),
@@ -160,7 +167,6 @@ pub fn relay_upstream(
             break;
         }
 
-        // Heuristic: check if we received the full HTTP response
         if response_complete(&response) {
             break;
         }
@@ -169,20 +175,20 @@ pub fn relay_upstream(
     Ok(response)
 }
 
-/// Check if a buffer looks like a complete HTTP response (has Content-Length
-/// header and we've received that many body bytes).
+/// Check if a buffer contains a complete HTTP response.
+///
+/// Supports Content-Length and chunked Transfer-Encoding. For chunked
+/// responses, looks for the terminal chunk marker `0\r\n\r\n`.
 fn response_complete(data: &[u8]) -> bool {
-    if data.len() < 100 {
-        return false;
-    }
     let text = String::from_utf8_lossy(data);
     let Some(header_end) = text.find("\r\n\r\n") else {
         return false;
     };
-    let headers = &text[..header_end];
-    if let Some(cl_line) = headers
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-length:"))
+    let headers = &text[..header_end].to_lowercase();
+    let body_start = header_end + 4;
+
+    // Content-Length: exact byte count
+    if let Some(cl_line) = headers.lines().find(|l| l.starts_with("content-length:"))
         && let Ok(cl) = cl_line
             .split(':')
             .nth(1)
@@ -190,9 +196,15 @@ fn response_complete(data: &[u8]) -> bool {
             .trim()
             .parse::<usize>()
     {
-        let body_len = data.len() - header_end - 4;
-        return body_len >= cl;
+        return data.len() - body_start >= cl;
     }
+
+    // Chunked Transfer-Encoding: terminal chunk is "0\r\n\r\n"
+    if headers.contains("transfer-encoding: chunked") {
+        return data[body_start..].ends_with(b"0\r\n\r\n")
+            || data[body_start..].ends_with(b"0\r\n\r\n");
+    }
+
     false
 }
 
@@ -274,10 +286,9 @@ mod tests {
 
     #[test]
     fn response_complete_with_content_length() {
-        // Must be >100 bytes total for the heuristic to kick in
         let body = "x".repeat(80);
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Pad: padding-header-value\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         assert!(response_complete(resp.as_bytes()));
@@ -285,7 +296,26 @@ mod tests {
 
     #[test]
     fn response_incomplete_body() {
-        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\nX-Pad: padding-header-value-to-make-this-long-enough-for-the-check\r\n\r\nhello";
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\nhello";
         assert!(!response_complete(resp));
+    }
+
+    #[test]
+    fn response_complete_chunked() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                      5\r\nhello\r\n0\r\n\r\n";
+        assert!(response_complete(resp));
+    }
+
+    #[test]
+    fn response_incomplete_chunked() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                      5\r\nhello\r\n";
+        assert!(!response_complete(resp));
+    }
+
+    #[test]
+    fn response_complete_no_headers_yet() {
+        assert!(!response_complete(b"HTTP/1.1 200 OK\r\n"));
     }
 }
