@@ -4,6 +4,20 @@
 /// - UDP port 53: synthetic DNS (all names -> gateway IP)
 /// - TCP port 80: HTTP interception
 /// - TCP port 443: TLS MITM (SNI extraction, ephemeral cert, upstream relay)
+///
+/// ## Network model
+///
+/// The guest can reach arbitrary internet hosts through the proxy. The
+/// proxy does NOT restrict which hosts the guest connects to. It only
+/// controls whether secrets are injected (host allowlist). This is by
+/// design: agents need internet access to do useful work.
+///
+/// ## DNS rebinding risk
+///
+/// `connect_upstream()` in tls.rs performs real DNS resolution on the
+/// host side. If an attacker controls an allowed host's DNS records,
+/// they could DNS-rebind to internal IPs. Mitigated by: the allowlist
+/// is user-controlled, so users should only allow trusted hosts.
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -347,6 +361,42 @@ fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Check if an HTTP request contains an Upgrade header (case-insensitive).
+/// Used to reject WebSocket and other protocol upgrades.
+fn request_has_upgrade(data: &[u8]) -> bool {
+    let header_end = data
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(data.len());
+    let headers = &data[..header_end];
+
+    // Scan line-by-line for "upgrade:" prefix
+    let mut pos = 0;
+    while pos < headers.len() {
+        let line_end = headers[pos..]
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| pos + p)
+            .unwrap_or(headers.len());
+
+        let line = &headers[pos..line_end];
+        if line.len() >= 8
+            && line[..8]
+                .iter()
+                .zip(b"upgrade:")
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        {
+            return true;
+        }
+
+        pos = line_end + 2;
+        if pos > headers.len() {
+            break;
+        }
+    }
+    false
+}
+
 /// Check if accumulated data contains a complete HTTP request.
 /// Looks for headers ending with \r\n\r\n, then checks Content-Length
 /// to determine if the full body has arrived. Requests with no
@@ -437,6 +487,30 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
         request.len(),
         text.lines().next().unwrap_or("")
     );
+
+    // Reject WebSocket upgrades. After 101 Switching Protocols, the
+    // connection carries binary frames that bypass HTTP scrubbing.
+    // RFC 6455, CWE-444.
+    if request_has_upgrade(&request) {
+        log::warn!("rejected WebSocket/Upgrade request");
+        let resp = b"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n";
+        if let Err(e) = guest_tls.writer().write_all(resp) {
+            log::warn!("upgrade rejection write failed: {e}");
+        }
+        let mut out = Vec::new();
+        if let Err(e) = guest_tls.write_tls(&mut out) {
+            log::warn!("upgrade rejection encrypt failed: {e}");
+        }
+        for chunk in out.chunks(65535) {
+            if let Err(e) = sock.send_slice(chunk) {
+                log::warn!("upgrade rejection send failed: {e}");
+                break;
+            }
+        }
+        sock.close();
+        conn.state = ConnState::Closing;
+        return;
+    }
 
     let hostname = conn.sni.as_deref().unwrap_or("");
     // Strip Accept-Encoding so upstream returns uncompressed responses.
@@ -550,6 +624,24 @@ mod tests {
         let resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
         let result = rewrite_connection_close(resp);
         assert_eq!(result, resp);
+    }
+
+    #[test]
+    fn request_has_upgrade_websocket() {
+        let req = b"GET /ws HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+        assert!(request_has_upgrade(req));
+    }
+
+    #[test]
+    fn request_has_upgrade_case_insensitive() {
+        let req = b"GET /ws HTTP/1.1\r\nupgrade: websocket\r\n\r\n";
+        assert!(request_has_upgrade(req));
+    }
+
+    #[test]
+    fn request_has_upgrade_none() {
+        let req = b"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(!request_has_upgrade(req));
     }
 
     #[test]
