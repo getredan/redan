@@ -76,15 +76,15 @@ This is a security-critical project. Tests are load-bearing, not decorative.
 For tests and security-sensitive code, get second opinions from oracle models:
 
 ```bash
-# Via tmux (claude and codex block)
+# Via tmux (claude and kimi block)
 SOCKET="/tmp/claude-tmux-sockets/claude.sock"
 tmux -S "$SOCKET" send-keys -t review:0.0 "claude -p 'Review this for security issues: ...' < src/proxy.rs" Enter
+tmux -S "$SOCKET" send-keys -t review:0.1 "kimi -p 'Review for security issues' < src/proxy.rs" Enter
 
-# Kimi (direct CLI)
-kimi -p "Review for security issues" < src/proxy.rs
+# Mistral via pi (set MISTRAL_API_KEY)
 ```
 
-Use at least two independent reviewers for: proxy logic, secret handling, VM isolation, TLS implementation.
+Oracles: **claude**, **kimi**, **mistral**. Use at least two independent reviewers for: proxy logic, secret handling, VM isolation, TLS implementation.
 
 ## Architecture
 
