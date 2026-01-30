@@ -68,13 +68,23 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
 
     let allowed_hosts: Vec<String> = hosts.split(',').map(|h| h.trim().to_string()).collect();
 
-    // Generate a deterministic-looking placeholder
-    let placeholder = format!("redan_ph_{}_{:08x}", env_name.to_lowercase(), {
+    // Random placeholder suffix. Not derived from env name or value,
+    // so it can't be predicted by a compromised guest.
+    let random_suffix: u64 = {
+        use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        env_name.hash(&mut hasher);
-        (hasher.finish() & 0xFFFF_FFFF) as u32
-    });
+        use std::time::SystemTime;
+        let mut h = DefaultHasher::new();
+        env_name.hash(&mut h);
+        SystemTime::now().hash(&mut h);
+        std::process::id().hash(&mut h);
+        h.finish()
+    };
+    let placeholder = format!(
+        "redan_ph_{}_{:016x}",
+        env_name.to_lowercase(),
+        random_suffix
+    );
 
     let binding = SecretBinding {
         placeholder: placeholder.clone(),

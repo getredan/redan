@@ -2,43 +2,89 @@
 //!
 //! Secrets are defined as bindings between a placeholder token (visible to
 //! the guest) and a real value (only in host memory). The proxy replaces
-//! placeholders with real values in outbound requests and scrubs real values
-//! from inbound responses.
+//! placeholders with real values in outbound HTTP request headers and scrubs
+//! real values from inbound responses.
+//!
+//! ## Limitations
+//!
+//! Response scrubbing is best-effort. It matches the literal secret bytes.
+//! Secrets reflected in encoded forms (base64, URL-encoding, JSON unicode
+//! escapes, gzip-compressed bodies) will not be caught. Scrubbing reduces
+//! accidental exposure; it is not a hard security boundary. The primary
+//! protection is host-based allowlisting -- secrets are only injected for
+//! requests to explicitly permitted hosts.
 
 /// A secret the proxy knows how to inject.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SecretBinding {
     /// Placeholder token visible to the guest (e.g., `redan_ph_github_a1b2c3d4`)
     pub placeholder: String,
-    /// Real secret value, only in host memory
+    /// Real secret value, only in host memory.
     pub real_value: String,
-    /// Hosts this secret may be injected for (e.g., `["api.github.com"]`)
+    /// Hosts this secret may be injected for (e.g., `["api.github.com"]`).
     pub allowed_hosts: Vec<String>,
 }
 
-/// Replace placeholder tokens with real values in an HTTP request.
+impl std::fmt::Debug for SecretBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretBinding")
+            .field("placeholder", &self.placeholder)
+            .field("real_value", &"[REDACTED]")
+            .field("allowed_hosts", &self.allowed_hosts)
+            .finish()
+    }
+}
+
+/// Replace placeholder tokens with real values in HTTP request headers only.
+///
+/// The request line and body are left untouched to prevent secrets from
+/// leaking into URL paths, query strings, or request bodies that could
+/// end up in server logs, CDN caches, or Referer headers.
 ///
 /// Returns the (possibly modified) request data and the number of injections.
 pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
-    let mut result = data.to_vec();
+    let header_end = find_header_end(data).unwrap_or(data.len());
+    // Find end of request line (first \r\n)
+    let request_line_end = data[..header_end]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|p| p + 2)
+        .unwrap_or(0);
+
+    // Only operate on headers (between request line and body)
+    let headers = &data[request_line_end..header_end];
+    let mut header_bytes = headers.to_vec();
     let mut count = 0;
 
     for secret in secrets {
         if !secret.allowed_hosts.iter().any(|h| h == hostname) {
             continue;
         }
-        let text = String::from_utf8_lossy(&result);
-        if text.contains(&secret.placeholder) {
-            let replaced = text.replace(&secret.placeholder, &secret.real_value);
-            result = replaced.into_bytes();
+        if let Some(replaced) = byte_replace(
+            &header_bytes,
+            secret.placeholder.as_bytes(),
+            secret.real_value.as_bytes(),
+        ) {
+            header_bytes = replaced;
             count += 1;
         }
     }
 
+    if count == 0 {
+        return (data.to_vec(), 0);
+    }
+
+    // Reassemble: request line + modified headers + body
+    let mut result = Vec::with_capacity(data.len());
+    result.extend_from_slice(&data[..request_line_end]);
+    result.extend_from_slice(&header_bytes);
+    result.extend_from_slice(&data[header_end..]);
     (result, count)
 }
 
 /// Replace real secret values with placeholders in an HTTP response.
+///
+/// Best-effort: matches literal bytes only. See module docs for limitations.
 ///
 /// Returns the (possibly modified) response data and the number of scrubs.
 pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
@@ -46,15 +92,57 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     let mut count = 0;
 
     for secret in secrets {
-        let text = String::from_utf8_lossy(&result);
-        if text.contains(&secret.real_value) {
-            let cleaned = text.replace(&secret.real_value, &secret.placeholder);
-            result = cleaned.into_bytes();
+        if let Some(replaced) = byte_replace(
+            &result,
+            secret.real_value.as_bytes(),
+            secret.placeholder.as_bytes(),
+        ) {
+            result = replaced;
             count += 1;
         }
     }
 
     (result, count)
+}
+
+/// Find the byte offset of \r\n\r\n (header/body separator).
+fn find_header_end(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
+}
+
+/// Replace all occurrences of `needle` in `haystack` with `replacement`.
+/// Returns `None` if needle is not found (avoids allocation).
+/// Operates on raw bytes -- no UTF-8 assumptions.
+fn byte_replace(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+
+    let mut result = Vec::new();
+    let mut last_end = 0;
+    let mut found = false;
+    let mut i = 0;
+
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            found = true;
+            result.extend_from_slice(&haystack[last_end..i]);
+            result.extend_from_slice(replacement);
+            i += needle.len();
+            last_end = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    result.extend_from_slice(&haystack[last_end..]);
+    Some(result)
 }
 
 #[cfg(test)]
@@ -70,19 +158,41 @@ mod tests {
     }
 
     #[test]
-    fn inject_replaces_placeholder() {
+    fn inject_replaces_placeholder_in_headers() {
         let secrets = vec![test_binding()];
-        let req = b"Authorization: Bearer redan_ph_test_1234\r\n";
+        let req = b"POST /api HTTP/1.1\r\nAuthorization: Bearer redan_ph_test_1234\r\nHost: api.github.com\r\n\r\nbody";
         let (result, count) = inject(req, "api.github.com", &secrets);
         assert_eq!(count, 1);
-        assert!(String::from_utf8_lossy(&result).contains("ghp_RealSecretValue99"));
-        assert!(!String::from_utf8_lossy(&result).contains("redan_ph_test_1234"));
+        let text = String::from_utf8_lossy(&result);
+        assert!(text.contains("ghp_RealSecretValue99"));
+        assert!(!text.contains("redan_ph_test_1234"));
+        // Body preserved
+        assert!(text.ends_with("body"));
+    }
+
+    #[test]
+    fn inject_does_not_touch_url_path() {
+        let secrets = vec![test_binding()];
+        let req = b"GET /log?token=redan_ph_test_1234 HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
+        let (result, count) = inject(req, "api.github.com", &secrets);
+        assert_eq!(count, 0);
+        // Placeholder must remain in the URL
+        assert!(result.windows(18).any(|w| w == b"redan_ph_test_1234"));
+    }
+
+    #[test]
+    fn inject_does_not_touch_body() {
+        let secrets = vec![test_binding()];
+        let req = b"POST /api HTTP/1.1\r\nHost: api.github.com\r\n\r\nredan_ph_test_1234";
+        let (result, count) = inject(req, "api.github.com", &secrets);
+        assert_eq!(count, 0);
+        assert_eq!(result, req);
     }
 
     #[test]
     fn inject_skips_disallowed_host() {
         let secrets = vec![test_binding()];
-        let req = b"Authorization: Bearer redan_ph_test_1234\r\n";
+        let req = b"GET / HTTP/1.1\r\nAuthorization: Bearer redan_ph_test_1234\r\n\r\n";
         let (result, count) = inject(req, "evil.com", &secrets);
         assert_eq!(count, 0);
         assert_eq!(result, req);
@@ -91,7 +201,7 @@ mod tests {
     #[test]
     fn inject_no_match_returns_unchanged() {
         let secrets = vec![test_binding()];
-        let req = b"GET / HTTP/1.1\r\nHost: api.github.com\r\n";
+        let req = b"GET / HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
         let (result, count) = inject(req, "api.github.com", &secrets);
         assert_eq!(count, 0);
         assert_eq!(result, req);
@@ -103,9 +213,8 @@ mod tests {
         let resp = b"Token: ghp_RealSecretValue99 is active";
         let (result, count) = scrub(resp, &secrets);
         assert_eq!(count, 1);
-        let text = String::from_utf8_lossy(&result);
-        assert!(text.contains("redan_ph_test_1234"));
-        assert!(!text.contains("ghp_RealSecretValue99"));
+        assert!(result.windows(18).any(|w| w == b"redan_ph_test_1234"));
+        assert!(!result.windows(21).any(|w| w == b"ghp_RealSecretValue99"));
     }
 
     #[test]
@@ -115,5 +224,33 @@ mod tests {
         let (result, count) = scrub(resp, &secrets);
         assert_eq!(count, 0);
         assert_eq!(result, resp);
+    }
+
+    #[test]
+    fn scrub_handles_binary_data() {
+        let secrets = vec![test_binding()];
+        let resp: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x01]; // invalid UTF-8
+        let (result, count) = scrub(&resp, &secrets);
+        assert_eq!(count, 0);
+        assert_eq!(result, resp); // must not corrupt
+    }
+
+    #[test]
+    fn byte_replace_finds_needle() {
+        let result = byte_replace(b"hello world", b"world", b"rust").unwrap();
+        assert_eq!(result, b"hello rust");
+    }
+
+    #[test]
+    fn byte_replace_no_match() {
+        assert!(byte_replace(b"hello world", b"xyz", b"abc").is_none());
+    }
+
+    #[test]
+    fn debug_redacts_real_value() {
+        let b = test_binding();
+        let debug = format!("{b:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("ghp_RealSecretValue99"));
     }
 }
