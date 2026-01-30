@@ -39,6 +39,10 @@ pub struct VmConfig {
     pub env: Vec<String>,
     /// Host directories to mount via virtio-fs: `(tag, host_path)`.
     pub virtiofs_mounts: Vec<(String, String)>,
+    /// Interactive mode: attach host terminal to guest console.
+    /// When true, stdin/stdout/stderr are passed to the VM via
+    /// virtio-console so the user gets an interactive shell.
+    pub interactive: bool,
 }
 
 /// A running VM. Owns the host end of the virtio-net socket and the VM thread.
@@ -108,6 +112,19 @@ impl Vm {
                 let ret =
                     unsafe { ffi::krun_add_virtiofs(ctx_id, c_tag.as_ptr(), c_path.as_ptr()) };
                 krun_check!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
+            }
+
+            // Interactive console: pass host stdin/stdout/stderr to guest.
+            // libkrun's init redirects these to the guest process.
+            if config.interactive {
+                use std::os::unix::io::AsRawFd;
+                let stdin_fd = std::io::stdin().as_raw_fd();
+                let stdout_fd = std::io::stdout().as_raw_fd();
+                let stderr_fd = std::io::stderr().as_raw_fd();
+                let ret = unsafe {
+                    ffi::krun_add_virtio_console_default(ctx_id, stdin_fd, stdout_fd, stderr_fd)
+                };
+                krun_check!(ret >= 0, "krun_add_virtio_console_default failed: {ret}");
             }
 
             // exec: ash -c "<command>"

@@ -72,6 +72,7 @@ fn end_to_end_secret_injection() {
             format!("SECRET_TOKEN={placeholder}"),
         ],
         virtiofs_mounts: vec![],
+        interactive: false,
     };
 
     let vm_handle = vm::Vm::boot(config);
@@ -117,6 +118,7 @@ fn synthetic_dns_resolution() {
             "TERM=xterm".into(),
         ],
         virtiofs_mounts: vec![],
+        interactive: false,
     };
 
     let vm_handle = vm::Vm::boot(config);

@@ -17,9 +17,14 @@ enum Cli {
         #[arg(long, default_value = "/tmp/redan-rootfs")]
         rootfs: String,
 
-        /// Shell command to run in the guest
+        /// Shell command to run in the guest.
+        /// If omitted in interactive mode, defaults to /bin/sh.
         #[arg(long)]
-        command: String,
+        command: Option<String>,
+
+        /// Interactive mode: attach terminal to guest console.
+        #[arg(long, short = 'i')]
+        interactive: bool,
 
         /// Proxy timeout in seconds
         #[arg(long, default_value = "60")]
@@ -46,10 +51,20 @@ fn main() {
         Cli::Exec {
             rootfs,
             command,
+            interactive,
             timeout,
             secrets,
             mounts,
-        } => exec(&rootfs, &command, timeout, &secrets, &mounts),
+        } => {
+            let command = command.unwrap_or_else(|| {
+                if interactive {
+                    "/bin/sh".to_string()
+                } else {
+                    "echo 'no --command specified'".to_string()
+                }
+            });
+            exec(&rootfs, &command, interactive, timeout, &secrets, &mounts);
+        }
     }
 }
 
@@ -113,6 +128,7 @@ fn parse_mount(spec: &str) -> (String, String) {
 fn exec(
     rootfs: &str,
     command: &str,
+    interactive: bool,
     timeout_secs: u64,
     secret_specs: &[String],
     mount_specs: &[String],
@@ -189,6 +205,15 @@ fn exec(
         command: full_command,
         env,
         virtiofs_mounts,
+        interactive,
+    };
+
+    // In interactive mode, set the host terminal to raw mode so
+    // keypresses are forwarded directly to the guest PTY.
+    let _raw_guard = if interactive {
+        Some(RawTerminalGuard::enter())
+    } else {
+        None
     };
 
     let vm = vm::Vm::boot(config);
@@ -203,6 +228,34 @@ fn exec(
         &secrets,
         Duration::from_secs(timeout_secs),
     );
+    // _raw_guard drops here, restoring terminal settings.
+}
+
+/// RAII guard that puts the terminal into raw mode on creation and
+/// restores the original settings on drop.
+struct RawTerminalGuard {
+    original: libc::termios,
+}
+
+impl RawTerminalGuard {
+    fn enter() -> Self {
+        unsafe {
+            let mut original: libc::termios = std::mem::zeroed();
+            libc::tcgetattr(libc::STDIN_FILENO, &mut original);
+            let mut raw = original;
+            libc::cfmakeraw(&mut raw);
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+            Self { original }
+        }
+    }
+}
+
+impl Drop for RawTerminalGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        }
+    }
 }
 
 #[cfg(test)]

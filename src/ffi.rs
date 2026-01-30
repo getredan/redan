@@ -30,4 +30,10 @@ unsafe extern "C" {
         flags: u32,
     ) -> i32;
     pub fn krun_add_virtiofs(ctx_id: u32, c_tag: *const c_char, c_path: *const c_char) -> i32;
+    pub fn krun_add_virtio_console_default(
+        ctx_id: u32,
+        input_fd: c_int,
+        output_fd: c_int,
+        err_fd: c_int,
+    ) -> i32;
 }
