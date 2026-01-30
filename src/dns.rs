@@ -39,7 +39,16 @@ pub fn handle_query(packet: &[u8], gateway_ip: Ipv4Address) -> Option<(String, V
     let question_end = qname_end + 4;
 
     let response = match qtype {
-        1 => build_a_response(id, packet, question_end, gateway_ip),
+        1 => {
+            // localhost resolves to loopback, not the gateway.
+            // Programs that resolve localhost expect 127.0.0.1.
+            let ip = if hostname == "localhost" {
+                Ipv4Address::new(127, 0, 0, 1)
+            } else {
+                gateway_ip
+            };
+            build_a_response(id, packet, question_end, ip)
+        }
         _ => build_empty_response(id, packet, question_end),
     };
 
@@ -196,6 +205,16 @@ mod tests {
     fn rejects_truncated_packet() {
         let gw = Ipv4Address::new(192, 168, 127, 1);
         assert!(handle_query(&[0; 5], gw).is_none());
+    }
+
+    #[test]
+    fn localhost_resolves_to_loopback() {
+        let gw = Ipv4Address::new(192, 168, 127, 1);
+        let query = build_query(0x0042, "localhost", 1);
+        let (hostname, response) = handle_query(&query, gw).unwrap();
+        assert_eq!(hostname, "localhost");
+        let ip_offset = response.len() - 4;
+        assert_eq!(&response[ip_offset..], &[127, 0, 0, 1]);
     }
 
     #[test]
