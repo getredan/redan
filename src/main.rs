@@ -30,6 +30,11 @@ enum Cli {
         /// The proxy injects the real value only for requests to allowed hosts.
         #[arg(long = "secret", value_name = "SPEC")]
         secrets: Vec<String>,
+
+        /// Mount a host directory into the guest via virtio-fs.
+        /// Format: /host/path:/guest/path (default guest path: /workspace)
+        #[arg(long = "mount", value_name = "HOST:GUEST")]
+        mounts: Vec<String>,
     },
 }
 
@@ -43,7 +48,8 @@ fn main() {
             command,
             timeout,
             secrets,
-        } => exec(&rootfs, &command, timeout, &secrets),
+            mounts,
+        } => exec(&rootfs, &command, timeout, &secrets, &mounts),
     }
 }
 
@@ -79,7 +85,22 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
     Ok((env_name.to_string(), binding))
 }
 
-fn exec(rootfs: &str, command: &str, timeout_secs: u64, secret_specs: &[String]) {
+/// Parse mount spec: `/host/path:/guest/path` or `/host/path` (defaults to /workspace)
+fn parse_mount(spec: &str) -> (String, String) {
+    if let Some((host, guest)) = spec.split_once(':') {
+        (host.to_string(), guest.to_string())
+    } else {
+        (spec.to_string(), "/workspace".to_string())
+    }
+}
+
+fn exec(
+    rootfs: &str,
+    command: &str,
+    timeout_secs: u64,
+    secret_specs: &[String],
+    mount_specs: &[String],
+) {
     let ca = MitmCa::generate();
     log::info!("MITM CA generated");
 
@@ -108,9 +129,30 @@ fn exec(rootfs: &str, command: &str, timeout_secs: u64, secret_specs: &[String])
         }
     }
 
-    // Build guest command: network setup + user command
+    // Parse mounts
+    let mut virtiofs_mounts: Vec<(String, String)> = Vec::new();
+    let mut mount_commands: Vec<String> = Vec::new();
+    for (i, spec) in mount_specs.iter().enumerate() {
+        let (host_path, guest_path) = parse_mount(spec);
+        let tag = format!("fs{i}");
+        log::info!("mount: {host_path} -> {guest_path} (tag={tag})");
+
+        // Create mount point in the rootfs
+        let mp = Path::new(rootfs).join(guest_path.trim_start_matches('/'));
+        std::fs::create_dir_all(&mp).ok();
+
+        virtiofs_mounts.push((tag.clone(), host_path));
+        mount_commands.push(format!("mount -t virtiofs {tag} {guest_path}"));
+    }
+
+    // Build guest command: network setup + mounts + user command
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
-    let full_command = format!("{net_setup}; {command}");
+    let mount_setup = mount_commands.join("; ");
+    let full_command = if mount_setup.is_empty() {
+        format!("{net_setup}; {command}")
+    } else {
+        format!("{net_setup}; {mount_setup}; {command}")
+    };
 
     let mut env: Vec<String> = vec![
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
@@ -130,7 +172,7 @@ fn exec(rootfs: &str, command: &str, timeout_secs: u64, secret_specs: &[String])
         ram_mib: 256,
         command: full_command,
         env,
-        virtiofs_mounts: vec![],
+        virtiofs_mounts,
     };
 
     let vm = vm::Vm::boot(config);
