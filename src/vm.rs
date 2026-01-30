@@ -13,6 +13,18 @@ use crate::ffi;
 
 const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
+/// Like assert!, but logs at error level before panicking.
+/// VM thread panics are silently swallowed (thread is never joined),
+/// so we need the log message to reach stderr.
+macro_rules! krun_check {
+    ($cond:expr, $($arg:tt)+) => {
+        if !$cond {
+            log::error!($($arg)+);
+            panic!($($arg)+);
+        }
+    };
+}
+
 /// Configuration for a VM instance.
 pub struct VmConfig {
     /// Path to the guest root filesystem.
@@ -57,23 +69,23 @@ impl Vm {
                     0,
                 )
             };
-            assert!(ret >= 0, "krun_init_log failed: {ret}");
+            krun_check!(ret >= 0, "krun_init_log failed: {ret}");
 
             let ctx_id = unsafe { ffi::krun_create_ctx() };
-            assert!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
+            krun_check!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
             let ctx_id = ctx_id as u32;
 
             unsafe {
                 let ret = ffi::krun_set_vm_config(ctx_id, config.vcpus, config.ram_mib);
-                assert!(ret >= 0, "krun_set_vm_config failed: {ret}");
+                krun_check!(ret >= 0, "krun_set_vm_config failed: {ret}");
 
                 let root = CString::new(config.rootfs).unwrap();
                 let ret = ffi::krun_set_root(ctx_id, root.as_ptr());
-                assert!(ret >= 0, "krun_set_root failed: {ret}");
+                krun_check!(ret >= 0, "krun_set_root failed: {ret}");
 
                 let workdir = CString::new("/").unwrap();
                 let ret = ffi::krun_set_workdir(ctx_id, workdir.as_ptr());
-                assert!(ret >= 0, "krun_set_workdir failed: {ret}");
+                krun_check!(ret >= 0, "krun_set_workdir failed: {ret}");
             }
 
             // virtio-net
@@ -87,7 +99,7 @@ impl Vm {
                     0,
                 )
             };
-            assert!(ret >= 0, "krun_add_net_unixstream failed: {ret}");
+            krun_check!(ret >= 0, "krun_add_net_unixstream failed: {ret}");
 
             // virtio-fs mounts
             for (tag, path) in &config.virtiofs_mounts {
@@ -95,7 +107,7 @@ impl Vm {
                 let c_path = CString::new(path.as_str()).unwrap();
                 let ret =
                     unsafe { ffi::krun_add_virtiofs(ctx_id, c_tag.as_ptr(), c_path.as_ptr()) };
-                assert!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
+                krun_check!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
             }
 
             // exec: ash -c "<command>"
@@ -121,7 +133,7 @@ impl Vm {
             let ret = unsafe {
                 ffi::krun_set_exec(ctx_id, exec_path.as_ptr(), argv.as_ptr(), envp.as_ptr())
             };
-            assert!(ret >= 0, "krun_set_exec failed: {ret}");
+            krun_check!(ret >= 0, "krun_set_exec failed: {ret}");
 
             // Keep guest_sock alive for the duration of the VM.
             // ManuallyDrop over mem::forget to make intent explicit.

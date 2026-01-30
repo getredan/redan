@@ -1,8 +1,19 @@
 /// TLS utilities: SNI extraction and upstream connection.
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+
+/// Shared TLS client config with system root certificates.
+/// Built once, reused for all upstream connections.
+static UPSTREAM_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    Arc::new(config)
+});
 
 /// Extract SNI hostname from a TLS ClientHello message.
 pub fn extract_sni(data: &[u8]) -> Option<String> {
@@ -92,14 +103,8 @@ pub fn connect_upstream(
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
     stream.set_nonblocking(false)?;
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
     let server_name = hostname.to_owned().try_into()?;
-    let tls_conn = rustls::ClientConnection::new(Arc::new(tls_config), server_name)?;
+    let tls_conn = rustls::ClientConnection::new(Arc::clone(&UPSTREAM_TLS_CONFIG), server_name)?;
 
     Ok((stream, tls_conn))
 }

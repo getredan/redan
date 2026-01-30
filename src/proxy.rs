@@ -255,7 +255,9 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
     // Feed ClientHello to our server TLS
     let guest_tls = conn.guest_tls.as_mut().unwrap();
     let mut cursor = &conn.pending_guest_data[..];
-    guest_tls.read_tls(&mut cursor).ok();
+    if let Err(e) = guest_tls.read_tls(&mut cursor) {
+        log::warn!("ClientHello read_tls failed: {e}");
+    }
     conn.pending_guest_data.clear();
 
     if let Err(e) = guest_tls.process_new_packets() {
@@ -266,8 +268,9 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
     let mut out = Vec::new();
     if let Ok(n) = guest_tls.write_tls(&mut out)
         && n > 0
+        && let Err(e) = sock.send_slice(&out)
     {
-        sock.send_slice(&out).ok();
+        log::warn!("ServerHello send failed: {e}");
     }
 }
 
@@ -421,21 +424,31 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
                 // request, so tell the client not to reuse.
                 let scrubbed = rewrite_connection_close(&scrubbed);
 
-                // Write response back through guest TLS, may need
-                // multiple send_slice calls for large responses
-                guest_tls.writer().write_all(&scrubbed).ok();
+                // Write response back through guest TLS
+                if let Err(e) = guest_tls.writer().write_all(&scrubbed) {
+                    log::warn!("guest TLS write failed: {e}");
+                }
                 let mut guest_out = Vec::new();
-                guest_tls.write_tls(&mut guest_out).ok();
+                if let Err(e) = guest_tls.write_tls(&mut guest_out) {
+                    log::warn!("guest TLS encrypt failed: {e}");
+                }
 
                 for chunk in guest_out.chunks(65535) {
-                    sock.send_slice(chunk).ok();
+                    if let Err(e) = sock.send_slice(chunk) {
+                        log::warn!("smoltcp send failed: {e}");
+                        break;
+                    }
                 }
 
                 // Send TLS close_notify so the client knows we're done
                 guest_tls.send_close_notify();
                 let mut close_out = Vec::new();
-                guest_tls.write_tls(&mut close_out).ok();
-                sock.send_slice(&close_out).ok();
+                if let Err(e) = guest_tls.write_tls(&mut close_out) {
+                    log::warn!("close_notify encrypt failed: {e}");
+                }
+                if let Err(e) = sock.send_slice(&close_out) {
+                    log::warn!("close_notify send failed: {e}");
+                }
             }
             Err(e) => {
                 log::warn!("upstream relay error: {e}");
