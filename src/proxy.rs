@@ -295,30 +295,54 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
 /// Rewrite `Connection: keep-alive` to `Connection: close` in HTTP
 /// response headers (case-insensitive). We close the smoltcp socket
 /// after each response, so the client must not attempt to reuse.
+///
+/// Operates on bytes to avoid corrupting binary response bodies
+/// (String::from_utf8_lossy replaces invalid UTF-8 with U+FFFD).
 fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(data);
-    let Some(header_end) = text.find("\r\n\r\n") else {
+    let Some(header_end) = data
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
+    else {
         return data.to_vec();
     };
-    let headers_str = String::from_utf8_lossy(&data[..header_end]);
+
+    let headers = &data[..header_end - 4]; // exclude \r\n\r\n
     let body = &data[header_end..];
 
-    // Case-insensitive replacement
-    let mut rewritten = String::with_capacity(headers_str.len());
-    for line in headers_str.split("\r\n") {
-        if line.to_lowercase().starts_with("connection:") {
-            rewritten.push_str("Connection: close");
+    let mut result = Vec::with_capacity(data.len());
+    let mut pos = 0;
+
+    // Walk header lines
+    while pos < headers.len() {
+        let line_end = headers[pos..]
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|p| pos + p)
+            .unwrap_or(headers.len());
+
+        let line = &headers[pos..line_end];
+
+        // Case-insensitive check for "connection:" prefix
+        if line.len() >= 11
+            && line[..11]
+                .iter()
+                .zip(b"connection:")
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        {
+            result.extend_from_slice(b"Connection: close");
         } else {
-            rewritten.push_str(line);
+            result.extend_from_slice(line);
         }
-        rewritten.push_str("\r\n");
-    }
-    // Remove trailing \r\n (we'll get it from body which starts with \r\n\r\n)
-    if rewritten.ends_with("\r\n") {
-        rewritten.truncate(rewritten.len() - 2);
+        result.extend_from_slice(b"\r\n");
+
+        pos = line_end + 2;
+        if pos > headers.len() {
+            break;
+        }
     }
 
-    let mut result = rewritten.into_bytes();
+    result.extend_from_slice(b"\r\n"); // header/body separator
     result.extend_from_slice(body);
     result
 }
@@ -415,6 +439,9 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     );
 
     let hostname = conn.sni.as_deref().unwrap_or("");
+    // Strip Accept-Encoding so upstream returns uncompressed responses.
+    // Compressed bodies bypass literal-byte scrubbing entirely.
+    let request = crate::secret::strip_accept_encoding(&request);
     let (request_data, inject_count) = crate::secret::inject(&request, hostname, secrets);
     if inject_count > 0 {
         log::info!("SECRET INJECTED: {inject_count} replacement(s) for {hostname}");
@@ -523,5 +550,22 @@ mod tests {
         let resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
         let result = rewrite_connection_close(resp);
         assert_eq!(result, resp);
+    }
+
+    #[test]
+    fn rewrite_connection_close_preserves_binary_body() {
+        let mut resp = b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n".to_vec();
+        let binary: Vec<u8> = (0..=255).collect();
+        resp.extend_from_slice(&binary);
+
+        let result = rewrite_connection_close(&resp);
+        let text = String::from_utf8_lossy(&result[..50]);
+        assert!(text.contains("Connection: close"));
+        // Binary body must be byte-identical
+        assert_eq!(
+            &result[result.len() - 256..],
+            &binary[..],
+            "binary body corrupted by rewrite"
+        );
     }
 }

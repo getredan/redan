@@ -66,6 +66,12 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
         return Err("empty env name, value, or hosts".into());
     }
 
+    // CWE-93: CRLF in secret values would corrupt HTTP framing when
+    // injected into headers. Reject at configuration time.
+    if real_value.contains('\r') || real_value.contains('\n') {
+        return Err("secret value contains CRLF (would corrupt HTTP headers)".into());
+    }
+
     let allowed_hosts: Vec<String> = hosts.split(',').map(|h| h.trim().to_string()).collect();
 
     // Random placeholder suffix. Not derived from env name or value,
@@ -249,6 +255,13 @@ mod tests {
     #[test]
     fn parse_secret_no_colon_fails() {
         assert!(parse_secret("KEY=value").is_err());
+    }
+
+    #[test]
+    fn parse_secret_crlf_in_value_rejected() {
+        assert!(parse_secret("KEY=val\r\nue:host.com").is_err());
+        assert!(parse_secret("KEY=val\nue:host.com").is_err());
+        assert!(parse_secret("KEY=val\rue:host.com").is_err());
     }
 
     #[test]

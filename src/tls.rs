@@ -9,9 +9,12 @@ use std::time::Duration;
 static UPSTREAM_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
+    let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
+    // Force HTTP/1.1 only. HTTP/2 binary framing would bypass our
+    // HTTP/1.1 header parsing in inject() and scrub().
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Arc::new(config)
 });
 

@@ -8,11 +8,21 @@
 //! ## Limitations
 //!
 //! Response scrubbing is best-effort. It matches the literal secret bytes.
-//! Secrets reflected in encoded forms (base64, URL-encoding, JSON unicode
-//! escapes, gzip-compressed bodies) will not be caught. Scrubbing reduces
-//! accidental exposure; it is not a hard security boundary. The primary
-//! protection is host-based allowlisting -- secrets are only injected for
-//! requests to explicitly permitted hosts.
+//! Secrets reflected in encoded forms will not be caught, including:
+//!
+//! - Base64 encoding
+//! - URL-encoding (percent-encoding)
+//! - JSON unicode escapes (`\u0041` etc.)
+//! - HTML entity encoding
+//! - Compression (gzip, brotli, zstd, deflate)
+//!
+//! Primary defense against compression bypass: outgoing requests have
+//! `Accept-Encoding` stripped, forcing upstream to return uncompressed
+//! responses.
+//!
+//! Scrubbing reduces accidental exposure; it is not a hard security
+//! boundary. The primary protection is host-based allowlisting -- secrets
+//! are only injected for requests to explicitly permitted hosts.
 
 /// A secret the proxy knows how to inject.
 #[derive(Clone)]
@@ -103,6 +113,41 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     }
 
     (result, count)
+}
+
+/// Strip `Accept-Encoding` header from an HTTP request.
+///
+/// Forces upstream to return uncompressed responses so that scrub()
+/// can match literal secret bytes. Without this, gzip/br/zstd encoded
+/// responses bypass scrubbing entirely.
+pub fn strip_accept_encoding(data: &[u8]) -> Vec<u8> {
+    let header_end = find_header_end(data).unwrap_or(data.len());
+    let request_line_end = data[..header_end]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|p| p + 2)
+        .unwrap_or(0);
+
+    let mut result = Vec::with_capacity(data.len());
+    result.extend_from_slice(&data[..request_line_end]);
+
+    // Copy headers, skipping Accept-Encoding (case-insensitive)
+    let headers = &data[request_line_end..header_end];
+    let headers_str = String::from_utf8_lossy(headers);
+    for line in headers_str.split("\r\n") {
+        if line.is_empty() {
+            continue;
+        }
+        if line.to_lowercase().starts_with("accept-encoding:") {
+            continue;
+        }
+        result.extend_from_slice(line.as_bytes());
+        result.extend_from_slice(b"\r\n");
+    }
+
+    // Body separator + body
+    result.extend_from_slice(&data[header_end - 2..]);
+    result
 }
 
 /// Find the byte offset of \r\n\r\n (header/body separator).

@@ -42,7 +42,8 @@ pub fn handle_query(packet: &[u8], gateway_ip: Ipv4Address) -> Option<(String, V
         1 => {
             // localhost resolves to loopback, not the gateway.
             // Programs that resolve localhost expect 127.0.0.1.
-            let ip = if hostname == "localhost" {
+            // Case-insensitive per RFC 4343.
+            let ip = if hostname.eq_ignore_ascii_case("localhost") {
                 Ipv4Address::new(127, 0, 0, 1)
             } else {
                 gateway_ip
