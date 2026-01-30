@@ -128,10 +128,16 @@ pub fn relay_upstream(
         }
     }
 
-    // Send the HTTP request
-    tls.writer().write_all(request)?;
-    tls.write_tls(stream)?;
-    stream.flush()?;
+    // Send the HTTP request in chunks, flushing TLS records between
+    // writes. Large requests (>64KB) overflow rustls internal buffers
+    // if written all at once.
+    for chunk in request.chunks(16384) {
+        tls.writer().write_all(chunk)?;
+        while tls.wants_write() {
+            tls.write_tls(stream)?;
+        }
+        stream.flush()?;
+    }
 
     // Read the full response
     let mut response = Vec::new();

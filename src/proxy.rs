@@ -276,6 +276,33 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
     }
 }
 
+/// Check if accumulated data contains a complete HTTP request.
+/// Looks for headers ending with \r\n\r\n, then checks Content-Length
+/// to determine if the full body has arrived. Requests with no
+/// Content-Length (e.g. GET) are complete once headers end.
+fn http_request_complete(data: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(data);
+    let Some(header_end) = text.find("\r\n\r\n") else {
+        return false;
+    };
+    let headers = &text[..header_end].to_lowercase();
+
+    if let Some(cl_line) = headers.lines().find(|l| l.starts_with("content-length:"))
+        && let Ok(cl) = cl_line
+            .split(':')
+            .nth(1)
+            .unwrap_or("0")
+            .trim()
+            .parse::<usize>()
+    {
+        let body_start = header_end + 4;
+        return data.len() - body_start >= cl;
+    }
+
+    // No Content-Length: request is complete once headers are done
+    true
+}
+
 fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[SecretBinding]) {
     let guest_tls = match conn.guest_tls.as_mut() {
         Some(t) => t,
@@ -286,7 +313,7 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     };
 
     // Read encrypted data from guest
-    let mut buf = vec![0u8; 16384];
+    let mut buf = vec![0u8; 65535];
     let guest_bytes = sock.recv_slice(&mut buf).unwrap_or(0);
     if guest_bytes > 0 {
         let mut cursor = &buf[..guest_bytes];
@@ -302,75 +329,86 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
         }
     }
 
-    // Read decrypted plaintext
-    let mut plaintext = vec![0u8; 16384];
-    let pt_bytes = match guest_tls.reader().read(&mut plaintext) {
-        Ok(n) => n,
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
-        Err(_) => 0,
-    };
+    // Read all available decrypted plaintext into pending buffer
+    let mut plaintext = vec![0u8; 65535];
+    loop {
+        match guest_tls.reader().read(&mut plaintext) {
+            Ok(0) => break,
+            Ok(n) => conn.pending_guest_data.extend_from_slice(&plaintext[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
 
-    if pt_bytes > 0 && conn.state == ConnState::TlsHandshake {
+    if !conn.pending_guest_data.is_empty() && conn.state == ConnState::TlsHandshake {
         conn.state = ConnState::Proxying;
     }
 
-    if pt_bytes > 0 {
-        let text = String::from_utf8_lossy(&plaintext[..pt_bytes]);
-        log::info!(
-            "DECRYPTED from guest ({pt_bytes} bytes): {}",
-            text.lines().next().unwrap_or("")
-        );
-
-        let hostname = conn.sni.as_deref().unwrap_or("");
-        let (request_data, inject_count) =
-            crate::secret::inject(&plaintext[..pt_bytes], hostname, secrets);
-        if inject_count > 0 {
-            log::info!("SECRET INJECTED: {inject_count} replacement(s) for {hostname}");
-        }
-
-        // Forward to upstream
-        if let (Some(stream), Some(tls_conn)) = (conn.upstream.as_mut(), conn.upstream_tls.as_mut())
+    // Wait until we have the full HTTP request before forwarding
+    if conn.state != ConnState::Proxying || !http_request_complete(&conn.pending_guest_data) {
+        // Flush pending TLS data to guest (handshake messages etc.)
+        let mut out = Vec::new();
+        if let Ok(n) = guest_tls.write_tls(&mut out)
+            && n > 0
         {
-            match tls::relay_upstream(stream, tls_conn, &request_data) {
-                Ok(response) => {
-                    let (scrubbed, scrub_count) = crate::secret::scrub(&response, secrets);
-                    if scrub_count > 0 {
-                        log::info!("RESPONSE SCRUBBED: {scrub_count} value(s) removed");
-                    }
+            sock.send_slice(&out).ok();
+        }
+        if !sock.is_active() {
+            conn.state = ConnState::Done;
+        }
+        return;
+    }
 
-                    log::info!(
-                        "upstream response ({} bytes): {}",
-                        scrubbed.len(),
-                        String::from_utf8_lossy(&scrubbed)
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                    );
+    let request = std::mem::take(&mut conn.pending_guest_data);
+    let text = String::from_utf8_lossy(&request);
+    log::info!(
+        "DECRYPTED from guest ({} bytes): {}",
+        request.len(),
+        text.lines().next().unwrap_or("")
+    );
 
-                    guest_tls.writer().write_all(&scrubbed).ok();
-                    let mut guest_out = Vec::new();
-                    guest_tls.write_tls(&mut guest_out).ok();
-                    sock.send_slice(&guest_out).ok();
+    let hostname = conn.sni.as_deref().unwrap_or("");
+    let (request_data, inject_count) = crate::secret::inject(&request, hostname, secrets);
+    if inject_count > 0 {
+        log::info!("SECRET INJECTED: {inject_count} replacement(s) for {hostname}");
+    }
+
+    // Forward to upstream
+    if let (Some(stream), Some(tls_conn)) = (conn.upstream.as_mut(), conn.upstream_tls.as_mut()) {
+        match tls::relay_upstream(stream, tls_conn, &request_data) {
+            Ok(response) => {
+                let (scrubbed, scrub_count) = crate::secret::scrub(&response, secrets);
+                if scrub_count > 0 {
+                    log::info!("RESPONSE SCRUBBED: {scrub_count} value(s) removed");
                 }
-                Err(e) => {
-                    log::warn!("upstream relay error: {e}");
+
+                let resp_text = String::from_utf8_lossy(&scrubbed);
+                let first_line = resp_text.lines().next().unwrap_or("");
+                log::info!("upstream response ({} bytes): {first_line}", scrubbed.len());
+
+                // Log response body for /v1/messages to debug Claude Code issues
+                if text.contains("/v1/messages") && !text.contains("count_tokens") {
+                    for line in resp_text.lines() {
+                        log::debug!("  | {line}");
+                    }
+                }
+
+                // Write response back through guest TLS, may need
+                // multiple send_slice calls for large responses
+                guest_tls.writer().write_all(&scrubbed).ok();
+                let mut guest_out = Vec::new();
+                guest_tls.write_tls(&mut guest_out).ok();
+
+                for chunk in guest_out.chunks(65535) {
+                    sock.send_slice(chunk).ok();
                 }
             }
+            Err(e) => {
+                log::warn!("upstream relay error: {e}");
+            }
         }
-
-        sock.close();
-        conn.state = ConnState::Done;
     }
 
-    // Flush pending TLS data to guest
-    let mut out = Vec::new();
-    if let Ok(n) = guest_tls.write_tls(&mut out)
-        && n > 0
-    {
-        sock.send_slice(&out).ok();
-    }
-
-    if !sock.is_active() {
-        conn.state = ConnState::Done;
-    }
+    sock.close();
+    conn.state = ConnState::Done;
 }
