@@ -73,18 +73,25 @@ This is a security-critical project. Tests are load-bearing, not decorative.
 
 ## Code Reviews
 
-For tests and security-sensitive code, get second opinions from oracle models:
+For tests and security-sensitive code, get second opinions from oracle models.
+
+### Oracles
+
+| Oracle | Model | Use for | Invocation |
+|--------|-------|---------|------------|
+| **claude** | Claude Opus/Sonnet | Security review, architecture | `claude -p '...' < file` via tmux |
+| **kimi** | Kimi | Security review, second opinion | `kimi -p '...' < file` via tmux |
+| **mistral** | Mistral Large | Security review, pair review | `pi` with Mistral Large model via tmux |
+
+Use **Mistral Large** (not Codestral) for reviews. Mistral Large handles reasoning, multi-step analysis, and context. Codestral is for raw code generation, not review.
+
+Use at least two independent reviewers for: proxy logic, secret handling, VM isolation, TLS implementation.
 
 ```bash
-# Via tmux (claude and kimi block)
 SOCKET="/tmp/claude-tmux-sockets/claude.sock"
 tmux -S "$SOCKET" send-keys -t review:0.0 "claude -p 'Review this for security issues: ...' < src/proxy.rs" Enter
 tmux -S "$SOCKET" send-keys -t review:0.1 "kimi -p 'Review for security issues' < src/proxy.rs" Enter
-
-# Mistral via pi (set MISTRAL_API_KEY)
 ```
-
-Oracles: **claude**, **kimi**, **mistral**. Use at least two independent reviewers for: proxy logic, secret handling, VM isolation, TLS implementation.
 
 ## Architecture
 
