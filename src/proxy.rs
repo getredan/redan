@@ -60,16 +60,20 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
     // LISTEN state. When a connection arrives, the listener transitions
     // to ESTABLISHED; we move it to `connections` and create a fresh
     // listener for the next connection.
-    let mut listeners: Vec<Listener> = vec![
-        Listener {
-            handle: add_tcp_listener(&mut sockets, 80),
+    let mut backlogs: Vec<ListenBacklog> = vec![
+        ListenBacklog {
             port: 80,
             is_tls: false,
+            handles: (0..LISTEN_BACKLOG)
+                .map(|_| add_tcp_listener(&mut sockets, 80))
+                .collect(),
         },
-        Listener {
-            handle: add_tcp_listener(&mut sockets, 443),
+        ListenBacklog {
             port: 443,
             is_tls: true,
+            handles: (0..LISTEN_BACKLOG)
+                .map(|_| add_tcp_listener(&mut sockets, 443))
+                .collect(),
         },
     ];
 
@@ -91,36 +95,39 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
         if matches!(result, PollResult::SocketStateChanged) {
             process_dns(&mut sockets, dns_handle);
 
-            // Check each listener for new connections. When a listener
-            // socket transitions to established, promote it to an active
-            // connection and spawn a replacement listener.
-            for listener in &mut listeners {
-                let sock = sockets.get_mut::<tcp::Socket>(listener.handle);
-                if sock.may_recv() && sock.state() != tcp::State::Listen {
-                    log::info!(
-                        "connection on :{} from {:?}",
-                        listener.port,
-                        sock.remote_endpoint()
-                    );
-                    let conn_handle = listener.handle;
-                    connections.insert(
-                        conn_handle,
-                        ProxyConn {
-                            handle: conn_handle,
-                            upstream: None,
-                            upstream_tls: None,
-                            guest_tls: None,
-                            sni: None,
-                            is_tls: listener.is_tls,
-                            pending_guest_data: Vec::new(),
-                            pending_response: Vec::new(),
-                            response_offset: 0,
-                            upstream_rx: None,
-                            state: ConnState::WaitingForData,
-                        },
-                    );
-                    // Swap in a fresh listener so we can accept the next connection
-                    listener.handle = add_tcp_listener(&mut sockets, listener.port);
+            // Promote established backlog sockets to active connections.
+            // Replace each promoted socket to maintain the backlog depth.
+            for backlog in &mut backlogs {
+                let mut i = 0;
+                while i < backlog.handles.len() {
+                    let handle = backlog.handles[i];
+                    let sock = sockets.get_mut::<tcp::Socket>(handle);
+                    if sock.may_recv() && sock.state() != tcp::State::Listen {
+                        log::info!(
+                            "connection on :{} from {:?}",
+                            backlog.port,
+                            sock.remote_endpoint()
+                        );
+                        connections.insert(
+                            handle,
+                            ProxyConn {
+                                handle,
+                                upstream: None,
+                                upstream_tls: None,
+                                guest_tls: None,
+                                sni: None,
+                                is_tls: backlog.is_tls,
+                                pending_guest_data: Vec::new(),
+                                pending_response: Vec::new(),
+                                response_offset: 0,
+                                upstream_rx: None,
+                                state: ConnState::WaitingForData,
+                            },
+                        );
+                        // Replace with a fresh listener
+                        backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
+                    }
+                    i += 1;
                 }
             }
 
@@ -171,11 +178,16 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
     }
 }
 
-struct Listener {
-    handle: SocketHandle,
+/// TCP listen backlog for a port. Multiple sockets in LISTEN state so
+/// bursts of concurrent SYNs (e.g. npm downloading 30 tarballs) don't
+/// get RST'd while a single listener is being promoted.
+struct ListenBacklog {
     port: u16,
     is_tls: bool,
+    handles: Vec<SocketHandle>,
 }
+
+const LISTEN_BACKLOG: usize = 32;
 
 // --- DNS ---
 
@@ -610,7 +622,9 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
         let (tx, rx) = mpsc::channel();
         let secrets: Vec<SecretBinding> = secrets.to_vec();
 
+        let sni = conn.sni.clone().unwrap_or_default();
         std::thread::spawn(move || {
+            log::info!("upstream thread started for {sni}");
             let mut stream = stream;
             let mut tls_conn = tls_conn;
             let result = tls::relay_upstream(&mut stream, &mut tls_conn, &request_data)
@@ -629,8 +643,14 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
                     );
                     rewrite_connection_close(&scrubbed)
                 })
-                .map_err(|e| e.to_string());
-            let _ = tx.send(result);
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    log::warn!("upstream thread error for {sni}: {msg}");
+                    msg
+                });
+            if tx.send(result).is_err() {
+                log::warn!("upstream thread: receiver dropped for {sni}");
+            }
         });
 
         conn.upstream_rx = Some(rx);
