@@ -113,8 +113,11 @@ pub fn connect_upstream(
 }
 
 /// Maximum response size before we bail. Prevents OOM on malicious
-/// or misconfigured upstreams. Largest observed: nodejs at 18MB.
-const MAX_RESPONSE_SIZE: usize = 50 * 1024 * 1024;
+/// or misconfigured upstreams. Full buffering is required because we
+/// force Connection: close on upstreams (some CDNs don't send
+/// Content-Length or chunked encoding), so we read until EOF.
+/// Streaming with proper upstream framing is a future improvement.
+const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
 
 /// Complete a TLS handshake, send request, read full response.
 ///
