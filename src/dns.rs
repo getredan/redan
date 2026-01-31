@@ -18,8 +18,10 @@ pub fn handle_query(packet: &[u8], gateway_ip: Ipv4Address) -> Option<(String, V
     let flags = u16::from_be_bytes([packet[2], packet[3]]);
     let qd_count = u16::from_be_bytes([packet[4], packet[5]]);
 
-    // Must be a standard query (QR=0, OPCODE=0)
-    if flags & 0x8000 != 0 || flags & 0x7800 != 0 || qd_count == 0 {
+    // Must be a standard query (QR=0, OPCODE=0) with exactly one question.
+    // Reject multi-question packets: we only handle one, and a malformed
+    // response for extra questions could confuse the guest resolver.
+    if flags & 0x8000 != 0 || flags & 0x7800 != 0 || qd_count != 1 {
         return None;
     }
 
@@ -216,6 +218,16 @@ mod tests {
         assert_eq!(hostname, "localhost");
         let ip_offset = response.len() - 4;
         assert_eq!(&response[ip_offset..], &[127, 0, 0, 1]);
+    }
+
+    #[test]
+    fn rejects_multi_question_packet() {
+        let gw = Ipv4Address::new(192, 168, 127, 1);
+        let mut pkt = build_query(0x1234, "example.com", 1);
+        // Set QDCOUNT to 2
+        pkt[4] = 0;
+        pkt[5] = 2;
+        assert!(handle_query(&pkt, gw).is_none());
     }
 
     #[test]

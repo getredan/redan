@@ -41,7 +41,7 @@ pub const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x00
 pub const GUEST_IP: &str = "192.168.127.2";
 
 /// Run the MITM proxy until the timeout expires.
-pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeout: Duration) {
+pub fn run(host_sock: UnixStream, ca: &mut MitmCa, secrets: &[SecretBinding], timeout: Duration) {
     let mut device = VirtioNetDevice::new(host_sock);
 
     let config = Config::new(GATEWAY_MAC.into());
@@ -279,7 +279,7 @@ enum ConnState {
 fn process_connection(
     sockets: &mut SocketSet,
     conn: &mut ProxyConn,
-    ca: &MitmCa,
+    ca: &mut MitmCa,
     secrets: &[SecretBinding],
 ) {
     let sock = sockets.get_mut::<tcp::Socket>(conn.handle);
@@ -360,7 +360,7 @@ fn handle_http(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, _secrets: &[Sec
     conn.state = ConnState::Closing;
 }
 
-fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmCa) {
+fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &mut MitmCa) {
     let Some(sni) = tls::extract_sni(&conn.pending_guest_data) else {
         return;
     };
