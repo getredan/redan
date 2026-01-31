@@ -60,13 +60,14 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
     // LISTEN state. When a connection arrives, the listener transitions
     // to ESTABLISHED; we move it to `connections` and create a fresh
     // listener for the next connection.
+    // Port 80 gets a small backlog -- we reject plaintext HTTP but
+    // some tools probe it. Port 443 needs the full backlog for npm's
+    // 30+ concurrent TLS connections.
     let mut backlogs: Vec<ListenBacklog> = vec![
         ListenBacklog {
             port: 80,
             is_tls: false,
-            handles: (0..LISTEN_BACKLOG)
-                .map(|_| add_tcp_listener(&mut sockets, 80))
-                .collect(),
+            handles: (0..4).map(|_| add_tcp_listener(&mut sockets, 80)).collect(),
         },
         ListenBacklog {
             port: 443,
@@ -338,15 +339,22 @@ fn process_connection(
 
 fn handle_http(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, _secrets: &[SecretBinding]) {
     let request = String::from_utf8_lossy(&conn.pending_guest_data);
-    log::info!("HTTP request: {}", request.lines().next().unwrap_or(""));
+    log::info!(
+        "HTTP request (plaintext): {}",
+        request.lines().next().unwrap_or("")
+    );
 
-    // TODO: forward to upstream with secret injection when HTTP proxying is implemented.
-    // For now, respond with a static marker. No secret injection on plaintext HTTP.
-    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nREDAN_HTTP_INTERCEPT_OK\n";
+    // Plaintext HTTP is not proxied. Secret injection requires TLS MITM
+    // so the proxy can inspect and modify headers. Respond with 421 to
+    // tell the client to use HTTPS instead.
+    let response = "HTTP/1.1 421 Misdirected Request\r\n\
+                     Content-Type: text/plain\r\n\
+                     Connection: close\r\n\r\n\
+                     redan: use HTTPS. Plaintext HTTP is not proxied.\n";
     sock.send_slice(response.as_bytes()).ok();
     sock.close();
     conn.pending_guest_data.clear();
-    conn.state = ConnState::Done;
+    conn.state = ConnState::Closing;
 }
 
 fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmCa) {

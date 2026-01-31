@@ -178,12 +178,17 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
 }
 
 fn humanize_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes < KB {
         format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < MB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else if bytes < GB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
     } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1} GB", bytes as f64 / GB as f64)
     }
 }
 

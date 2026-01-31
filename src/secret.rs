@@ -115,11 +115,6 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     (result, count)
 }
 
-/// Strip `Accept-Encoding` header from an HTTP request.
-///
-/// Forces upstream to return uncompressed responses so that scrub()
-/// can match literal secret bytes. Without this, gzip/br/zstd encoded
-/// responses bypass scrubbing entirely.
 /// Rewrite outgoing request headers: strip Accept-Encoding (forces
 /// uncompressed responses for scrubbing) and force Connection: close
 /// (so upstream closes after the response, preventing keep-alive stalls

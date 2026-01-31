@@ -112,6 +112,11 @@ pub fn connect_upstream(
     Ok((stream, tls_conn))
 }
 
+/// Maximum response size before we bail. Prevents OOM on malicious
+/// or misconfigured upstreams. 256MB is generous -- most API responses
+/// are KB, npm tarballs are tens of MB.
+const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
+
 /// Complete a TLS handshake, send request, read full response.
 ///
 /// Handles both Content-Length and chunked Transfer-Encoding responses.
@@ -171,6 +176,15 @@ pub fn relay_upstream(
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => break,
             }
+        }
+
+        if response.len() > MAX_RESPONSE_SIZE {
+            return Err(format!(
+                "response too large ({} bytes, max {})",
+                response.len(),
+                MAX_RESPONSE_SIZE
+            )
+            .into());
         }
 
         if state.peer_has_closed() {

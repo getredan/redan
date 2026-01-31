@@ -11,7 +11,7 @@ use crate::ca::MitmCa;
 use crate::{proxy, vm};
 
 const ALPINE_VERSION: &str = "3.21.3";
-const ALPINE_URL: &str = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz";
+const ALPINE_MINOR: &str = "3.21";
 
 /// Where images are stored.
 pub fn image_dir() -> PathBuf {
@@ -28,8 +28,22 @@ fn cache_dir() -> PathBuf {
 }
 
 /// Path to a named image's rootfs.
+///
+/// Validates that the name contains only safe characters to prevent
+/// path traversal (e.g., `../../etc`).
 pub fn image_path(name: &str) -> PathBuf {
+    assert!(
+        is_valid_image_name(name),
+        "invalid image name: must be alphanumeric, hyphens, or underscores"
+    );
     image_dir().join(name)
+}
+
+fn is_valid_image_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// List all local images.
@@ -71,10 +85,13 @@ fn ensure_base_cached() -> PathBuf {
     }
 
     eprintln!("downloading Alpine {ALPINE_VERSION} minirootfs...");
+    let url = format!(
+        "https://dl-cdn.alpinelinux.org/alpine/v{ALPINE_MINOR}/releases/x86_64/alpine-minirootfs-{ALPINE_VERSION}-x86_64.tar.gz"
+    );
     let output = std::process::Command::new("curl")
         .args(["-fSL", "-o"])
         .arg(&tarball)
-        .arg(ALPINE_URL)
+        .arg(&url)
         .status()
         .expect("curl not found");
 
@@ -130,6 +147,21 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
     eprintln!("extracting base image...");
     extract_tarball(&tarball, &dest)?;
 
+    // From here, clean up dest on any error.
+    match build_image(&dest, packages, run_commands) {
+        Ok(()) => {
+            eprintln!("image '{name}' created at {}", dest.display());
+            Ok(dest)
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&dest);
+            Err(e)
+        }
+    }
+}
+
+/// Inner build logic. Separated so `create` can clean up on failure.
+fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io::Result<()> {
     // Step 3: build setup command
     let mut setup_parts: Vec<String> = Vec::new();
 
@@ -162,7 +194,7 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
     // Step 4: boot VM with network, run setup
     eprintln!("building image (this boots a VM with network)...");
     let ca = MitmCa::generate();
-    vm::install_ca_cert(&dest, ca.ca_cert_pem());
+    vm::install_ca_cert(dest, ca.ca_cert_pem());
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
     let vm_command = format!("{net_setup}; {full_command}");
@@ -190,7 +222,35 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
         Duration::from_secs(600), // 10 min timeout for builds
     );
 
-    // Verify build completed
-    eprintln!("image '{name}' created at {}", dest.display());
-    Ok(dest)
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_image_names() {
+        assert!(is_valid_image_name("claude-code"));
+        assert!(is_valid_image_name("my_image"));
+        assert!(is_valid_image_name("test123"));
+        assert!(is_valid_image_name("a"));
+    }
+
+    #[test]
+    fn invalid_image_names() {
+        assert!(!is_valid_image_name(""));
+        assert!(!is_valid_image_name("../etc"));
+        assert!(!is_valid_image_name("../../passwd"));
+        assert!(!is_valid_image_name("foo/bar"));
+        assert!(!is_valid_image_name("foo bar"));
+        assert!(!is_valid_image_name(".hidden"));
+        assert!(!is_valid_image_name("name.with.dots"));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid image name")]
+    fn image_path_rejects_traversal() {
+        image_path("../../etc/passwd");
+    }
 }
