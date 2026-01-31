@@ -97,7 +97,13 @@ fn main() {
         } => {
             let rootfs_path = match (&image_name, &rootfs) {
                 (Some(name), _) => {
-                    let p = image::image_path(name);
+                    let p = match image::image_path(name) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    };
                     if !p.exists() {
                         eprintln!("image '{name}' not found. Run: redan image create {name} ...");
                         std::process::exit(1);
@@ -147,7 +153,7 @@ fn main() {
                     );
                 } else {
                     for name in images {
-                        let path = image::image_path(&name);
+                        let path = image::image_path(&name).expect("listed image has invalid name");
                         let size = dir_size(&path).unwrap_or(0);
                         println!("{name:20} {}", humanize_bytes(size));
                     }
@@ -405,7 +411,7 @@ mod tests {
     fn parse_secret_basic() {
         let (name, binding) = parse_secret("TOKEN=secret123:api.github.com").unwrap();
         assert_eq!(name, "TOKEN");
-        assert_eq!(binding.real_value, "secret123");
+        assert_eq!(*binding.real_value, "secret123");
         assert_eq!(binding.allowed_hosts, vec!["api.github.com"]);
         assert!(binding.placeholder.starts_with("redan_ph_token_"));
     }
@@ -416,7 +422,7 @@ mod tests {
         let (name, binding) =
             parse_secret("DB_URL=postgres://user:pass@host:5432:db.example.com").unwrap();
         assert_eq!(name, "DB_URL");
-        assert_eq!(binding.real_value, "postgres://user:pass@host:5432");
+        assert_eq!(*binding.real_value, "postgres://user:pass@host:5432");
         assert_eq!(binding.allowed_hosts, vec!["db.example.com"]);
     }
 
@@ -463,7 +469,7 @@ mod tests {
         let (name, binding) =
             parse_secret("TOKEN=vault://redan/test#github_token:api.github.com").unwrap();
         assert_eq!(name, "TOKEN");
-        assert_eq!(binding.real_value, "ghp_test123");
+        assert_eq!(*binding.real_value, "ghp_test123");
         assert_eq!(binding.allowed_hosts, vec!["api.github.com"]);
     }
 

@@ -39,12 +39,14 @@ fn cache_dir() -> PathBuf {
 ///
 /// Validates that the name contains only safe characters to prevent
 /// path traversal (e.g., `../../etc`).
-pub fn image_path(name: &str) -> PathBuf {
-    assert!(
-        is_valid_image_name(name),
-        "invalid image name: must be alphanumeric, hyphens, or underscores"
-    );
-    image_dir().join(name)
+pub fn image_path(name: &str) -> io::Result<PathBuf> {
+    if !is_valid_image_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid image name: must be alphanumeric, hyphens, or underscores",
+        ));
+    }
+    Ok(image_dir().join(name))
 }
 
 fn is_valid_image_name(name: &str) -> bool {
@@ -71,7 +73,7 @@ pub fn list() -> Vec<String> {
 
 /// Remove a named image.
 pub fn remove(name: &str) -> io::Result<()> {
-    let path = image_path(name);
+    let path = image_path(name)?;
     if !path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -139,7 +141,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> io::Result<()> {
 /// 3. Run `apk update && apk add <packages>` + custom commands
 /// 4. The modified rootfs is the image
 pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::Result<PathBuf> {
-    let dest = image_path(name);
+    let dest = image_path(name)?;
     if dest.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -256,8 +258,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid image name")]
     fn image_path_rejects_traversal() {
-        image_path("../../etc/passwd");
+        let err = image_path("../../etc/passwd").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("invalid image name"));
     }
 }

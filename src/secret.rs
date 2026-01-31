@@ -86,13 +86,13 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
         if !secret.allowed_hosts.iter().any(|h| h == hostname) {
             continue;
         }
-        if let Some(replaced) = byte_replace(
+        if let Some((replaced, n)) = byte_replace(
             &header_bytes,
             secret.placeholder.as_bytes(),
             secret.real_value.as_bytes(),
         ) {
             header_bytes = replaced;
-            count += 1;
+            count += n;
         }
     }
 
@@ -118,13 +118,13 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     let mut count = 0;
 
     for secret in secrets {
-        if let Some(replaced) = byte_replace(
+        if let Some((replaced, n)) = byte_replace(
             &result,
             secret.real_value.as_bytes(),
             secret.placeholder.as_bytes(),
         ) {
             result = replaced;
-            count += 1;
+            count += n;
         }
     }
 
@@ -187,20 +187,21 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`.
 /// Returns `None` if needle is not found (avoids allocation).
+/// Returns `Some((result, count))` with the number of replacements made.
 /// Operates on raw bytes -- no UTF-8 assumptions.
-fn byte_replace(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+fn byte_replace(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<(Vec<u8>, usize)> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
 
     let mut result = Vec::new();
     let mut last_end = 0;
-    let mut found = false;
+    let mut count = 0;
     let mut i = 0;
 
     while i + needle.len() <= haystack.len() {
         if &haystack[i..i + needle.len()] == needle {
-            found = true;
+            count += 1;
             result.extend_from_slice(&haystack[last_end..i]);
             result.extend_from_slice(replacement);
             i += needle.len();
@@ -210,12 +211,12 @@ fn byte_replace(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Ve
         }
     }
 
-    if !found {
+    if count == 0 {
         return None;
     }
 
     result.extend_from_slice(&haystack[last_end..]);
-    Some(result)
+    Some((result, count))
 }
 
 #[cfg(test)]
@@ -310,8 +311,16 @@ mod tests {
 
     #[test]
     fn byte_replace_finds_needle() {
-        let result = byte_replace(b"hello world", b"world", b"rust").unwrap();
+        let (result, count) = byte_replace(b"hello world", b"world", b"rust").unwrap();
         assert_eq!(result, b"hello rust");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn byte_replace_multiple_occurrences() {
+        let (result, count) = byte_replace(b"aa bb aa cc aa", b"aa", b"xx").unwrap();
+        assert_eq!(result, b"xx bb xx cc xx");
+        assert_eq!(count, 3);
     }
 
     #[test]
