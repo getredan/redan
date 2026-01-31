@@ -243,7 +243,7 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
 
     let binding = SecretBinding {
         placeholder: placeholder.clone(),
-        real_value: real_value.to_string(),
+        real_value: zeroize::Zeroizing::new(real_value.to_string()),
         allowed_hosts,
     };
 

@@ -65,96 +65,109 @@ impl Vm {
         let guest_fd = guest_sock.as_raw_fd();
 
         let thread = std::thread::spawn(move || {
-            let ret = unsafe {
-                ffi::krun_init_log(
-                    ffi::KRUN_LOG_TARGET_DEFAULT,
-                    ffi::KRUN_LOG_LEVEL_OFF,
-                    ffi::KRUN_LOG_STYLE_AUTO,
-                    0,
-                )
-            };
-            krun_check!(ret >= 0, "krun_init_log failed: {ret}");
-
-            let ctx_id = unsafe { ffi::krun_create_ctx() };
-            krun_check!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
-            let ctx_id = ctx_id as u32;
-
-            unsafe {
-                let ret = ffi::krun_set_vm_config(ctx_id, config.vcpus, config.ram_mib);
-                krun_check!(ret >= 0, "krun_set_vm_config failed: {ret}");
-
-                let root = CString::new(config.rootfs).unwrap();
-                let ret = ffi::krun_set_root(ctx_id, root.as_ptr());
-                krun_check!(ret >= 0, "krun_set_root failed: {ret}");
-
-                let workdir = CString::new("/").unwrap();
-                let ret = ffi::krun_set_workdir(ctx_id, workdir.as_ptr());
-                krun_check!(ret >= 0, "krun_set_workdir failed: {ret}");
+            // Catch panics to prevent unwinding across the FFI boundary
+            // into libkrun's C code, which would be undefined behavior.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::run_vm(config, guest_sock, guest_fd)
+            }));
+            match result {
+                Ok(code) => code,
+                Err(_) => {
+                    log::error!("VM thread panicked, aborting to prevent UB");
+                    std::process::abort();
+                }
             }
-
-            // virtio-net
-            let ret = unsafe {
-                ffi::krun_add_net_unixstream(
-                    ctx_id,
-                    std::ptr::null(),
-                    guest_fd,
-                    GUEST_MAC.as_ptr(),
-                    0,
-                    0,
-                )
-            };
-            krun_check!(ret >= 0, "krun_add_net_unixstream failed: {ret}");
-
-            // virtio-fs mounts
-            for (tag, path) in &config.virtiofs_mounts {
-                let c_tag = CString::new(tag.as_str()).unwrap();
-                let c_path = CString::new(path.as_str()).unwrap();
-                let ret =
-                    unsafe { ffi::krun_add_virtiofs(ctx_id, c_tag.as_ptr(), c_path.as_ptr()) };
-                krun_check!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
-            }
-
-            // The implicit console uses the host process's stdio.
-            // Interactive mode adds raw terminal on the host (caller handles).
-            // Non-interactive: console output goes to host stdout as-is.
-
-            // exec: ash -c "<command>"
-            let exec_path = CString::new("/bin/busybox").unwrap();
-            let arg0 = CString::new("ash").unwrap();
-            let arg1 = CString::new("-c").unwrap();
-            let arg2 = CString::new(config.command).unwrap();
-            let argv: Vec<*const i8> = vec![
-                arg0.as_ptr(),
-                arg1.as_ptr(),
-                arg2.as_ptr(),
-                std::ptr::null(),
-            ];
-
-            let env_cstrings: Vec<CString> = config
-                .env
-                .iter()
-                .map(|e| CString::new(e.as_str()).unwrap())
-                .collect();
-            let mut envp: Vec<*const i8> = env_cstrings.iter().map(|e| e.as_ptr()).collect();
-            envp.push(std::ptr::null());
-
-            let ret = unsafe {
-                ffi::krun_set_exec(ctx_id, exec_path.as_ptr(), argv.as_ptr(), envp.as_ptr())
-            };
-            krun_check!(ret >= 0, "krun_set_exec failed: {ret}");
-
-            // Keep guest_sock alive for the duration of the VM.
-            // ManuallyDrop over mem::forget to make intent explicit.
-            let _guest_sock = std::mem::ManuallyDrop::new(guest_sock);
-
-            log::info!("entering VM");
-            unsafe { ffi::krun_start_enter(ctx_id) }
         });
 
         Self {
             net_sock: host_sock,
             _thread: thread,
         }
+    }
+
+    fn run_vm(config: VmConfig, guest_sock: UnixStream, guest_fd: i32) -> i32 {
+        let ret = unsafe {
+            ffi::krun_init_log(
+                ffi::KRUN_LOG_TARGET_DEFAULT,
+                ffi::KRUN_LOG_LEVEL_OFF,
+                ffi::KRUN_LOG_STYLE_AUTO,
+                0,
+            )
+        };
+        krun_check!(ret >= 0, "krun_init_log failed: {ret}");
+
+        let ctx_id = unsafe { ffi::krun_create_ctx() };
+        krun_check!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
+        let ctx_id = ctx_id as u32;
+
+        unsafe {
+            let ret = ffi::krun_set_vm_config(ctx_id, config.vcpus, config.ram_mib);
+            krun_check!(ret >= 0, "krun_set_vm_config failed: {ret}");
+
+            let root = CString::new(config.rootfs).unwrap();
+            let ret = ffi::krun_set_root(ctx_id, root.as_ptr());
+            krun_check!(ret >= 0, "krun_set_root failed: {ret}");
+
+            let workdir = CString::new("/").unwrap();
+            let ret = ffi::krun_set_workdir(ctx_id, workdir.as_ptr());
+            krun_check!(ret >= 0, "krun_set_workdir failed: {ret}");
+        }
+
+        // virtio-net
+        let ret = unsafe {
+            ffi::krun_add_net_unixstream(
+                ctx_id,
+                std::ptr::null(),
+                guest_fd,
+                GUEST_MAC.as_ptr(),
+                0,
+                0,
+            )
+        };
+        krun_check!(ret >= 0, "krun_add_net_unixstream failed: {ret}");
+
+        // virtio-fs mounts
+        for (tag, path) in &config.virtiofs_mounts {
+            let c_tag = CString::new(tag.as_str()).unwrap();
+            let c_path = CString::new(path.as_str()).unwrap();
+            let ret = unsafe { ffi::krun_add_virtiofs(ctx_id, c_tag.as_ptr(), c_path.as_ptr()) };
+            krun_check!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
+        }
+
+        // The implicit console uses the host process's stdio.
+        // Interactive mode adds raw terminal on the host (caller handles).
+        // Non-interactive: console output goes to host stdout as-is.
+
+        // exec: ash -c "<command>"
+        let exec_path = CString::new("/bin/busybox").unwrap();
+        let arg0 = CString::new("ash").unwrap();
+        let arg1 = CString::new("-c").unwrap();
+        let arg2 = CString::new(config.command).unwrap();
+        let argv: Vec<*const i8> = vec![
+            arg0.as_ptr(),
+            arg1.as_ptr(),
+            arg2.as_ptr(),
+            std::ptr::null(),
+        ];
+
+        let env_cstrings: Vec<CString> = config
+            .env
+            .iter()
+            .map(|e| CString::new(e.as_str()).unwrap())
+            .collect();
+        let mut envp: Vec<*const i8> = env_cstrings.iter().map(|e| e.as_ptr()).collect();
+        envp.push(std::ptr::null());
+
+        let ret =
+            unsafe { ffi::krun_set_exec(ctx_id, exec_path.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+        krun_check!(ret >= 0, "krun_set_exec failed: {ret}");
+
+        // Keep guest_sock alive for the duration of the VM.
+        // ManuallyDrop over mem::forget to make intent explicit.
+        let _guest_sock = std::mem::ManuallyDrop::new(guest_sock);
+
+        log::info!("entering VM");
+        unsafe { ffi::krun_start_enter(ctx_id) }
     }
 }
 

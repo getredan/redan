@@ -48,7 +48,7 @@ impl SecretProvider for Literal {
 /// Falls back to `~/.vault-token` if `VAULT_TOKEN` is not set.
 pub struct Vault {
     addr: String,
-    token: String,
+    token: zeroize::Zeroizing<String>,
 }
 
 impl Vault {
@@ -70,14 +70,17 @@ impl Vault {
             ));
         }
 
-        Ok(Self { addr, token })
+        Ok(Self {
+            addr,
+            token: zeroize::Zeroizing::new(token),
+        })
     }
 
     /// Create with explicit address and token (for testing).
     pub fn new(addr: &str, token: &str) -> Self {
         Self {
             addr: addr.to_string(),
-            token: token.to_string(),
+            token: zeroize::Zeroizing::new(token.to_string()),
         }
     }
 }
@@ -114,7 +117,7 @@ impl SecretProvider for Vault {
         let url = format!("{}/v1/{api_path}", self.addr);
 
         let mut response = ureq::get(&url)
-            .header("X-Vault-Token", &self.token)
+            .header("X-Vault-Token", self.token.as_str())
             .call()
             .map_err(|e| io::Error::other(format!("vault request failed: {e}")))?;
 

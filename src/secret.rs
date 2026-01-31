@@ -24,14 +24,22 @@
 //! boundary. The primary protection is host-based allowlisting -- secrets
 //! are only injected for requests to explicitly permitted hosts.
 
+use zeroize::{Zeroize, Zeroizing};
+
 /// A secret the proxy knows how to inject.
+///
+/// `real_value` is wrapped in `Zeroizing<String>` so the secret bytes
+/// are overwritten with zeros when the binding is dropped. This prevents
+/// secrets from lingering in freed heap memory (core dumps, swap, etc.).
 #[derive(Clone)]
 pub struct SecretBinding {
     /// Placeholder token visible to the guest (e.g., `redan_ph_github_a1b2c3d4`)
     pub placeholder: String,
-    /// Real secret value, only in host memory.
-    pub real_value: String,
+    /// Real secret value, only in host memory. Zeroized on drop.
+    pub real_value: Zeroizing<String>,
     /// Hosts this secret may be injected for (e.g., `["api.github.com"]`).
+    /// Exact match only -- no wildcards, no subdomain matching. This prevents
+    /// subdomain takeover attacks.
     pub allowed_hosts: Vec<String>,
 }
 
@@ -42,6 +50,14 @@ impl std::fmt::Debug for SecretBinding {
             .field("real_value", &"[REDACTED]")
             .field("allowed_hosts", &self.allowed_hosts)
             .finish()
+    }
+}
+
+impl Drop for SecretBinding {
+    fn drop(&mut self) {
+        // Zeroizing<String> handles real_value automatically.
+        // Also zeroize the placeholder since it could aid reverse-engineering.
+        self.placeholder.zeroize();
     }
 }
 
@@ -209,7 +225,7 @@ mod tests {
     fn test_binding() -> SecretBinding {
         SecretBinding {
             placeholder: "redan_ph_test_1234".into(),
-            real_value: "ghp_RealSecretValue99".into(),
+            real_value: Zeroizing::new("ghp_RealSecretValue99".into()),
             allowed_hosts: vec!["api.github.com".into(), "httpbin.org".into()],
         }
     }

@@ -49,7 +49,7 @@ use smoltcp::wire::Ipv4Address;
 fn secret(placeholder: &str, real: &str, hosts: &[&str]) -> SecretBinding {
     SecretBinding {
         placeholder: placeholder.to_string(),
-        real_value: real.to_string(),
+        real_value: zeroize::Zeroizing::new(real.to_string()),
         allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
     }
 }
@@ -796,7 +796,7 @@ fn f03_clone_preserves_redaction() {
     let debug = format!("{cloned:?}");
     assert!(!debug.contains("ghp_SuperSecret123"));
     // But the actual value must still work for injection
-    assert_eq!(cloned.real_value, "ghp_SuperSecret123");
+    assert_eq!(*cloned.real_value, "ghp_SuperSecret123");
 }
 
 /// WebSocket upgrade must be rejected by the proxy. After a 101
@@ -885,7 +885,7 @@ fn h02_crlf_in_secret_body_does_not_corrupt_headers() {
     // split it into multiple headers. Test the injection path directly.
     let malicious = SecretBinding {
         placeholder: "redan_ph_evil_abc".into(),
-        real_value: "value\r\nX-Injected: evil".into(),
+        real_value: zeroize::Zeroizing::new("value\r\nX-Injected: evil".into()),
         allowed_hosts: vec!["api.example.com".into()],
     };
     let req = http_request(
