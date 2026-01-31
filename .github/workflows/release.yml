@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Stub libkrun for linking. The binary requires real libkrun
+      # at runtime, but we can build against stubs.
+      - name: Create libkrun stub
+        run: |
+          cat > /tmp/libkrun_stub.c << 'EOF'
+          int krun_init_log(void) { return 0; }
+          int krun_create_ctx(void) { return 0; }
+          int krun_set_vm_config(void) { return 0; }
+          int krun_set_root(void) { return 0; }
+          int krun_set_workdir(void) { return 0; }
+          int krun_set_exec(void) { return 0; }
+          int krun_start_enter(void) { return 0; }
+          int krun_add_net_unixstream(void) { return 0; }
+          int krun_add_virtiofs(void) { return 0; }
+          int krun_set_console_output(void) { return 0; }
+          EOF
+          gcc -shared -o /tmp/libkrun.so /tmp/libkrun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          cd target/release
+          tar czf redan-${GITHUB_REF_NAME}-linux-x86_64.tar.gz redan
+          sha256sum redan-${GITHUB_REF_NAME}-linux-x86_64.tar.gz > redan-${GITHUB_REF_NAME}-linux-x86_64.tar.gz.sha256
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/redan-*.tar.gz
+            target/release/redan-*.sha256
+          generate_release_notes: true
