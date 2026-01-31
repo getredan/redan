@@ -38,7 +38,7 @@ fn end_to_end_secret_injection() {
     }
 
     let ca = MitmCa::generate();
-    vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem());
+    vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
 
     let placeholder = "redan_ph_test_e2e_abcd1234";
     let real_value = "ghp_FAKE_E2E_TOKEN_99999";
@@ -97,7 +97,7 @@ fn synthetic_dns_resolution() {
     }
 
     let ca = MitmCa::generate();
-    vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem());
+    vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
 

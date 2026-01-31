@@ -177,15 +177,16 @@ pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
 /// image is modified on every `exec`. The CA is ephemeral (regenerated
 /// per run), so the old cert is harmless. A tmpdir overlay would avoid
 /// this but adds complexity for no security benefit.
-pub fn install_ca_cert(rootfs: &Path, pem: &str) {
+pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
     let ssl_dir = rootfs.join("etc/ssl/certs");
-    std::fs::create_dir_all(&ssl_dir).ok();
+    std::fs::create_dir_all(&ssl_dir)?;
 
-    std::fs::write(ssl_dir.join("redan-ca.pem"), pem).expect("failed to write CA PEM");
+    std::fs::write(ssl_dir.join("redan-ca.pem"), pem)?;
 
     let bundle_path = ssl_dir.join("ca-certificates.crt");
     let bundle = std::fs::read_to_string(&bundle_path).unwrap_or_default();
     let base = bundle.split("# Redan MITM CA").next().unwrap_or(&bundle);
     let new_bundle = format!("{base}# Redan MITM CA\n{pem}\n");
-    std::fs::write(bundle_path, new_bundle).expect("failed to write CA bundle");
+    std::fs::write(bundle_path, new_bundle)?;
+    Ok(())
 }

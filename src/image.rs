@@ -13,18 +13,26 @@ use crate::{proxy, vm};
 const ALPINE_VERSION: &str = "3.21.3";
 const ALPINE_MINOR: &str = "3.21";
 
+fn home_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("HOME").expect("$HOME not set -- cannot determine config directories"),
+    )
+}
+
 /// Where images are stored.
 pub fn image_dir() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap()));
-    PathBuf::from(base).join("redan/images")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".local/share"));
+    base.join("redan/images")
 }
 
 /// Where downloaded base images are cached.
 fn cache_dir() -> PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
-        .unwrap_or_else(|_| format!("{}/.cache", std::env::var("HOME").unwrap()));
-    PathBuf::from(base).join("redan")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".cache"));
+    base.join("redan")
 }
 
 /// Path to a named image's rootfs.
@@ -74,31 +82,30 @@ pub fn remove(name: &str) -> io::Result<()> {
 }
 
 /// Download the Alpine minirootfs tarball if not cached. Returns path to tarball.
-fn ensure_base_cached() -> PathBuf {
+fn ensure_base_cached() -> io::Result<PathBuf> {
     let cache = cache_dir();
-    fs::create_dir_all(&cache).expect("create cache dir");
+    fs::create_dir_all(&cache)?;
 
     let tarball = cache.join(format!("alpine-minirootfs-{ALPINE_VERSION}-x86_64.tar.gz"));
     if tarball.exists() {
         log::info!("using cached base image: {}", tarball.display());
-        return tarball;
+        return Ok(tarball);
     }
 
     eprintln!("downloading Alpine {ALPINE_VERSION} minirootfs...");
     let url = format!(
         "https://dl-cdn.alpinelinux.org/alpine/v{ALPINE_MINOR}/releases/x86_64/alpine-minirootfs-{ALPINE_VERSION}-x86_64.tar.gz"
     );
-    let output = std::process::Command::new("curl")
+    let status = std::process::Command::new("curl")
         .args(["-fSL", "-o"])
         .arg(&tarball)
         .arg(&url)
         .status()
-        .expect("curl not found");
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("curl: {e}")))?;
 
-    if !output.success() {
-        // Clean up partial download
+    if !status.success() {
         let _ = fs::remove_file(&tarball);
-        panic!("failed to download Alpine minirootfs");
+        return Err(io::Error::other("failed to download Alpine minirootfs"));
     }
 
     eprintln!(
@@ -106,7 +113,7 @@ fn ensure_base_cached() -> PathBuf {
         tarball.display(),
         fs::metadata(&tarball).map(|m| m.len()).unwrap_or(0)
     );
-    tarball
+    Ok(tarball)
 }
 
 /// Extract a tarball into a directory.
@@ -141,7 +148,7 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
     }
 
     // Step 1: get base tarball
-    let tarball = ensure_base_cached();
+    let tarball = ensure_base_cached()?;
 
     // Step 2: extract
     eprintln!("extracting base image...");
@@ -194,7 +201,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     // Step 4: boot VM with network, run setup
     eprintln!("building image (this boots a VM with network)...");
     let ca = MitmCa::generate();
-    vm::install_ca_cert(dest, ca.ca_cert_pem());
+    vm::install_ca_cert(dest, ca.ca_cert_pem())?;
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
     let vm_command = format!("{net_setup}; {full_command}");
@@ -216,7 +223,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
 
     // Run proxy until VM completes (generous timeout for package installation)
     proxy::run(
-        vm_handle.net_sock.try_clone().expect("clone net_sock"),
+        vm_handle.net_sock.try_clone()?,
         &ca,
         &[],                      // no secrets during build
         Duration::from_secs(600), // 10 min timeout for builds

@@ -263,7 +263,10 @@ fn exec(
     log::info!("MITM CA generated");
 
     // Install CA cert in guest rootfs
-    vm::install_ca_cert(Path::new(rootfs), ca.ca_cert_pem());
+    if let Err(e) = vm::install_ca_cert(Path::new(rootfs), ca.ca_cert_pem()) {
+        eprintln!("failed to install CA cert in rootfs: {e}");
+        std::process::exit(1);
+    }
     log::info!("CA cert installed in guest trust store");
 
     // Parse secrets: generate placeholders, collect bindings
@@ -349,7 +352,9 @@ fn exec(
     // The VM thread may still be alive (krun_start_enter blocks indefinitely)
     // but the process exit will clean it up.
     proxy::run(
-        vm.net_sock.try_clone().expect("clone net_sock"),
+        vm.net_sock
+            .try_clone()
+            .expect("failed to clone VM network socket"),
         &ca,
         &secrets,
         Duration::from_secs(timeout_secs),
