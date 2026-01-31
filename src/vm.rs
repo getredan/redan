@@ -14,13 +14,14 @@ use crate::ffi;
 const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
 /// Like assert!, but logs at error level before panicking.
-/// VM thread panics are silently swallowed (thread is never joined),
-/// so we need the log message to reach stderr.
+/// VM thread panics are caught by catch_unwind and abort,
+/// so we need the log message to reach stderr first.
 macro_rules! krun_check {
     ($cond:expr, $($arg:tt)+) => {
         if !$cond {
-            log::error!($($arg)+);
-            panic!($($arg)+);
+            let msg = format!($($arg)+);
+            log::error!("{msg}");
+            panic!("{msg}");
         }
     };
 }

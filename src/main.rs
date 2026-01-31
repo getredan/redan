@@ -215,6 +215,10 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
         return Err("empty env name, value, or hosts".into());
     }
 
+    if env_name.len() > 256 {
+        return Err("env name too long (max 256 bytes)".into());
+    }
+
     // Resolve the value through the provider system
     let real_value = redan::provider::resolve_secret_value(value_ref)
         .map_err(|e| format!("failed to resolve secret: {e}"))?;

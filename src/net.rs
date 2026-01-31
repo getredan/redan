@@ -69,7 +69,9 @@ impl VirtioNetDevice {
         self.sock.set_nonblocking(false).ok();
         let mut buf = vec![0u8; frame_len];
         let result = self.sock.read_exact(&mut buf);
-        self.sock.set_nonblocking(true).ok();
+        self.sock
+            .set_nonblocking(true)
+            .expect("failed to restore nonblocking mode on virtio-net socket");
         result.ok().map(|_| buf)
     }
 }

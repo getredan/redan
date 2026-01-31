@@ -40,6 +40,17 @@ pub const GATEWAY_IP: Ipv4Address = Ipv4Address::new(192, 168, 127, 1);
 pub const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
 pub const GUEST_IP: &str = "192.168.127.2";
 
+/// Per-socket buffer size for smoltcp TCP sockets. 256 KB is enough
+/// for TLS record reassembly and HTTP header buffering without
+/// excessive memory per connection.
+const TCP_SOCKET_BUF: usize = 256 * 1024;
+
+/// Maximum Content-Length we accept in a guest HTTP request.
+/// Requests larger than this are treated as incomplete (never proxied).
+/// 16 MB is generous for API requests; file uploads go through the
+/// upstream connection directly after headers are proxied.
+const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
+
 /// Run the MITM proxy until the timeout expires.
 pub fn run(host_sock: UnixStream, ca: &mut MitmCa, secrets: &[SecretBinding], timeout: Duration) {
     let mut device = VirtioNetDevice::new(host_sock);
@@ -227,8 +238,8 @@ fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     // socket creation, so we allocate generously upfront. Total:
     // 256KB * 2 * 36 sockets = ~18MB. Acceptable for a CLI tool;
     // the TCP window size drives throughput during large downloads.
-    let rx_buf = tcp::SocketBuffer::new(vec![0; 262144]);
-    let tx_buf = tcp::SocketBuffer::new(vec![0; 262144]);
+    let rx_buf = tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUF]);
+    let tx_buf = tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUF]);
     let mut sock = tcp::Socket::new(rx_buf, tx_buf);
     sock.listen(port).unwrap();
     sockets.add(sock)
@@ -332,6 +343,9 @@ fn process_connection(
         ConnState::Closing => {
             // Wait for TCP close sequence to complete
             if !sock.is_active() {
+                // Zeroize overlap buffer -- may contain secret bytes from
+                // response scrubbing that haven't been flushed yet.
+                zeroize::Zeroize::zeroize(&mut conn.scrub_overlap);
                 conn.state = ConnState::Done;
             }
         }
@@ -485,6 +499,9 @@ fn http_request_complete(data: &[u8]) -> bool {
                 .trim()
                 .parse::<usize>()
         {
+            if cl > MAX_REQUEST_BODY {
+                return false; // reject absurd Content-Length
+            }
             return data.len() - body_offset >= cl;
         }
     }

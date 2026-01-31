@@ -72,7 +72,9 @@ fn parse_qname(packet: &[u8], start: usize) -> Option<(String, usize)> {
             pos += 1;
             break;
         }
-        // Compression pointers shouldn't appear in queries from stub resolvers
+        // Reject compression pointers. Malicious guests could send crafted
+        // packets with pointer loops (CVE-2020-25681 class). Safe to reject
+        // since stub resolvers never use compression in queries.
         if len & 0xC0 == 0xC0 {
             return None;
         }
@@ -92,8 +94,17 @@ fn parse_qname(packet: &[u8], start: usize) -> Option<(String, usize)> {
         return None;
     }
 
-    Some((labels.join("."), pos))
+    let name = labels.join(".");
+    // RFC 1035 s2.3.4: total name length must not exceed 253 characters
+    if name.len() > 253 {
+        return None;
+    }
+    Some((name, pos))
 }
+
+/// DNS name compression pointer to the question name at byte offset 12.
+/// RFC 1035 s4.1.4: top 2 bits = 0b11 (pointer), lower 14 = offset.
+const NAME_PTR_QUESTION: u16 = 0xC000 | 12;
 
 fn build_a_response(id: u16, query: &[u8], question_end: usize, ip: Ipv4Address) -> Vec<u8> {
     let mut resp = Vec::with_capacity(question_end + 16);
@@ -110,7 +121,7 @@ fn build_a_response(id: u16, query: &[u8], question_end: usize, ip: Ipv4Address)
     resp.extend_from_slice(&query[12..question_end]);
 
     // Answer: pointer to name + A record
-    resp.extend_from_slice(&0xC00Cu16.to_be_bytes()); // Name pointer to offset 12
+    resp.extend_from_slice(&NAME_PTR_QUESTION.to_be_bytes());
     resp.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
     resp.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
     resp.extend_from_slice(&60u32.to_be_bytes()); // TTL 60s
@@ -247,5 +258,16 @@ mod tests {
         pkt.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
 
         assert!(handle_query(&pkt, gw).is_none());
+    }
+
+    #[test]
+    fn rejects_name_exceeding_253_chars() {
+        let gw = Ipv4Address::new(192, 168, 127, 1);
+        // 4 labels of 63 chars each = 63*4 + 3 dots = 255 > 253
+        let long_label = "a".repeat(63);
+        let hostname = format!("{long_label}.{long_label}.{long_label}.{long_label}");
+        assert!(hostname.len() > 253);
+        let query = build_query(0x1234, &hostname, 1);
+        assert!(handle_query(&query, gw).is_none());
     }
 }
