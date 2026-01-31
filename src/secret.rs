@@ -119,6 +119,10 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
 /// uncompressed responses for scrubbing) and force Connection: close
 /// (so upstream closes after the response, preventing keep-alive stalls
 /// on responses with no Content-Length or Transfer-Encoding).
+///
+/// Uses `String::from_utf8_lossy` on headers. HTTP/1.1 requires ASCII
+/// in headers (RFC 7230 s3.2.6), so lossy conversion is safe. The body
+/// is untouched (passed through as raw bytes from `header_end`).
 pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
     let header_end = find_header_end(data).unwrap_or(data.len());
     let request_line_end = data[..header_end]

@@ -215,9 +215,10 @@ fn process_dns(sockets: &mut SocketSet, handle: SocketHandle) {
 // --- TCP ---
 
 fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
-    // 256KB buffers for better throughput on large responses.
-    // The guest side (e.g. apk, npm) can send/receive at higher rates
-    // without the TCP window stalling.
+    // 256KB buffers: smoltcp doesn't support buffer resizing after
+    // socket creation, so we allocate generously upfront. Total:
+    // 256KB * 2 * 36 sockets = ~18MB. Acceptable for a CLI tool;
+    // the TCP window size drives throughput during large downloads.
     let rx_buf = tcp::SocketBuffer::new(vec![0; 262144]);
     let tx_buf = tcp::SocketBuffer::new(vec![0; 262144]);
     let mut sock = tcp::Socket::new(rx_buf, tx_buf);
@@ -626,6 +627,12 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     // Forward to upstream in a background thread so the smoltcp event
     // loop keeps running (other connections, DNS, etc.). The response
     // arrives via channel and gets drained incrementally.
+    //
+    // Thread lifecycle: the thread runs until the upstream response
+    // completes or times out (120s read timeout). If the proxy exits
+    // before the thread finishes, the thread is orphaned but the
+    // process exit cleans it up. Acceptable for a CLI tool; a library
+    // API would need JoinHandle tracking and a shutdown signal.
     if let (Some(stream), Some(tls_conn)) = (conn.upstream.take(), conn.upstream_tls.take()) {
         let (tx, rx) = mpsc::channel();
         let secrets: Vec<SecretBinding> = secrets.to_vec();

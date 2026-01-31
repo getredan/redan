@@ -172,6 +172,11 @@ pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
 ///
 /// Writes the PEM to `<rootfs>/etc/ssl/certs/redan-ca.pem` and appends it
 /// to the CA bundle. Safe to call multiple times (replaces previous cert).
+///
+/// Note: this modifies the rootfs/image on disk. For `--image` mode, the
+/// image is modified on every `exec`. The CA is ephemeral (regenerated
+/// per run), so the old cert is harmless. A tmpdir overlay would avoid
+/// this but adds complexity for no security benefit.
 pub fn install_ca_cert(rootfs: &Path, pem: &str) {
     let ssl_dir = rootfs.join("etc/ssl/certs");
     std::fs::create_dir_all(&ssl_dir).ok();

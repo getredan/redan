@@ -50,7 +50,10 @@ impl VirtioNetDevice {
         if frame_len > 65536 {
             return None;
         }
-        // Got length prefix; must read full frame. Temporarily block.
+        // Got length prefix; must read full frame. Temporarily switch to
+        // blocking mode. Safe because libkrun writes length-prefixed
+        // frames atomically via the unix socketpair -- if the 4-byte
+        // prefix arrived, the frame body is already in the kernel buffer.
         self.sock.set_nonblocking(false).ok();
         let mut buf = vec![0u8; frame_len];
         let result = self.sock.read_exact(&mut buf);

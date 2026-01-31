@@ -213,8 +213,10 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
 
     let allowed_hosts: Vec<String> = hosts.split(',').map(|h| h.trim().to_string()).collect();
 
-    // Random placeholder suffix. Not derived from env name or value,
-    // so it can't be predicted by a compromised guest.
+    // Placeholder suffix: not cryptographic, but doesn't need to be.
+    // The guest receives the placeholder via env var, so it already
+    // knows the value. The suffix just needs to be unique per session
+    // to avoid collisions between secrets.
     let random_suffix: u64 = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
