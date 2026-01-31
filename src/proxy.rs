@@ -126,6 +126,10 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
                                 pending_response: Vec::new(),
                                 response_offset: 0,
                                 upstream_rx: None,
+                                scrub_overlap: Vec::new(),
+                                max_secret_len: 0,
+                                headers_done: false,
+                                upstream_done: false,
                                 state: ConnState::WaitingForData,
                             },
                         );
@@ -240,13 +244,21 @@ struct ProxyConn {
     sni: Option<String>,
     is_tls: bool,
     pending_guest_data: Vec<u8>,
-    /// Response data waiting to be sent to the guest.
+    /// Buffered data waiting to be sent to the guest.
     /// Drained incrementally as smoltcp's TCP window allows.
     pending_response: Vec<u8>,
     /// How many bytes of pending_response have been sent.
     response_offset: usize,
-    /// Channel for receiving upstream response from worker thread.
-    upstream_rx: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
+    /// Channel for receiving streamed upstream messages.
+    upstream_rx: Option<mpsc::Receiver<tls::UpstreamMsg>>,
+    /// Overlap buffer for scrubbing secrets that span chunk boundaries.
+    scrub_overlap: Vec<u8>,
+    /// Longest secret real_value, determines overlap buffer size.
+    max_secret_len: usize,
+    /// Whether HTTP response headers have been processed.
+    headers_done: bool,
+    /// Whether the upstream relay has finished (Done received).
+    upstream_done: bool,
     state: ConnState,
 }
 
@@ -299,36 +311,22 @@ fn process_connection(
         }
 
         ConnState::WaitingForUpstream => {
-            // Check if the background thread has finished
-            if let Some(rx) = &conn.upstream_rx {
-                match rx.try_recv() {
-                    Ok(Ok(response)) => {
-                        conn.upstream_rx = None;
-                        conn.pending_response = response;
-                        conn.response_offset = 0;
-                        conn.state = ConnState::SendingResponse;
-                        drain_response(sock, conn);
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("upstream relay error: {e}");
-                        conn.upstream_rx = None;
-                        sock.close();
-                        conn.state = ConnState::Closing;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        // Still waiting, keep polling
-                    }
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        log::warn!("upstream thread died");
-                        sock.close();
-                        conn.state = ConnState::Closing;
-                    }
-                }
-            }
+            handle_upstream_messages(sock, conn, secrets);
         }
 
         ConnState::SendingResponse => {
             drain_response(sock, conn);
+            // If drain finished all pending data but upstream isn't done,
+            // go back to waiting for more chunks.
+            if conn.state == ConnState::SendingResponse
+                && conn.response_offset >= conn.pending_response.len()
+                && !conn.upstream_done
+            {
+                // Reset buffer for next batch of chunks
+                conn.pending_response.clear();
+                conn.response_offset = 0;
+                conn.state = ConnState::WaitingForUpstream;
+            }
         }
 
         ConnState::Closing => {
@@ -629,46 +627,30 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     }
 
     // Forward to upstream in a background thread so the smoltcp event
-    // loop keeps running (other connections, DNS, etc.). The response
-    // arrives via channel and gets drained incrementally.
+    // loop keeps running (other connections, DNS, etc.). Response
+    // streams back via channel: Headers, Body chunks, Done.
     //
-    // Thread lifecycle: the thread runs until the upstream response
-    // completes or times out (120s read timeout). If the proxy exits
-    // before the thread finishes, the thread is orphaned but the
-    // process exit cleans it up. Acceptable for a CLI tool; a library
-    // API would need JoinHandle tracking and a shutdown signal.
+    // Thread lifecycle: runs until upstream completes or times out
+    // (120s read timeout). Orphaned on process exit (acceptable for CLI).
     if let (Some(stream), Some(tls_conn)) = (conn.upstream.take(), conn.upstream_tls.take()) {
         let (tx, rx) = mpsc::channel();
-        let secrets: Vec<SecretBinding> = secrets.to_vec();
+
+        conn.max_secret_len = secrets
+            .iter()
+            .map(|s| s.real_value.len())
+            .max()
+            .unwrap_or(0);
 
         let sni = conn.sni.clone().unwrap_or_default();
         std::thread::spawn(move || {
             log::info!("upstream thread started for {sni}");
             let mut stream = stream;
             let mut tls_conn = tls_conn;
-            let result = tls::relay_upstream(&mut stream, &mut tls_conn, &request_data)
-                .map(|response| {
-                    let (scrubbed, scrub_count) = crate::secret::scrub(&response, &secrets);
-                    if scrub_count > 0 {
-                        log::info!("RESPONSE SCRUBBED: {scrub_count} value(s) removed");
-                    }
-                    log::info!(
-                        "upstream response ({} bytes): {}",
-                        scrubbed.len(),
-                        String::from_utf8_lossy(&scrubbed)
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                    );
-                    rewrite_connection_close(&scrubbed)
-                })
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    log::warn!("upstream thread error for {sni}: {msg}");
-                    msg
-                });
-            if tx.send(result).is_err() {
-                log::warn!("upstream thread: receiver dropped for {sni}");
+            if let Err(e) =
+                tls::relay_upstream_streaming(&mut stream, &mut tls_conn, &request_data, &tx)
+            {
+                log::warn!("upstream thread error for {sni}: {e}");
+                let _ = tx.send(tls::UpstreamMsg::Error(e.to_string()));
             }
         });
 
@@ -677,6 +659,121 @@ fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[
     } else {
         sock.close();
         conn.state = ConnState::Closing;
+    }
+}
+
+/// Process streamed messages from the upstream relay thread.
+///
+/// Handles headers (rewrite Connection, start draining), body chunks
+/// (scrub with overlap, append to pending_response), and completion.
+fn handle_upstream_messages(
+    sock: &mut tcp::Socket<'_>,
+    conn: &mut ProxyConn,
+    secrets: &[SecretBinding],
+) {
+    let Some(rx) = &conn.upstream_rx else { return };
+
+    // Drain all available messages from the channel
+    loop {
+        match rx.try_recv() {
+            Ok(tls::UpstreamMsg::Headers(headers)) => {
+                log::info!(
+                    "upstream headers ({} bytes): {}",
+                    headers.len(),
+                    String::from_utf8_lossy(&headers)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                );
+                // Scrub headers and rewrite Connection: close
+                let (scrubbed, scrub_count) = crate::secret::scrub(&headers, secrets);
+                if scrub_count > 0 {
+                    log::info!("HEADERS SCRUBBED: {scrub_count} value(s)");
+                }
+                let rewritten = rewrite_connection_close(&scrubbed);
+                conn.pending_response.extend_from_slice(&rewritten);
+                conn.headers_done = true;
+            }
+            Ok(tls::UpstreamMsg::Body(chunk)) => {
+                if conn.max_secret_len == 0 || secrets.is_empty() {
+                    // No secrets to scrub, pass through directly
+                    conn.pending_response.extend_from_slice(&chunk);
+                } else {
+                    // Scrub with overlap: prepend leftover from previous
+                    // chunk to catch secrets that span boundaries.
+                    let mut window = std::mem::take(&mut conn.scrub_overlap);
+                    window.extend_from_slice(&chunk);
+
+                    let (scrubbed, scrub_count) = crate::secret::scrub(&window, secrets);
+                    if scrub_count > 0 {
+                        log::info!("BODY SCRUBBED: {scrub_count} value(s)");
+                    }
+
+                    // Keep the last max_secret_len-1 bytes as overlap
+                    let overlap_size = conn.max_secret_len.saturating_sub(1);
+                    if scrubbed.len() > overlap_size {
+                        let safe_end = scrubbed.len() - overlap_size;
+                        conn.pending_response
+                            .extend_from_slice(&scrubbed[..safe_end]);
+                        conn.scrub_overlap = scrubbed[safe_end..].to_vec();
+                    } else {
+                        // Chunk smaller than overlap -- hold it all
+                        conn.scrub_overlap = scrubbed;
+                    }
+                }
+            }
+            Ok(tls::UpstreamMsg::Done) => {
+                // Flush remaining overlap
+                if !conn.scrub_overlap.is_empty() {
+                    let overlap = std::mem::take(&mut conn.scrub_overlap);
+                    conn.pending_response.extend_from_slice(&overlap);
+                }
+                conn.upstream_done = true;
+                conn.upstream_rx = None;
+                // Start draining if we have data
+                if !conn.pending_response.is_empty() {
+                    conn.state = ConnState::SendingResponse;
+                }
+                break;
+            }
+            Ok(tls::UpstreamMsg::Error(e)) => {
+                log::warn!("upstream relay error: {e}");
+                conn.upstream_rx = None;
+                sock.close();
+                conn.state = ConnState::Closing;
+                return;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // Thread exited without Done (crash or panic)
+                if !conn.scrub_overlap.is_empty() {
+                    let overlap = std::mem::take(&mut conn.scrub_overlap);
+                    conn.pending_response.extend_from_slice(&overlap);
+                }
+                conn.upstream_done = true;
+                conn.upstream_rx = None;
+                if !conn.pending_response.is_empty() {
+                    conn.state = ConnState::SendingResponse;
+                } else {
+                    sock.close();
+                    conn.state = ConnState::Closing;
+                }
+                break;
+            }
+        }
+    }
+
+    // If we have buffered data and headers are done, start draining
+    // even before upstream is fully complete (streaming!)
+    if conn.headers_done
+        && !conn.pending_response.is_empty()
+        && conn.state == ConnState::WaitingForUpstream
+    {
+        conn.state = ConnState::SendingResponse;
+    }
+
+    if conn.state == ConnState::SendingResponse {
+        drain_response(sock, conn);
     }
 }
 
@@ -701,15 +798,18 @@ fn drain_response(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
     loop {
         let remaining = &conn.pending_response[conn.response_offset..];
         if remaining.is_empty() {
-            // All data sent. Send TLS close_notify and close TCP.
-            guest_tls.send_close_notify();
-            let mut close_out = Vec::new();
-            if let Err(e) = guest_tls.write_tls(&mut close_out) {
-                log::warn!("close_notify encrypt failed: {e}");
+            if conn.upstream_done {
+                // All data sent and upstream finished. Close cleanly.
+                guest_tls.send_close_notify();
+                let mut close_out = Vec::new();
+                if let Err(e) = guest_tls.write_tls(&mut close_out) {
+                    log::warn!("close_notify encrypt failed: {e}");
+                }
+                sock.send_slice(&close_out).ok();
+                sock.close();
+                conn.state = ConnState::Closing;
             }
-            sock.send_slice(&close_out).ok();
-            sock.close();
-            conn.state = ConnState::Closing;
+            // If upstream not done, caller will switch back to WaitingForUpstream
             return;
         }
 

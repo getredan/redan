@@ -112,27 +112,34 @@ pub fn connect_upstream(
     Ok((stream, tls_conn))
 }
 
-/// Maximum response size before we bail. Prevents OOM on malicious
-/// or misconfigured upstreams. Full buffering is required because we
-/// force Connection: close on upstreams (some CDNs don't send
-/// Content-Length or chunked encoding), so we read until EOF.
-/// Streaming with proper upstream framing is a future improvement.
+/// Maximum total bytes we'll relay per response. Safety cap against
+/// OOM on malicious upstreams. Individual chunks stream through without
+/// buffering the whole thing.
 const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
 
-/// Complete a TLS handshake, send request, read full response.
+/// Messages sent from the upstream relay thread to the proxy loop.
+pub enum UpstreamMsg {
+    /// HTTP response headers (everything up to and including \r\n\r\n).
+    Headers(Vec<u8>),
+    /// A chunk of response body.
+    Body(Vec<u8>),
+    /// Upstream finished.
+    Done,
+    /// Upstream error.
+    Error(String),
+}
+
+/// Relay an HTTP request to upstream and stream the response back.
 ///
-/// Handles both Content-Length and chunked Transfer-Encoding responses.
-/// For chunked encoding (including SSE streams), reads until the terminal
-/// chunk (`0\r\n\r\n`) or the peer closes the connection.
-pub fn relay_upstream(
+/// Sends headers as a single `UpstreamMsg::Headers`, then body as
+/// `UpstreamMsg::Body` chunks, then `UpstreamMsg::Done`.
+pub fn relay_upstream_streaming(
     stream: &mut TcpStream,
     tls: &mut rustls::ClientConnection,
     request: &[u8],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    tx: &std::sync::mpsc::Sender<UpstreamMsg>,
+) -> Result<(), Box<dyn std::error::Error>> {
     stream.set_nonblocking(false)?;
-    // Per-read timeout. Large responses (multi-MB tarballs) may have
-    // gaps between chunks from CDNs. 120s is generous but prevents
-    // infinite hangs.
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
 
     // Complete TLS handshake
@@ -146,9 +153,7 @@ pub fn relay_upstream(
         }
     }
 
-    // Send the HTTP request in chunks, flushing TLS records between
-    // writes. Large requests (>64KB) overflow rustls internal buffers
-    // if written all at once.
+    // Send request
     for chunk in request.chunks(16384) {
         tls.writer().write_all(chunk)?;
         while tls.wants_write() {
@@ -157,9 +162,12 @@ pub fn relay_upstream(
         stream.flush()?;
     }
 
-    // Read the full response
-    let mut response = Vec::new();
+    // Read response, streaming chunks through the channel
+    let mut header_buf = Vec::new();
+    let mut headers_sent = false;
+    let mut total_bytes: usize = 0;
     let mut buf = vec![0u8; 16384];
+
     loop {
         match tls.read_tls(stream) {
             Ok(0) => break,
@@ -174,41 +182,73 @@ pub fn relay_upstream(
         loop {
             match tls.reader().read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    total_bytes += n;
+                    if total_bytes > MAX_RESPONSE_SIZE {
+                        return Err(format!(
+                            "response too large ({total_bytes} bytes, max {MAX_RESPONSE_SIZE})"
+                        )
+                        .into());
+                    }
+
+                    if !headers_sent {
+                        header_buf.extend_from_slice(&buf[..n]);
+                        if let Some(end) = header_end_offset(&header_buf) {
+                            // Split: headers go as one message, remaining as body
+                            let headers = header_buf[..end].to_vec();
+                            let body_remainder = header_buf[end..].to_vec();
+                            tx.send(UpstreamMsg::Headers(headers))?;
+                            headers_sent = true;
+                            if !body_remainder.is_empty() {
+                                tx.send(UpstreamMsg::Body(body_remainder))?;
+                            }
+                            header_buf = Vec::new(); // free
+                        }
+                    } else {
+                        tx.send(UpstreamMsg::Body(buf[..n].to_vec()))?;
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => break,
             }
-        }
-
-        if response.len() > MAX_RESPONSE_SIZE {
-            return Err(format!(
-                "response too large ({} bytes, max {})",
-                response.len(),
-                MAX_RESPONSE_SIZE
-            )
-            .into());
         }
 
         if state.peer_has_closed() {
             // Drain remaining plaintext
             loop {
                 match tls.reader().read(&mut buf) {
-                    Ok(n) if n > 0 => response.extend_from_slice(&buf[..n]),
+                    Ok(n) if n > 0 => {
+                        if headers_sent {
+                            tx.send(UpstreamMsg::Body(buf[..n].to_vec()))?;
+                        } else {
+                            header_buf.extend_from_slice(&buf[..n]);
+                        }
+                    }
                     _ => break,
                 }
             }
-            break;
-        }
-
-        if response_complete(&response) {
+            // If headers never completed (malformed response), send what we have
+            if !headers_sent && !header_buf.is_empty() {
+                tx.send(UpstreamMsg::Headers(header_buf))?;
+            }
             break;
         }
     }
 
-    Ok(response)
+    tx.send(UpstreamMsg::Done)?;
+    Ok(())
+}
+
+/// Find the byte offset of \r\n\r\n (end of HTTP headers, exclusive).
+fn header_end_offset(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
 }
 
 /// Check if a buffer contains a complete HTTP response.
+/// Currently only used by tests; streaming relay uses peer_has_closed.
+#[cfg(test)]
 ///
 /// Supports Content-Length and chunked Transfer-Encoding. For chunked
 /// responses, looks for the terminal chunk marker `0\r\n\r\n`.
