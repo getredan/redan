@@ -97,21 +97,47 @@ smoltcp (userspace TCP/IP on host)
 
 ## Secrets
 
-Format: `ENV_VAR=real_value:allowed_host1,allowed_host2`
+Format: `ENV_VAR=value:allowed_host1,allowed_host2`
+
+The value can be a literal or a provider URI:
 
 ```bash
-# Single host
+# Literal value
 --secret "GITHUB_TOKEN=ghp_abc123:api.github.com"
+
+# From HashiCorp Vault (KV v2)
+--secret "GITHUB_TOKEN=vault://secret/myapp#github_token:api.github.com"
 
 # Multiple hosts
 --secret "API_KEY=sk-abc:api.example.com, cdn.example.com"
 
 # Multiple secrets
 --secret "GITHUB_TOKEN=ghp_abc:api.github.com" \
---secret "NPM_TOKEN=npm_xyz:registry.npmjs.org"
+--secret "NPM_TOKEN=vault://secret/myapp#npm_token:registry.npmjs.org"
 ```
 
-The real value can contain colons (splits on the last `:`). The guest
+### Vault integration
+
+Redan reads secrets from HashiCorp Vault KV v2 via `vault://path#field`.
+Configure with standard Vault environment variables:
+
+```bash
+export VAULT_ADDR='https://vault.example.com:8200'
+export VAULT_TOKEN='hvs.xxx'
+
+redan exec --image claude-code \
+  --secret "API_KEY=vault://myapp/prod#api_key:api.example.com"
+```
+
+Falls back to `~/.vault-token` if `VAULT_TOKEN` is not set.
+
+### Provider architecture
+
+Secret resolution is pluggable via the `SecretProvider` trait. The open
+core ships with `Literal` and `Vault`. Enterprise adapters (Keycloak
+OIDC, AWS Secrets Manager, etc.) implement the same trait.
+
+The value can contain colons (splits on the last `:`). The guest
 receives a `redan_ph_<name>_<hex>` placeholder via environment variable.
 
 ## Mounts

@@ -3,6 +3,7 @@ pub mod dns;
 pub mod ffi;
 pub mod image;
 pub mod net;
+pub mod provider;
 pub mod proxy;
 pub mod secret;
 pub mod tls;

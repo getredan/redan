@@ -193,17 +193,25 @@ fn humanize_bytes(bytes: u64) -> String {
 }
 
 /// Parse secret spec: `ENV_VAR=real_value:host1,host2`
+///
+/// The value can be a literal or a provider URI:
+/// - `ENV_VAR=ghp_abc123:api.github.com` (literal)
+/// - `ENV_VAR=vault://path#field:api.github.com` (Vault KV v2)
 fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
     // Split on last ':' to separate hosts from value (value may contain ':')
     let colon_pos = spec.rfind(':').ok_or("expected ENV_VAR=value:hosts")?;
     let (name_value, hosts) = (&spec[..colon_pos], &spec[colon_pos + 1..]);
 
     let eq_pos = name_value.find('=').ok_or("expected ENV_VAR=value")?;
-    let (env_name, real_value) = (&name_value[..eq_pos], &name_value[eq_pos + 1..]);
+    let (env_name, value_ref) = (&name_value[..eq_pos], &name_value[eq_pos + 1..]);
 
-    if env_name.is_empty() || real_value.is_empty() || hosts.is_empty() {
+    if env_name.is_empty() || value_ref.is_empty() || hosts.is_empty() {
         return Err("empty env name, value, or hosts".into());
     }
+
+    // Resolve the value through the provider system
+    let real_value = redan::provider::resolve_secret_value(value_ref)
+        .map_err(|e| format!("failed to resolve secret: {e}"))?;
 
     // CWE-93: CRLF in secret values would corrupt HTTP framing when
     // injected into headers. Reject at configuration time.
@@ -446,6 +454,17 @@ mod tests {
         assert!(parse_secret("KEY=val\r\nue:host.com").is_err());
         assert!(parse_secret("KEY=val\nue:host.com").is_err());
         assert!(parse_secret("KEY=val\rue:host.com").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires running Vault"]
+    fn parse_secret_vault_scheme() {
+        // Requires: VAULT_ADDR + VAULT_TOKEN set, redan/test secret seeded
+        let (name, binding) =
+            parse_secret("TOKEN=vault://redan/test#github_token:api.github.com").unwrap();
+        assert_eq!(name, "TOKEN");
+        assert_eq!(binding.real_value, "ghp_test123");
+        assert_eq!(binding.allowed_hosts, vec!["api.github.com"]);
     }
 
     #[test]
