@@ -84,7 +84,11 @@ pub fn run(host_sock: UnixStream, ca: &MitmCa, secrets: &[SecretBinding], timeou
 
     loop {
         if start.elapsed() > timeout {
-            log::info!("proxy timeout");
+            log::info!("proxy timeout ({timeout:?})");
+            break;
+        }
+        if device.peer_closed && connections.is_empty() {
+            log::info!("guest exited (socket closed)");
             break;
         }
         let mut has_pending = false;

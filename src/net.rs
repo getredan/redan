@@ -14,6 +14,8 @@ pub struct VirtioNetDevice {
     sock: UnixStream,
     pending_rx: Option<Vec<u8>>,
     pending_tx: VecDeque<Vec<u8>>,
+    /// Set when the socket reports an error (peer closed).
+    pub peer_closed: bool,
 }
 
 impl VirtioNetDevice {
@@ -23,6 +25,7 @@ impl VirtioNetDevice {
             sock,
             pending_rx: None,
             pending_tx: VecDeque::new(),
+            peer_closed: false,
         }
     }
 
@@ -44,7 +47,16 @@ impl VirtioNetDevice {
         match self.sock.read_exact(&mut len_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return None,
-            Err(_) => return None,
+            Err(e) => {
+                // UnexpectedEof = clean close, other errors = peer gone
+                if e.kind() == std::io::ErrorKind::UnexpectedEof
+                    || e.kind() == std::io::ErrorKind::ConnectionReset
+                    || e.kind() == std::io::ErrorKind::BrokenPipe
+                {
+                    self.peer_closed = true;
+                }
+                return None;
+            }
         }
         let frame_len = u32::from_be_bytes(len_buf) as usize;
         if frame_len > 65536 {
