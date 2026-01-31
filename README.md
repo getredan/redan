@@ -13,28 +13,160 @@ you didn't allow, and never observe the real values of injected secrets.
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
 
+## Install
+
+Redan requires Linux x86_64 with KVM and libkrun.
+
+```bash
+# Arch Linux
+pacman -S libkrun
+
+# Fedora
+dnf install libkrun-devel
+
+# Then:
+cargo install redan
+```
+
+## Quick start
+
+### 1. Create an image
+
+```bash
+redan image create claude-code \
+  --packages "nodejs npm git openssh-client" \
+  --run "npm install -g @anthropic-ai/claude-code"
+```
+
+This downloads Alpine Linux, boots a microVM, installs packages, and
+saves the result. Takes about 5 minutes.
+
+### 2. Run an agent
+
+```bash
+redan exec --image claude-code \
+  --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
+  --mount ./my-project \
+  --command "claude --print 'review this project'"
+```
+
+The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
+injects the real key only in HTTPS requests to `api.anthropic.com`.
+Responses are scrubbed of the real value before the agent sees them.
+
+### 3. Interactive mode
+
+```bash
+redan exec --image claude-code -i \
+  --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
+  --mount ./my-project
+```
+
+Drops you into a shell inside the VM. Same secret injection, same
+network isolation.
+
 ## How it works
 
-1. `redan exec` boots a [libkrun] microVM (<1s)
-2. Your project directory is mounted read-write via virtio-fs
-3. All network traffic routes through a userspace TCP/IP stack ([smoltcp])
-4. A MITM proxy intercepts TLS, injects secrets, enforces an allowlist
-5. The agent sees placeholder tokens, never real values
-6. An audit log on the host records every network request
+```
+Guest VM (libkrun, <1s boot)
+  |
+  |  virtio-fs (project dir read-write)
+  |  virtio-net (ethernet frames over unix socket)
+  v
+smoltcp (userspace TCP/IP on host)
+  |
+  |-- UDP :53  -> synthetic DNS (all names resolve locally)
+  |-- TCP :80  -> rejected (HTTPS only)
+  |-- TCP :443 -> TLS MITM proxy
+        |
+        |-- SNI extraction
+        |-- ephemeral cert (signed by per-session CA)
+        |-- secret injection (headers only, host-allowlisted)
+        |-- request forwarded to real upstream
+        |-- response scrubbed of secret values
+        |-- streamed back to guest
+```
 
+**Key properties:**
+- Guest never sees real secret values (only placeholders)
+- Secrets are injected only for explicitly allowed hosts
+- Injection is restricted to HTTP headers (not URLs, not bodies)
+- DNS is synthetic -- no queries reach the internet
+- All traffic routes through the gateway IP (no direct IP access)
+- Response scrubbing is best-effort (literal byte match)
 
-## Status
+## Secrets
 
-**Pre-alpha.** The prototype chain is proven end-to-end: VM boot,
-virtio-fs mounts, synthetic DNS, TLS MITM, secret injection/scrubbing,
-and Claude Code making API calls through the proxy. Not yet packaged
-for distribution.
+Format: `ENV_VAR=real_value:allowed_host1,allowed_host2`
+
+```bash
+# Single host
+--secret "GITHUB_TOKEN=ghp_abc123:api.github.com"
+
+# Multiple hosts
+--secret "API_KEY=sk-abc:api.example.com, cdn.example.com"
+
+# Multiple secrets
+--secret "GITHUB_TOKEN=ghp_abc:api.github.com" \
+--secret "NPM_TOKEN=npm_xyz:registry.npmjs.org"
+```
+
+The real value can contain colons (splits on the last `:`). The guest
+receives a `redan_ph_<name>_<hex>` placeholder via environment variable.
+
+## Mounts
+
+```bash
+# Mount to /workspace (default)
+--mount /home/chris/project
+
+# Mount to specific guest path
+--mount /home/chris/project:/code
+```
+
+Uses virtio-fs. The guest has read-write access. Git is your safety net.
+
+## Image management
+
+```bash
+redan image create myimage --packages "python3 pip" --run "pip install flask"
+redan image list
+redan image remove myimage
+```
+
+Images are Alpine-based rootfs directories stored at
+`~/.local/share/redan/images/`. Base tarballs cached at `~/.cache/redan/`.
 
 ## Requirements
 
-- Linux x86_64 with KVM
-- [libkrun] and [libkrunfw]
-- Rust 1.75+
+- Linux x86_64 with KVM (`/dev/kvm`)
+- [libkrun] >= 1.9.0 and [libkrunfw]
+- Rust 1.85+ (edition 2024)
+
+## Security model
+
+Redan's threat model: a compromised or malicious AI agent running inside
+the VM tries to exfiltrate secrets or access unauthorized resources.
+
+**What redan prevents:**
+- Agent reading real secret values from environment
+- Agent sending secrets to unauthorized hosts
+- Agent making DNS queries to the internet
+- Agent connecting directly to IP addresses (all traffic goes through proxy)
+
+**Known limitations (documented, not bugs):**
+- Scrubbing doesn't catch encoded secrets (base64, URL-encoding, etc.)
+- Domain fronting could route secrets to attacker-controlled backends
+  behind CDNs
+- No HTTP request body inspection (secrets in headers only)
+
+Primary defense is the host allowlist, not scrubbing. Scrubbing reduces
+accidental exposure; it's not a hard security boundary.
+
+## Status
+
+**Pre-alpha.** The full chain works end-to-end. 84 tests (unit,
+integration, adversarial). Not yet packaged for binary distribution.
 
 ## Acknowledgments
 
