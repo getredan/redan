@@ -120,50 +120,49 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
 /// (so upstream closes after the response, preventing keep-alive stalls
 /// on responses with no Content-Length or Transfer-Encoding).
 ///
-/// Uses `String::from_utf8_lossy` on headers. HTTP/1.1 requires ASCII
-/// in headers (RFC 7230 s3.2.6), so lossy conversion is safe. The body
-/// is untouched (passed through as raw bytes from `header_end`).
+/// Uses httparse for header parsing to handle RFC 7230 edge cases
+/// (obs-fold, case-insensitive names). The body is passed through
+/// as raw bytes.
 pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
-    let header_end = find_header_end(data).unwrap_or(data.len());
-    let request_line_end = data[..header_end]
-        .windows(2)
-        .position(|w| w == b"\r\n")
-        .map(|p| p + 2)
-        .unwrap_or(0);
+    let mut parsed_headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut parsed_headers);
+    let body_offset = match req.parse(data) {
+        Ok(httparse::Status::Complete(n)) => n,
+        // Incomplete or malformed: return data as-is (safe default)
+        _ => return data.to_vec(),
+    };
 
+    // Rebuild: request line + filtered headers + body
+    let method = req.method.unwrap_or("GET");
+    let path = req.path.unwrap_or("/");
+    let version = req.version.unwrap_or(1);
     let mut result = Vec::with_capacity(data.len());
-    result.extend_from_slice(&data[..request_line_end]);
+    result.extend_from_slice(format!("{method} {path} HTTP/1.{version}\r\n").as_bytes());
 
-    let headers = &data[request_line_end..header_end];
-    let headers_str = String::from_utf8_lossy(headers);
     let mut has_connection = false;
-    for line in headers_str.split("\r\n") {
-        if line.is_empty() {
+    for header in req.headers.iter() {
+        if header.name.eq_ignore_ascii_case("accept-encoding") {
             continue;
         }
-        let lower = line.to_lowercase();
-        if lower.starts_with("accept-encoding:") {
-            continue;
-        }
-        if lower.starts_with("connection:") {
-            // Replace whatever Connection value with "close"
+        if header.name.eq_ignore_ascii_case("connection") {
             result.extend_from_slice(b"Connection: close\r\n");
             has_connection = true;
             continue;
         }
-        result.extend_from_slice(line.as_bytes());
+        result.extend_from_slice(header.name.as_bytes());
+        result.extend_from_slice(b": ");
+        result.extend_from_slice(header.value);
         result.extend_from_slice(b"\r\n");
     }
     if !has_connection {
         result.extend_from_slice(b"Connection: close\r\n");
     }
-
-    // Body separator + body
-    result.extend_from_slice(&data[header_end - 2..]);
+    result.extend_from_slice(b"\r\n");
+    result.extend_from_slice(&data[body_offset..]);
     result
 }
 
-/// Find the byte offset of \r\n\r\n (header/body separator).
+/// Find the byte offset past \r\n\r\n (header/body separator).
 fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4)
         .position(|w| w == b"\r\n\r\n")

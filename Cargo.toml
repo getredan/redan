@@ -28,6 +28,7 @@ walkdir = "2.5.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 ureq = "3"
+httparse = "1.10.1"
 
 [dev-dependencies]
 base64 = "0.22.1"

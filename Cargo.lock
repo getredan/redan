@@ -698,6 +698,7 @@ dependencies = [
  "clap",
  "env_logger",
  "flate2",
+ "httparse",
  "libc",
  "log",
  "rcgen",

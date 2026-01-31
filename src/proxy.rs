@@ -414,117 +414,82 @@ fn handle_tls_start(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, ca: &MitmC
 /// response headers (case-insensitive). We close the smoltcp socket
 /// after each response, so the client must not attempt to reuse.
 ///
-/// Operates on bytes to avoid corrupting binary response bodies
-/// (String::from_utf8_lossy replaces invalid UTF-8 with U+FFFD).
+/// Uses httparse for header parsing but rebuilds on raw bytes to
+/// avoid corrupting binary response bodies.
 fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
-    let Some(header_end) = data
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
-    else {
-        return data.to_vec();
+    let mut parsed_headers = [httparse::EMPTY_HEADER; 64];
+    let mut resp = httparse::Response::new(&mut parsed_headers);
+    let body_offset = match resp.parse(data) {
+        Ok(httparse::Status::Complete(n)) => n,
+        _ => return data.to_vec(),
     };
 
-    let headers = &data[..header_end - 4]; // exclude \r\n\r\n
-    let body = &data[header_end..];
-
+    // Rebuild: status line + headers with Connection replaced + body
     let mut result = Vec::with_capacity(data.len());
-    let mut pos = 0;
 
-    // Walk header lines
-    while pos < headers.len() {
-        let line_end = headers[pos..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .map(|p| pos + p)
-            .unwrap_or(headers.len());
+    let version = resp.version.unwrap_or(1);
+    let code = resp.code.unwrap_or(200);
+    let reason = resp.reason.unwrap_or("OK");
+    result.extend_from_slice(format!("HTTP/1.{version} {code} {reason}\r\n").as_bytes());
 
-        let line = &headers[pos..line_end];
-
-        // Case-insensitive check for "connection:" prefix
-        if line.len() >= 11
-            && line[..11]
-                .iter()
-                .zip(b"connection:")
-                .all(|(a, b)| a.to_ascii_lowercase() == *b)
-        {
-            result.extend_from_slice(b"Connection: close");
+    let mut has_connection = false;
+    for header in resp.headers.iter() {
+        if header.name.eq_ignore_ascii_case("connection") {
+            result.extend_from_slice(b"Connection: close\r\n");
+            has_connection = true;
         } else {
-            result.extend_from_slice(line);
-        }
-        result.extend_from_slice(b"\r\n");
-
-        pos = line_end + 2;
-        if pos > headers.len() {
-            break;
+            result.extend_from_slice(header.name.as_bytes());
+            result.extend_from_slice(b": ");
+            result.extend_from_slice(header.value);
+            result.extend_from_slice(b"\r\n");
         }
     }
-
-    result.extend_from_slice(b"\r\n"); // header/body separator
-    result.extend_from_slice(body);
+    if !has_connection {
+        result.extend_from_slice(b"Connection: close\r\n");
+    }
+    result.extend_from_slice(b"\r\n");
+    result.extend_from_slice(&data[body_offset..]);
     result
 }
 
 /// Check if an HTTP request contains an Upgrade header (case-insensitive).
 /// Used to reject WebSocket and other protocol upgrades.
 fn request_has_upgrade(data: &[u8]) -> bool {
-    let header_end = data
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap_or(data.len());
-    let headers = &data[..header_end];
-
-    // Scan line-by-line for "upgrade:" prefix
-    let mut pos = 0;
-    while pos < headers.len() {
-        let line_end = headers[pos..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .map(|p| pos + p)
-            .unwrap_or(headers.len());
-
-        let line = &headers[pos..line_end];
-        if line.len() >= 8
-            && line[..8]
-                .iter()
-                .zip(b"upgrade:")
-                .all(|(a, b)| a.to_ascii_lowercase() == *b)
-        {
-            return true;
-        }
-
-        pos = line_end + 2;
-        if pos > headers.len() {
-            break;
-        }
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_err() {
+        return false;
     }
-    false
+    req.headers
+        .iter()
+        .any(|h| h.name.eq_ignore_ascii_case("upgrade"))
 }
 
 /// Check if accumulated data contains a complete HTTP request.
-/// Looks for headers ending with \r\n\r\n, then checks Content-Length
+/// Uses httparse for header parsing, then checks Content-Length
 /// to determine if the full body has arrived. Requests with no
 /// Content-Length (e.g. GET) are complete once headers end.
 fn http_request_complete(data: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(data);
-    let Some(header_end) = text.find("\r\n\r\n") else {
-        return false;
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    let body_offset = match req.parse(data) {
+        Ok(httparse::Status::Complete(n)) => n,
+        _ => return false,
     };
-    let headers = &text[..header_end].to_lowercase();
 
-    if let Some(cl_line) = headers.lines().find(|l| l.starts_with("content-length:"))
-        && let Ok(cl) = cl_line
-            .split(':')
-            .nth(1)
-            .unwrap_or("0")
-            .trim()
-            .parse::<usize>()
-    {
-        let body_start = header_end + 4;
-        return data.len() - body_start >= cl;
+    // Check Content-Length to see if full body has arrived
+    for header in req.headers.iter() {
+        if header.name.eq_ignore_ascii_case("content-length")
+            && let Ok(cl) = std::str::from_utf8(header.value)
+                .unwrap_or("0")
+                .trim()
+                .parse::<usize>()
+        {
+            return data.len() - body_offset >= cl;
+        }
     }
 
-    // No Content-Length: request is complete once headers are done
+    // No Content-Length: complete once headers are done
     true
 }
 
@@ -892,10 +857,13 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_connection_close_no_header() {
+    fn rewrite_connection_close_adds_when_missing() {
         let resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
         let result = rewrite_connection_close(resp);
-        assert_eq!(result, resp);
+        let text = String::from_utf8_lossy(&result);
+        assert!(text.contains("Connection: close"));
+        assert!(text.contains("Content-Type: text/plain"));
+        assert!(text.ends_with("body"));
     }
 
     #[test]
