@@ -9,7 +9,10 @@
 //! Implement [`SecretProvider`] and register it in `resolve_secret_value`
 //! in main.rs. The trait is deliberately simple: one method, no async.
 
-use std::io::{self, Read};
+use std::collections::HashMap;
+use std::io;
+
+use serde::Deserialize;
 
 /// Resolves a secret reference to its real value.
 ///
@@ -79,6 +82,17 @@ impl Vault {
     }
 }
 
+/// Vault KV v2 response envelope: `{"data": {"data": {"field": "value"}}}`.
+#[derive(Deserialize)]
+struct VaultKv2Response {
+    data: VaultKv2Wrapper,
+}
+
+#[derive(Deserialize)]
+struct VaultKv2Wrapper {
+    data: HashMap<String, String>,
+}
+
 impl SecretProvider for Vault {
     fn resolve(&self, reference: &str) -> Result<String, io::Error> {
         let (path, field) = reference.split_once('#').ok_or_else(|| {
@@ -92,7 +106,6 @@ impl SecretProvider for Vault {
         // The mount point is "secret" by default. If the path already
         // starts with the mount, the user can use the full API path.
         let api_path = if let Some(rest) = path.strip_prefix("secret/") {
-            // Already has mount prefix: secret/foo -> secret/data/foo
             format!("secret/data/{rest}")
         } else {
             format!("secret/data/{path}")
@@ -100,130 +113,26 @@ impl SecretProvider for Vault {
 
         let url = format!("{}/v1/{api_path}", self.addr);
 
-        // Minimal HTTP client. No dependency on reqwest/ureq -- redan
-        // links against rustls already, but for Vault (localhost or
-        // internal network) plain HTTP is fine and simpler.
-        let response = http_get(&url, &self.token)?;
+        let mut response = ureq::get(&url)
+            .header("X-Vault-Token", &self.token)
+            .call()
+            .map_err(|e| io::Error::other(format!("vault request failed: {e}")))?;
 
-        // Parse JSON response. Vault KV v2 wraps data in:
-        // { "data": { "data": { "field": "value" } } }
-        let value = extract_vault_field(&response, field).ok_or_else(|| {
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| io::Error::other(format!("vault response read failed: {e}")))?;
+
+        let envelope: VaultKv2Response = serde_json::from_str(&body)
+            .map_err(|e| io::Error::other(format!("vault response parse failed: {e}")))?;
+
+        envelope.data.data.get(field).cloned().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("field '{field}' not found at vault path '{path}'"),
             )
-        })?;
-
-        Ok(value)
+        })
     }
-}
-
-/// Minimal HTTP GET with a Vault token header.
-fn http_get(url: &str, token: &str) -> Result<String, io::Error> {
-    use std::net::TcpStream;
-
-    let url_without_scheme = url
-        .strip_prefix("http://")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "only http:// supported"))?;
-
-    let (host_port, path) = url_without_scheme
-        .split_once('/')
-        .unwrap_or((url_without_scheme, ""));
-
-    let mut stream = TcpStream::connect(host_port)?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
-
-    let request = format!(
-        "GET /{path} HTTP/1.1\r\n\
-         Host: {host_port}\r\n\
-         X-Vault-Token: {token}\r\n\
-         Connection: close\r\n\
-         \r\n"
-    );
-
-    io::Write::write_all(&mut stream, request.as_bytes())?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-
-    // Strip HTTP headers
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or(&response);
-
-    // Check for HTTP errors (crude but sufficient)
-    if response.contains("HTTP/1.1 4") || response.contains("HTTP/1.1 5") {
-        return Err(io::Error::other(format!(
-            "vault returned error: {}",
-            response.lines().next().unwrap_or("")
-        )));
-    }
-
-    Ok(body.to_string())
-}
-
-/// Extract a field from Vault KV v2 JSON response.
-///
-/// Vault wraps KV v2 data as: `{"data": {"data": {"field": "value"}}}`.
-/// We parse with a minimal JSON approach: no serde dependency.
-fn extract_vault_field(json: &str, field: &str) -> Option<String> {
-    // Find the inner data object. Vault KV v2 nests it as data.data.
-    // Strategy: find `"data":{` twice (outer and inner), then find our field.
-    //
-    // This is intentionally simple. A full JSON parser would be more
-    // correct but adds complexity for a well-defined response format.
-    let inner = find_nested_data(json)?;
-    extract_json_string(inner, field)
-}
-
-/// Find the inner `"data": { ... }` within Vault's response.
-fn find_nested_data(json: &str) -> Option<&str> {
-    // Find first "data": which is the wrapper
-    let first = json.find("\"data\"")?;
-    let after_first = &json[first + 6..];
-    // Skip to the value (past whitespace and colon)
-    let brace = after_first.find('{')?;
-    let inner_json = &after_first[brace..];
-
-    // Find second "data": which is the actual secret data
-    let second = inner_json.find("\"data\"")?;
-    let after_second = &inner_json[second + 6..];
-    let brace2 = after_second.find('{')?;
-    let data_start = &after_second[brace2..];
-
-    // Find the matching closing brace
-    let mut depth = 0;
-    for (i, ch) in data_start.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&data_start[..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Extract a string value from a flat JSON object.
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let pos = json.find(&needle)?;
-    let after_key = &json[pos + needle.len()..];
-    // Skip : and whitespace
-    let colon = after_key.find(':')?;
-    let after_colon = after_key[colon + 1..].trim_start();
-    // Expect a quoted string
-    if !after_colon.starts_with('"') {
-        return None;
-    }
-    let value_start = 1; // skip opening quote
-    let value_end = after_colon[value_start..].find('"')?;
-    Some(after_colon[value_start..value_start + value_end].to_string())
 }
 
 /// Parse a secret value reference and resolve it via the appropriate provider.
@@ -267,21 +176,19 @@ mod tests {
     }
 
     #[test]
-    fn extract_vault_field_parses_kv2_response() {
+    fn serde_parses_kv2_response() {
         let json = r#"{"request_id":"abc","data":{"data":{"github_token":"ghp_test123","npm_token":"npm_test456"},"metadata":{"version":1}}}"#;
+        let envelope: VaultKv2Response = serde_json::from_str(json).unwrap();
         assert_eq!(
-            extract_vault_field(json, "github_token"),
-            Some("ghp_test123".to_string())
+            envelope.data.data.get("github_token").unwrap(),
+            "ghp_test123"
         );
-        assert_eq!(
-            extract_vault_field(json, "npm_token"),
-            Some("npm_test456".to_string())
-        );
-        assert_eq!(extract_vault_field(json, "nonexistent"), None);
+        assert_eq!(envelope.data.data.get("npm_token").unwrap(), "npm_test456");
+        assert!(envelope.data.data.get("nonexistent").is_none());
     }
 
     #[test]
-    fn extract_vault_field_handles_whitespace() {
+    fn serde_parses_kv2_with_whitespace() {
         let json = r#"{
             "data": {
                 "data": {
@@ -289,10 +196,26 @@ mod tests {
                 }
             }
         }"#;
+        let envelope: VaultKv2Response = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.data.data.get("key").unwrap(), "value with spaces");
+    }
+
+    #[test]
+    fn serde_handles_json_escapes_in_values() {
+        // The hand-rolled parser failed on escaped quotes. serde handles them.
+        let json = r#"{"data":{"data":{"token":"value\"with\\escapes"}}}"#;
+        let envelope: VaultKv2Response = serde_json::from_str(json).unwrap();
         assert_eq!(
-            extract_vault_field(json, "key"),
-            Some("value with spaces".to_string())
+            envelope.data.data.get("token").unwrap(),
+            r#"value"with\escapes"#
         );
+    }
+
+    #[test]
+    fn serde_handles_unicode_escapes() {
+        let json = r#"{"data":{"data":{"emoji":"\u0041\u0042\u0043"}}}"#;
+        let envelope: VaultKv2Response = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.data.data.get("emoji").unwrap(), "ABC");
     }
 
     #[test]
