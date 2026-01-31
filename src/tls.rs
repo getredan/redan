@@ -113,9 +113,8 @@ pub fn connect_upstream(
 }
 
 /// Maximum response size before we bail. Prevents OOM on malicious
-/// or misconfigured upstreams. 256MB is generous -- most API responses
-/// are KB, npm tarballs are tens of MB.
-const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
+/// or misconfigured upstreams. Largest observed: nodejs at 18MB.
+const MAX_RESPONSE_SIZE: usize = 50 * 1024 * 1024;
 
 /// Complete a TLS handshake, send request, read full response.
 ///
