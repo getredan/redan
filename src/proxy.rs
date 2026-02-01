@@ -51,6 +51,18 @@ const TCP_SOCKET_BUF: usize = 256 * 1024;
 /// upstream connection directly after headers are proxied.
 const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
 
+/// Remove completed connections from the map and release their sockets.
+fn reap_done(connections: &mut HashMap<SocketHandle, ProxyConn>, sockets: &mut SocketSet) {
+    connections.retain(|handle, conn| {
+        if conn.state == ConnState::Done {
+            sockets.remove(*handle);
+            false
+        } else {
+            true
+        }
+    });
+}
+
 /// Run the MITM proxy until the timeout expires.
 pub fn run(host_sock: UnixStream, ca: &mut MitmCa, secrets: &[SecretBinding], timeout: Duration) {
     let mut device = VirtioNetDevice::new(host_sock);
@@ -124,26 +136,7 @@ pub fn run(host_sock: UnixStream, ca: &mut MitmCa, secrets: &[SecretBinding], ti
                             backlog.port,
                             sock.remote_endpoint()
                         );
-                        connections.insert(
-                            handle,
-                            ProxyConn {
-                                handle,
-                                upstream: None,
-                                upstream_tls: None,
-                                guest_tls: None,
-                                sni: None,
-                                is_tls: backlog.is_tls,
-                                pending_guest_data: Vec::new(),
-                                pending_response: Vec::new(),
-                                response_offset: 0,
-                                upstream_rx: None,
-                                scrub_overlap: Vec::new(),
-                                max_secret_len: 0,
-                                headers_done: false,
-                                upstream_done: false,
-                                state: ConnState::WaitingForData,
-                            },
-                        );
+                        connections.insert(handle, ProxyConn::new(handle, backlog.is_tls));
                         // Replace with a fresh listener
                         backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
                     }
@@ -151,41 +144,24 @@ pub fn run(host_sock: UnixStream, ca: &mut MitmCa, secrets: &[SecretBinding], ti
                 }
             }
 
-            let mut done_handles: Vec<SocketHandle> = Vec::new();
-            for (&handle, conn) in connections.iter_mut() {
+            for conn in connections.values_mut() {
                 process_connection(&mut sockets, conn, ca, secrets);
-                if conn.state == ConnState::Done {
-                    done_handles.push(handle);
-                }
             }
-
-            for handle in done_handles {
-                connections.remove(&handle);
-                sockets.remove(handle);
-            }
+            reap_done(&mut connections, &mut sockets);
         }
 
         // Process connections that need attention regardless of socket
         // state changes: response drains need poll() to advance the TCP
         // window, and upstream waits need channel checks.
-        {
-            let mut done_handles: Vec<SocketHandle> = Vec::new();
-            for (&handle, conn) in connections.iter_mut() {
-                if conn.state == ConnState::SendingResponse
-                    || conn.state == ConnState::WaitingForUpstream
-                {
-                    process_connection(&mut sockets, conn, ca, secrets);
-                    has_pending = true;
-                }
-                if conn.state == ConnState::Done {
-                    done_handles.push(handle);
-                }
-            }
-            for handle in done_handles {
-                connections.remove(&handle);
-                sockets.remove(handle);
+        for conn in connections.values_mut() {
+            if conn.state == ConnState::SendingResponse
+                || conn.state == ConnState::WaitingForUpstream
+            {
+                process_connection(&mut sockets, conn, ca, secrets);
+                has_pending = true;
             }
         }
+        reap_done(&mut connections, &mut sockets);
 
         if has_pending {
             // Yield briefly to avoid burning CPU, but stay responsive.
@@ -271,6 +247,28 @@ struct ProxyConn {
     /// Whether the upstream relay has finished (Done received).
     upstream_done: bool,
     state: ConnState,
+}
+
+impl ProxyConn {
+    fn new(handle: SocketHandle, is_tls: bool) -> Self {
+        Self {
+            handle,
+            upstream: None,
+            upstream_tls: None,
+            guest_tls: None,
+            sni: None,
+            is_tls,
+            pending_guest_data: Vec::new(),
+            pending_response: Vec::new(),
+            response_offset: 0,
+            upstream_rx: None,
+            scrub_overlap: Vec::new(),
+            max_secret_len: 0,
+            headers_done: false,
+            upstream_done: false,
+            state: ConnState::WaitingForData,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -511,12 +509,9 @@ fn http_request_complete(data: &[u8]) -> bool {
 }
 
 fn handle_tls_data(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn, secrets: &[SecretBinding]) {
-    let guest_tls = match conn.guest_tls.as_mut() {
-        Some(t) => t,
-        None => {
-            conn.state = ConnState::Done;
-            return;
-        }
+    let Some(guest_tls) = conn.guest_tls.as_mut() else {
+        conn.state = ConnState::Done;
+        return;
     };
 
     // Read encrypted data from guest
@@ -704,16 +699,20 @@ fn handle_upstream_messages(
                     }
                 }
             }
-            Ok(tls::UpstreamMsg::Done) => {
-                // Flush remaining overlap
+            // Done (clean) or Disconnected (thread crashed) -- same
+            // cleanup. Flush overlap, mark upstream finished, start
+            // draining if we have data.
+            Ok(tls::UpstreamMsg::Done) | Err(mpsc::TryRecvError::Disconnected) => {
                 if !conn.scrub_overlap.is_empty() {
                     let overlap = std::mem::take(&mut conn.scrub_overlap);
                     conn.pending_response.extend_from_slice(&overlap);
                 }
                 conn.upstream_done = true;
                 conn.upstream_rx = None;
-                // Start draining if we have data
-                if !conn.pending_response.is_empty() {
+                if conn.pending_response.is_empty() {
+                    sock.close();
+                    conn.state = ConnState::Closing;
+                } else {
                     conn.state = ConnState::SendingResponse;
                 }
                 break;
@@ -726,22 +725,6 @@ fn handle_upstream_messages(
                 return;
             }
             Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                // Thread exited without Done (crash or panic)
-                if !conn.scrub_overlap.is_empty() {
-                    let overlap = std::mem::take(&mut conn.scrub_overlap);
-                    conn.pending_response.extend_from_slice(&overlap);
-                }
-                conn.upstream_done = true;
-                conn.upstream_rx = None;
-                if !conn.pending_response.is_empty() {
-                    conn.state = ConnState::SendingResponse;
-                } else {
-                    sock.close();
-                    conn.state = ConnState::Closing;
-                }
-                break;
-            }
         }
     }
 
@@ -766,12 +749,9 @@ fn handle_upstream_messages(
 /// iface.poll() transmits that data, advancing the TCP window for the
 /// next drain_response() call.
 fn drain_response(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
-    let guest_tls = match conn.guest_tls.as_mut() {
-        Some(t) => t,
-        None => {
-            conn.state = ConnState::Done;
-            return;
-        }
+    let Some(guest_tls) = conn.guest_tls.as_mut() else {
+        conn.state = ConnState::Done;
+        return;
     };
 
     // Write as many 16KB chunks as the TCP send buffer will accept.
