@@ -121,12 +121,6 @@ Internet
 | `vm.rs` | libkrun FFI wrappers, VM lifecycle, CA install |
 | `ffi.rs` | Hand-written libkrun bindings (krun-sys lags behind) |
 
-## Spikes
-
-Experimental code goes in `spikes/ps<N>-<name>/` as disposable Cargo projects.
-Spike findings go in `~/Projects/redan-ai-slop/docs/spikes/`.
-Once validated, spike code moves into `src/` with proper tests.
-
 ## Coding Standards
 
 - **KISS and YAGNI.** Security dies with unnecessary complexity.

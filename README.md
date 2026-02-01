@@ -191,7 +191,7 @@ accidental exposure; it's not a hard security boundary.
 
 ## Status
 
-**Pre-alpha.** The full chain works end-to-end. 84 tests (unit,
+**Alpha.** The full chain works end-to-end. 95 tests (unit,
 integration, adversarial). Not yet packaged for binary distribution.
 
 ## Acknowledgments
