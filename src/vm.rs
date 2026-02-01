@@ -27,6 +27,7 @@ macro_rules! krun_check {
 }
 
 /// Configuration for a VM instance.
+#[derive(Debug)]
 pub struct VmConfig {
     /// Path to the guest root filesystem.
     pub rootfs: String,

@@ -232,32 +232,7 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
     }
 
     let allowed_hosts: Vec<String> = hosts.split(',').map(|h| h.trim().to_string()).collect();
-
-    // Placeholder suffix: not cryptographic, but doesn't need to be.
-    // The guest receives the placeholder via env var, so it already
-    // knows the value. The suffix just needs to be unique per session
-    // to avoid collisions between secrets.
-    let random_suffix: u64 = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use std::time::SystemTime;
-        let mut h = DefaultHasher::new();
-        env_name.hash(&mut h);
-        SystemTime::now().hash(&mut h);
-        std::process::id().hash(&mut h);
-        h.finish()
-    };
-    let placeholder = format!(
-        "redan_ph_{}_{:016x}",
-        env_name.to_lowercase(),
-        random_suffix
-    );
-
-    let binding = SecretBinding {
-        placeholder: placeholder.clone(),
-        real_value: zeroize::Zeroizing::new(real_value.to_string()),
-        allowed_hosts,
-    };
+    let binding = SecretBinding::new(env_name, real_value, allowed_hosts);
 
     Ok((env_name.to_string(), binding))
 }

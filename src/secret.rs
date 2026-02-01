@@ -43,6 +43,31 @@ pub struct SecretBinding {
     pub allowed_hosts: Vec<String>,
 }
 
+impl SecretBinding {
+    /// Create a binding with an auto-generated placeholder.
+    ///
+    /// The placeholder embeds the env name (lowercased) and a hash suffix
+    /// for uniqueness. Not cryptographic -- the guest sees the placeholder
+    /// via env var, so it's not secret.
+    pub fn new(env_name: &str, real_value: String, allowed_hosts: Vec<String>) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::time::SystemTime;
+
+        let mut h = DefaultHasher::new();
+        env_name.hash(&mut h);
+        SystemTime::now().hash(&mut h);
+        std::process::id().hash(&mut h);
+        let suffix = h.finish();
+
+        Self {
+            placeholder: format!("redan_ph_{}_{:016x}", env_name.to_lowercase(), suffix),
+            real_value: Zeroizing::new(real_value),
+            allowed_hosts,
+        }
+    }
+}
+
 impl std::fmt::Debug for SecretBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretBinding")

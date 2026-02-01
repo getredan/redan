@@ -237,8 +237,6 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     // sentinel file written as the last build step.
     let sentinel = dest.join("tmp/.redan-build-ok");
     if !sentinel.exists() {
-        // Clean up the broken image
-        let _ = fs::remove_dir_all(dest);
         return Err(io::Error::other(
             "image build failed: setup commands did not complete successfully",
         ));

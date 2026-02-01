@@ -252,11 +252,11 @@ fn header_end_offset(data: &[u8]) -> Option<usize> {
 }
 
 /// Check if a buffer contains a complete HTTP response.
-/// Currently only used by tests; streaming relay uses peer_has_closed.
-#[cfg(test)]
+/// Only used by tests; streaming relay uses peer_has_closed.
 ///
 /// Supports Content-Length and chunked Transfer-Encoding. For chunked
 /// responses, looks for the terminal chunk marker `0\r\n\r\n`.
+#[cfg(test)]
 fn response_complete(data: &[u8]) -> bool {
     let text = String::from_utf8_lossy(data);
     let Some(header_end) = text.find("\r\n\r\n") else {
