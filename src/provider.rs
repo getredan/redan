@@ -77,6 +77,7 @@ impl Vault {
     }
 
     /// Create with explicit address and token (for testing).
+    #[must_use]
     pub fn new(addr: &str, token: &str) -> Self {
         Self {
             addr: addr.to_string(),

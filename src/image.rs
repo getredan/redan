@@ -63,7 +63,7 @@ pub fn list() -> Vec<String> {
         return vec![];
     };
     let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.path().join("bin").is_dir()) // must have bin/ to be a rootfs
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();

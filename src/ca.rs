@@ -23,6 +23,7 @@ pub struct MitmCa {
 }
 
 impl MitmCa {
+    #[must_use]
     pub fn generate() -> Self {
         let mut params = CertificateParams::default();
         params
@@ -55,6 +56,7 @@ impl MitmCa {
     }
 
     /// PEM-encoded CA certificate (for installing in guest trust store).
+    #[must_use]
     pub fn ca_cert_pem(&self) -> &str {
         &self.ca_cert_pem
     }

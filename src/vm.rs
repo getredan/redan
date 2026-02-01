@@ -62,6 +62,7 @@ impl Vm {
     ///
     /// Returns immediately with a `Vm` handle. The VM runs in a background thread.
     /// Use `net_sock` to communicate via smoltcp.
+    #[must_use]
     pub fn boot(config: VmConfig) -> Self {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();

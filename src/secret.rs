@@ -49,6 +49,7 @@ impl SecretBinding {
     /// The placeholder embeds the env name (lowercased) and a hash suffix
     /// for uniqueness. Not cryptographic -- the guest sees the placeholder
     /// via env var, so it's not secret.
+    #[must_use]
     pub fn new(env_name: &str, real_value: String, allowed_hosts: Vec<String>) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -93,6 +94,7 @@ impl Drop for SecretBinding {
 /// end up in server logs, CDN caches, or Referer headers.
 ///
 /// Returns the (possibly modified) request data and the number of injections.
+#[must_use]
 pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     let header_end = find_header_end(data).unwrap_or(data.len());
     // Find end of request line (first \r\n)

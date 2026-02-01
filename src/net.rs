@@ -19,6 +19,7 @@ pub struct VirtioNetDevice {
 }
 
 impl VirtioNetDevice {
+    #[must_use]
     pub fn new(sock: UnixStream) -> Self {
         sock.set_nonblocking(true).unwrap();
         Self {

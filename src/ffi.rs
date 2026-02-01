@@ -30,5 +30,4 @@ unsafe extern "C" {
         flags: u32,
     ) -> i32;
     pub fn krun_add_virtiofs(ctx_id: u32, c_tag: *const c_char, c_path: *const c_char) -> i32;
-    pub fn krun_set_console_output(ctx_id: u32, filepath: *const c_char) -> i32;
 }
