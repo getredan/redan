@@ -215,6 +215,8 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
         return Err("empty env name, value, or hosts".into());
     }
 
+    // Cap env name length to prevent oversized placeholders that
+    // would slow down inject/scrub scanning.
     if env_name.len() > 256 {
         return Err("env name too long (max 256 bytes)".into());
     }

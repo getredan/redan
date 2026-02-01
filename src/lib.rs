@@ -1,5 +1,6 @@
 pub mod ca;
 pub mod dns;
+pub mod error;
 pub mod ffi;
 pub mod image;
 pub mod net;

@@ -195,8 +195,10 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         setup_parts.push(cmd.clone());
     }
 
-    // Signal completion
-    setup_parts.push("echo REDAN_BUILD_DONE".into());
+    // Write sentinel file as last step. If any prior command fails
+    // (the chain uses &&), this file won't be created and we detect
+    // the failure after the VM exits.
+    setup_parts.push("touch /tmp/.redan-build-ok".into());
 
     let full_command = setup_parts.join(" && ");
 
@@ -230,6 +232,19 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         &[],                      // no secrets during build
         Duration::from_secs(600), // 10 min timeout for builds
     );
+
+    // Verify the build completed successfully by checking for the
+    // sentinel file written as the last build step.
+    let sentinel = dest.join("tmp/.redan-build-ok");
+    if !sentinel.exists() {
+        // Clean up the broken image
+        let _ = fs::remove_dir_all(dest);
+        return Err(io::Error::other(
+            "image build failed: setup commands did not complete successfully",
+        ));
+    }
+    // Remove sentinel -- it served its purpose
+    let _ = fs::remove_file(sentinel);
 
     Ok(())
 }

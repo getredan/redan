@@ -95,18 +95,23 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
 pub fn connect_upstream(
     hostname: &str,
     port: u16,
-) -> Result<(TcpStream, rustls::ClientConnection), Box<dyn std::error::Error>> {
+) -> Result<(TcpStream, rustls::ClientConnection), crate::error::Error> {
     use std::net::ToSocketAddrs;
 
     let addr = format!("{hostname}:{port}")
         .to_socket_addrs()?
         .find(|a| a.is_ipv4())
-        .ok_or("DNS resolution failed")?;
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution failed")
+        })?;
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
     stream.set_nonblocking(false)?;
 
-    let server_name = hostname.to_owned().try_into()?;
+    let server_name = hostname
+        .to_owned()
+        .try_into()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let tls_conn = rustls::ClientConnection::new(Arc::clone(&UPSTREAM_TLS_CONFIG), server_name)?;
 
     Ok((stream, tls_conn))
@@ -138,7 +143,7 @@ pub fn relay_upstream_streaming(
     tls: &mut rustls::ClientConnection,
     request: &[u8],
     tx: &std::sync::mpsc::Sender<UpstreamMsg>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::error::Error> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(120)))?;
 
