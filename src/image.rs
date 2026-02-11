@@ -208,7 +208,8 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     vm::install_ca_cert(dest, ca.ca_cert_pem())?;
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
-    let vm_command = format!("{net_setup}; {full_command}");
+    let ca_update = vm::ca_update_commands();
+    let vm_command = format!("{net_setup}; {ca_update}; {full_command}");
 
     let config = vm::VmConfig {
         rootfs: dest.to_string_lossy().into_owned(),

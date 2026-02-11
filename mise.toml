@@ -30,6 +30,10 @@ run = "cargo build --release"
 description = "Boot-to-proxy benchmark (requires KVM + image)"
 run = "./tests/bench_boot.sh"
 
+[tasks.test-distro]
+description = "Distro compatibility tests (requires KVM + docker)"
+run = "./tests/distro_compat.sh"
+
 [tasks.clean]
 description = "Remove build artifacts"
 run = "cargo clean"

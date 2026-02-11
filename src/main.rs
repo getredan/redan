@@ -85,6 +85,12 @@ enum ImageAction {
 }
 
 fn main() {
+    // rustls needs an explicit crypto provider when both ring and
+    // aws-lc-rs are in the dependency tree (via rcgen and ureq).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     env_logger::init();
     let cli = Cli::parse();
 
@@ -389,13 +395,14 @@ fn exec(
         mount_commands.push(format!("mount -t virtiofs {tag} {guest_path}"));
     }
 
-    // Build guest command: network setup + mounts + user command
+    // Build guest command: network setup + CA trust + mounts + user command
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
+    let ca_update = vm::ca_update_commands();
     let mount_setup = mount_commands.join("; ");
     let full_command = if mount_setup.is_empty() {
-        format!("{net_setup}; {command}")
+        format!("{net_setup}; {ca_update}; {command}")
     } else {
-        format!("{net_setup}; {mount_setup}; {command}")
+        format!("{net_setup}; {ca_update}; {mount_setup}; {command}")
     };
 
     let mut env: Vec<String> = vec![

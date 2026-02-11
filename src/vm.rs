@@ -143,16 +143,12 @@ impl Vm {
 
         // exec: /bin/sh -c "<command>"
         // /bin/sh exists on every distro (ash on Alpine, bash/dash elsewhere).
+        // libkrun's init uses exec_path as argv[0] (via KRUN_INIT), so
+        // argv here contains only the arguments after argv[0].
         let exec_path = CString::new("/bin/sh").unwrap();
-        let arg0 = CString::new("sh").unwrap();
         let arg1 = CString::new("-c").unwrap();
         let arg2 = CString::new(config.command).unwrap();
-        let argv: Vec<*const i8> = vec![
-            arg0.as_ptr(),
-            arg1.as_ptr(),
-            arg2.as_ptr(),
-            std::ptr::null(),
-        ];
+        let argv: Vec<*const i8> = vec![arg1.as_ptr(), arg2.as_ptr(), std::ptr::null()];
 
         let env_cstrings: Vec<CString> = config
             .env
@@ -187,37 +183,48 @@ pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
 
 /// Install a CA certificate PEM into a guest rootfs.
 ///
-/// Writes the PEM to `<rootfs>/etc/ssl/certs/redan-ca.pem` and appends
-/// it to all CA bundles found. Handles distro differences:
-/// - Alpine/Debian/Ubuntu: `/etc/ssl/certs/ca-certificates.crt`
-/// - Fedora/RHEL/Arch: `/etc/pki/tls/certs/ca-bundle.crt`
-/// - openSUSE: `/etc/ssl/ca-bundle.pem`
+/// Drops the PEM into each distro's CA source directory (the place
+/// where you're *supposed* to put custom CAs). The actual trust store
+/// update (`update-ca-trust`, `update-ca-certificates`) runs inside
+/// the VM via `ca_update_commands()`.
 ///
-/// Safe to call multiple times (replaces previous cert). Modifies the
-/// rootfs on disk -- the CA is ephemeral (regenerated per run), so
-/// stale certs are harmless.
+/// Also writes a standalone copy at `/etc/ssl/certs/redan-ca.pem`
+/// for tools that use `SSL_CERT_FILE`.
+///
+/// Safe to call multiple times (replaces previous cert).
 pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
-    // Write standalone PEM (SSL_CERT_FILE points here)
+    // Standalone PEM for SSL_CERT_FILE.
+    // Fedora has /etc/ssl/certs as a broken symlink; replace it.
     let ssl_dir = rootfs.join("etc/ssl/certs");
+    if ssl_dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+        std::fs::remove_file(&ssl_dir)?;
+    }
     std::fs::create_dir_all(&ssl_dir)?;
     std::fs::write(ssl_dir.join("redan-ca.pem"), pem)?;
 
-    // Append to every CA bundle that exists in the rootfs.
-    let bundles = [
-        "etc/ssl/certs/ca-certificates.crt", // Alpine, Debian, Ubuntu
-        "etc/pki/tls/certs/ca-bundle.crt",   // Fedora, RHEL, Arch
-        "etc/ssl/ca-bundle.pem",             // openSUSE
+    // Drop into each distro's CA source directory.
+    // The distro's update tool reads from these and regenerates the
+    // trust store (bundle files, hash dirs, etc).
+    let source_dirs = [
+        "usr/local/share/ca-certificates", // Debian, Ubuntu, Alpine
+        "etc/pki/ca-trust/source/anchors", // Fedora, RHEL, CentOS
+        "usr/share/pki/trust/anchors",     // openSUSE
+        "etc/ca-certificates/trust-source/anchors", // Arch
     ];
 
-    for rel in bundles {
-        let bundle_path = rootfs.join(rel);
-        if bundle_path.exists() {
-            let bundle = std::fs::read_to_string(&bundle_path).unwrap_or_default();
-            let base = bundle.split("# Redan MITM CA").next().unwrap_or(&bundle);
-            let new_bundle = format!("{base}# Redan MITM CA\n{pem}\n");
-            std::fs::write(&bundle_path, new_bundle)?;
+    for rel in source_dirs {
+        let dir = rootfs.join(rel);
+        if dir.is_dir() {
+            std::fs::write(dir.join("redan-ca.crt"), pem)?;
         }
     }
 
     Ok(())
+}
+
+/// Shell commands to update the CA trust store inside the guest.
+/// Tries both Debian-style and Fedora-style; each is a no-op if
+/// the tool doesn't exist.
+pub fn ca_update_commands() -> &'static str {
+    "update-ca-certificates 2>/dev/null; update-ca-trust 2>/dev/null; true"
 }
