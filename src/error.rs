@@ -1,7 +1,7 @@
 use std::fmt;
 use std::io;
 
-/// Unified error type for redan operations.
+/// Error type for redan operations.
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),

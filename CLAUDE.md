@@ -6,126 +6,99 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 | Repo | License | Purpose |
 |------|---------|---------|
-| **getredan/redan** (this) | BSD-3-Clause | Open core: CLI, VM, proxy, secret backends, audit |
-| getredan/redan-enterprise | FSL-1.1-MIT | Enterprise: policy server, remote audit, compliance |
-| getredan/redan-ai-slop | Private | AI planning docs, oracle reviews, research |
+| **getredan/redan** (this) | BSD-3-Clause | Open core: CLI, VM, proxy, secret providers |
+| getredan/redan-enterprise | FSL-1.1-MIT | Enterprise: policy, audit, compliance |
 
 ## Dev Setup
 
 Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), mise.
 
 ```bash
-mise trust                      # Trust mise.toml on first clone
-mise run check                  # Format + lint + unit tests
-mise run test-integration       # VM tests (needs KVM + /tmp/redan-rootfs)
+mise trust
+mise run check          # format + lint + unit tests
+mise run test-integration  # needs KVM + /tmp/redan-rootfs
 ```
 
-## mise Tasks
+## Tasks
 
-| Task | What it does |
-|------|-------------|
-| `mise run check` | Full local gate: format, lint, test |
+| Task | What |
+|------|------|
+| `mise run check` | Full gate: format, lint, test |
 | `mise run format` | `cargo fmt` |
-| `mise run format-check` | Verify formatting (CI) |
+| `mise run format-check` | CI formatting check |
 | `mise run lint` | `cargo clippy -- -D warnings` |
-| `mise run test` | Unit tests only (`cargo test --lib`) |
-| `mise run test-integration` | VM integration tests (`--ignored`, needs KVM) |
+| `mise run test` | Unit tests (`cargo test --lib`) |
+| `mise run test-integration` | VM tests (`--ignored`, needs KVM) |
 | `mise run build` | Release build |
-| `mise run clean` | `cargo clean` |
-
-**Always run `mise run check` before committing.** Tests must pass, clippy must be clean, formatting must be applied.
 
 ## Commits
 
-Use conventional commits. `git -c commit.gpgsign=false commit` (GPG signing unavailable on this machine).
+Conventional commits. Sign with GPG when available.
 
 ```
 feat(proxy): Add secret injection to HTTPS requests
 fix(dns): Handle AAAA queries without panic
-test(secret): Add scrubbing tests for binary response bodies
-refactor(vm): Extract net setup into helper function
-chore: Update dependencies
-docs: Document mise tasks in CLAUDE.md
+test(secret): Scrubbing tests for binary response bodies
 ```
 
 ## VM Safety
 
-**NEVER run the VM binary directly.** `krun_start_enter` blocks forever and can't be Ctrl-C'd. Always use tmux:
+`krun_start_enter` blocks and ignores Ctrl-C. Always run via tmux:
 
 ```bash
 SOCKET="/tmp/claude-tmux-sockets/claude.sock"
-tmux -S "$SOCKET" send-keys -t ps1:0.0 "cargo run -- exec ..." Enter
-tmux -S "$SOCKET" capture-pane -p -J -t ps1:0.0 -S -40
+tmux -S "$SOCKET" send-keys -t session:0.0 "cargo run -- exec ..." Enter
 pkill -9 redan  # to stop
 ```
 
-## Testing Philosophy
+## Testing
 
-This is a security-critical project. Tests are load-bearing, not decorative.
+Security-critical project. Tests are load-bearing.
 
-- **Unit tests** for all pure logic: DNS parsing, SNI extraction, secret injection/scrubbing, cert generation. These run fast, no VM needed.
-- **Integration tests** boot real VMs and validate the full chain. Marked `#[ignore]` (need KVM). Run via `mise run test-integration`.
-- **Test names describe scenarios**: `inject_skips_disallowed_host`, not `test_inject_2`.
-- Tests must be **deterministic**. No sleep-based timing, no network assumptions in unit tests.
-- **Never mock security boundaries.** If a test needs TLS, use real TLS. If it needs a VM, boot a real VM.
-- **Capture and validate errors.** If a test intentionally triggers an error, assert on the error, don't ignore it.
-- Pristine test output: no warnings, no unexpected stderr.
-
-## Code Reviews
-
-For tests and security-sensitive code, get second opinions from oracle models.
-
-### Oracles
-
-| Oracle | Model | Use for | Invocation |
-|--------|-------|---------|------------|
-| **claude** | Claude Opus/Sonnet | Security review, architecture | `claude -p '...' < file` via tmux |
-| **kimi** | Kimi | Security review, second opinion | `kimi -p '...' < file` via tmux |
-| **mistral** | Mistral Large | Security review, pair review | `pi` with Mistral Large model via tmux |
-
-Use at least two independent reviewers for: proxy logic, secret handling, VM isolation, TLS implementation.
-
-```bash
-SOCKET="/tmp/claude-tmux-sockets/claude.sock"
-tmux -S "$SOCKET" send-keys -t review:0.0 "claude -p 'Review this for security issues: ...' < src/proxy.rs" Enter
-tmux -S "$SOCKET" send-keys -t review:0.1 "kimi -p 'Review for security issues' < src/proxy.rs" Enter
-```
+- Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs.
+- Integration tests boot real VMs. Marked `#[ignore]`, need KVM.
+- Test names describe scenarios: `inject_skips_disallowed_host`.
+- Deterministic. No sleeps, no network in unit tests.
+- Never mock security boundaries.
+- Capture and assert on expected errors.
 
 ## Architecture
 
 ```
 libkrun VM (guest)
-  |  virtio-net (unix socket, BE length-prefixed Ethernet frames)
+  |  virtio-net (unix socket, length-prefixed Ethernet frames)
   v
 smoltcp (userspace TCP/IP)
   |  UDP :53 -> synthetic DNS (all names -> gateway)
-  |  TCP :80 -> HTTP interception
-  |  TCP :443 -> TLS MITM (SNI routing, ephemeral certs)
+  |  TCP :80 -> rejected (HTTPS only)
+  |  TCP :443 -> TLS MITM (SNI, ephemeral certs)
   v
-redan proxy (secret injection, response scrubbing)
-  |  rustls ClientConnection (real upstream TLS)
+proxy (injection, scrubbing)
+  |  rustls (upstream TLS)
   v
-Internet
+internet
 ```
 
-## Module Map
+## Modules
 
-| Module | Purpose |
-|--------|---------|
-| `ca.rs` | Ephemeral MITM CA + per-hostname leaf certs (rcgen) |
-| `dns.rs` | Synthetic DNS resolver (all A queries -> gateway IP) |
-| `net.rs` | smoltcp Device impl for libkrun virtio-net socket |
-| `tls.rs` | SNI extraction, upstream TLS, request relay |
-| `secret.rs` | Placeholder injection + response scrubbing |
+| Module | What |
+|--------|------|
+| `ca.rs` | Ephemeral MITM CA, per-hostname leaf certs |
+| `dns.rs` | Synthetic DNS (A queries -> gateway IP) |
+| `error.rs` | Error types |
+| `ffi.rs` | libkrun FFI bindings |
+| `image.rs` | Alpine rootfs image management |
+| `net.rs` | smoltcp Device for virtio-net socket |
+| `provider.rs` | Secret providers (literal, Vault KV v2) |
 | `proxy.rs` | smoltcp event loop, connection state machine |
-| `vm.rs` | libkrun FFI wrappers, VM lifecycle, CA install |
-| `ffi.rs` | Hand-written libkrun bindings (krun-sys lags behind) |
+| `secret.rs` | Injection and scrubbing |
+| `tls.rs` | SNI extraction, upstream relay |
+| `vm.rs` | VM lifecycle |
 
-## Coding Standards
+## Style
 
-- **KISS and YAGNI.** Security dies with unnecessary complexity.
-- **Strong typing.** No shortcuts on types.
-- **Guard clauses.** Return early, avoid nesting.
-- **No mocks for security boundaries.** Test real TLS, real VMs, real DNS.
-- **Workarounds marked clearly**: `// WORKAROUND: <description>. See <link>`
-- **Match surrounding style.** Consistency within a file trumps external standards.
+- KISS. YAGNI.
+- Guard clauses. Return early.
+- Strong typing.
+- Workarounds marked: `// WORKAROUND: <description>. See <link>`
+- Match surrounding style.

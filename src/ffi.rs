@@ -1,7 +1,7 @@
-/// Minimal libkrun FFI bindings.
+/// libkrun FFI bindings.
 ///
-/// Hand-written because krun-sys crate (1.10.1) lags behind the installed
-/// libkrun (1.17.1). Only binds the functions redan uses.
+/// Hand-written; krun-sys (1.10.1) lags behind libkrun (1.17.1).
+/// Only the functions redan uses.
 use std::os::raw::{c_char, c_int};
 
 pub const KRUN_LOG_LEVEL_OFF: u32 = 0;

@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn serde_handles_json_escapes_in_values() {
-        // The hand-rolled parser failed on escaped quotes. serde handles them.
+        // Escaped quotes in JSON values must round-trip correctly.
         let json = r#"{"data":{"data":{"token":"value\"with\\escapes"}}}"#;
         let envelope: VaultKv2Response = serde_json::from_str(json).unwrap();
         assert_eq!(

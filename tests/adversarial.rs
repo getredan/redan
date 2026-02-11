@@ -235,8 +235,8 @@ fn a05_same_placeholder_in_header_and_body_only_header_replaced() {
 }
 
 /// Binary request body must not be corrupted by injection.
-/// Previous implementation used String::from_utf8_lossy which replaced
-/// invalid UTF-8 with U+FFFD (3 bytes), silently corrupting data.
+/// String-based replacement would replace invalid UTF-8 with U+FFFD
+/// (3 bytes), silently corrupting data. Injection operates on raw bytes.
 ///
 /// CWE-838: Inappropriate Encoding for Output.
 #[test]
@@ -895,7 +895,7 @@ fn h03_upstream_tls_forces_http11() {
     // For now, this is a documentation test. The real verification is
     // in tls.rs: `config.alpn_protocols = vec![b"http/1.1".to_vec()]`
     //
-    // A proper test would need a TLS server. Covered by code review.
+    // A proper test would need a TLS server.
 }
 
 /// Case-insensitive localhost DNS resolution. RFC 4343.
