@@ -829,7 +829,7 @@ fn e04_websocket_upgrade_detected() {
 }
 
 // ============================================================================
-// H: Oracle review findings (2026-02-09)
+// H: Oracle review findings
 //
 // Tests added from 4-model security review (Sonnet, Opus, Mistral, Red-team).
 // ============================================================================
