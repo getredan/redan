@@ -12,6 +12,9 @@ use redan::vm;
 #[derive(Parser)]
 #[command(name = "redan", about = "Secure execution environment for AI agents")]
 enum Cli {
+    /// Check system prerequisites (KVM, libkrun, images)
+    Doctor,
+
     /// Execute a command inside a microVM
     Exec {
         /// Named image to use (from `redan image create`).
@@ -86,6 +89,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli {
+        Cli::Doctor => doctor(),
         Cli::Exec {
             image: image_name,
             rootfs,
@@ -167,6 +171,90 @@ fn main() {
                 }
             },
         },
+    }
+}
+
+fn doctor() {
+    let mut ok = true;
+
+    // KVM
+    let kvm_path = Path::new("/dev/kvm");
+    if kvm_path.exists() {
+        // Check we can open it, not just that the node exists
+        match std::fs::File::open(kvm_path) {
+            Ok(_) => println!("[ok] /dev/kvm: accessible"),
+            Err(e) => {
+                println!("[err] /dev/kvm: exists but not accessible: {e}");
+                println!("      add your user to the kvm group: sudo usermod -aG kvm $USER");
+                ok = false;
+            }
+        }
+    } else {
+        println!("[err] /dev/kvm: not found");
+        println!("      enable KVM in your kernel or BIOS settings");
+        ok = false;
+    }
+
+    // libkrun.so
+    let libkrun_found = [
+        "/usr/lib/libkrun.so",
+        "/usr/lib64/libkrun.so",
+        "/usr/local/lib/libkrun.so",
+        "/usr/lib/x86_64-linux-gnu/libkrun.so",
+        "/usr/lib/aarch64-linux-gnu/libkrun.so",
+    ]
+    .iter()
+    .find(|p| Path::new(p).exists());
+
+    match libkrun_found {
+        Some(path) => println!("[ok] libkrun: {path}"),
+        None => {
+            println!("[err] libkrun: not found in standard paths");
+            println!("      install libkrun from your distro packages");
+            ok = false;
+        }
+    }
+
+    // libkrunfw.so
+    let libkrunfw_found = [
+        "/usr/lib/libkrunfw.so",
+        "/usr/lib64/libkrunfw.so",
+        "/usr/local/lib/libkrunfw.so",
+        "/usr/lib/x86_64-linux-gnu/libkrunfw.so",
+        "/usr/lib/aarch64-linux-gnu/libkrunfw.so",
+    ]
+    .iter()
+    .find(|p| Path::new(p).exists());
+
+    match libkrunfw_found {
+        Some(path) => println!("[ok] libkrunfw: {path}"),
+        None => {
+            println!("[err] libkrunfw: not found in standard paths");
+            println!("      install libkrunfw from your distro packages");
+            ok = false;
+        }
+    }
+
+    // Images
+    let images = image::list();
+    if images.is_empty() {
+        println!("[warn] no images found");
+        println!(
+            "       create one with: redan image create dev --packages 'curl ca-certificates'"
+        );
+    } else {
+        println!("[ok] images: {}", images.join(", "));
+    }
+
+    // Image storage path
+    let img_dir = image::image_dir();
+    println!("[info] image dir: {}", img_dir.display());
+
+    if ok {
+        println!("\nready to go");
+    } else {
+        println!("\nsome checks failed");
+        std::process::exit(1);
     }
 }
 

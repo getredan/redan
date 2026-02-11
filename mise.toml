@@ -26,6 +26,10 @@ run = "cargo test --test integration -- --ignored"
 description = "Build release binary"
 run = "cargo build --release"
 
+[tasks.bench]
+description = "Boot-to-proxy benchmark (requires KVM + image)"
+run = "./tests/bench_boot.sh"
+
 [tasks.clean]
 description = "Remove build artifacts"
 run = "cargo clean"

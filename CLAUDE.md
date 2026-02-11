@@ -29,6 +29,7 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 | `mise run lint` | `cargo clippy -- -D warnings` |
 | `mise run test` | Unit tests (`cargo test --lib`) |
 | `mise run test-integration` | VM tests (`--ignored`, needs KVM) |
+| `mise run bench` | Boot-to-proxy benchmark (needs KVM + image) |
 | `mise run build` | Release build |
 
 ## Commits

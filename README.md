@@ -65,6 +65,14 @@ redan exec --image claude-code -i \
 Drops you into a shell inside the VM. Same secret injection, same
 network isolation.
 
+### 4. Check prerequisites
+
+```bash
+redan doctor
+```
+
+Checks for /dev/kvm, libkrun, libkrunfw, and lists available images.
+
 ## How it works
 
 ```
