@@ -188,7 +188,7 @@ mod tests {
             "ghp_test123"
         );
         assert_eq!(envelope.data.data.get("npm_token").unwrap(), "npm_test456");
-        assert!(envelope.data.data.get("nonexistent").is_none());
+        assert!(!envelope.data.data.contains_key("nonexistent"));
     }
 
     #[test]
