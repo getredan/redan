@@ -141,9 +141,10 @@ impl Vm {
         // Interactive mode adds raw terminal on the host (caller handles).
         // Non-interactive: console output goes to host stdout as-is.
 
-        // exec: ash -c "<command>"
-        let exec_path = CString::new("/bin/busybox").unwrap();
-        let arg0 = CString::new("ash").unwrap();
+        // exec: /bin/sh -c "<command>"
+        // /bin/sh exists on every distro (ash on Alpine, bash/dash elsewhere).
+        let exec_path = CString::new("/bin/sh").unwrap();
+        let arg0 = CString::new("sh").unwrap();
         let arg1 = CString::new("-c").unwrap();
         let arg2 = CString::new(config.command).unwrap();
         let argv: Vec<*const i8> = vec![
@@ -186,23 +187,37 @@ pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
 
 /// Install a CA certificate PEM into a guest rootfs.
 ///
-/// Writes the PEM to `<rootfs>/etc/ssl/certs/redan-ca.pem` and appends it
-/// to the CA bundle. Safe to call multiple times (replaces previous cert).
+/// Writes the PEM to `<rootfs>/etc/ssl/certs/redan-ca.pem` and appends
+/// it to all CA bundles found. Handles distro differences:
+/// - Alpine/Debian/Ubuntu: `/etc/ssl/certs/ca-certificates.crt`
+/// - Fedora/RHEL/Arch: `/etc/pki/tls/certs/ca-bundle.crt`
+/// - openSUSE: `/etc/ssl/ca-bundle.pem`
 ///
-/// Note: this modifies the rootfs/image on disk. For `--image` mode, the
-/// image is modified on every `exec`. The CA is ephemeral (regenerated
-/// per run), so the old cert is harmless. A tmpdir overlay would avoid
-/// this but adds complexity for no security benefit.
+/// Safe to call multiple times (replaces previous cert). Modifies the
+/// rootfs on disk -- the CA is ephemeral (regenerated per run), so
+/// stale certs are harmless.
 pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
+    // Write standalone PEM (SSL_CERT_FILE points here)
     let ssl_dir = rootfs.join("etc/ssl/certs");
     std::fs::create_dir_all(&ssl_dir)?;
-
     std::fs::write(ssl_dir.join("redan-ca.pem"), pem)?;
 
-    let bundle_path = ssl_dir.join("ca-certificates.crt");
-    let bundle = std::fs::read_to_string(&bundle_path).unwrap_or_default();
-    let base = bundle.split("# Redan MITM CA").next().unwrap_or(&bundle);
-    let new_bundle = format!("{base}# Redan MITM CA\n{pem}\n");
-    std::fs::write(bundle_path, new_bundle)?;
+    // Append to every CA bundle that exists in the rootfs.
+    let bundles = [
+        "etc/ssl/certs/ca-certificates.crt", // Alpine, Debian, Ubuntu
+        "etc/pki/tls/certs/ca-bundle.crt",   // Fedora, RHEL, Arch
+        "etc/ssl/ca-bundle.pem",             // openSUSE
+    ];
+
+    for rel in bundles {
+        let bundle_path = rootfs.join(rel);
+        if bundle_path.exists() {
+            let bundle = std::fs::read_to_string(&bundle_path).unwrap_or_default();
+            let base = bundle.split("# Redan MITM CA").next().unwrap_or(&bundle);
+            let new_bundle = format!("{base}# Redan MITM CA\n{pem}\n");
+            std::fs::write(&bundle_path, new_bundle)?;
+        }
+    }
+
     Ok(())
 }
