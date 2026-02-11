@@ -128,6 +128,34 @@ redan_exec_with_secret() {
         --timeout "$timeout" 2>&1
 }
 
+redan_exec_with_mount() {
+    local rootfs="$1"
+    local cmd="$2"
+    local mount="$3"
+    local timeout="${4:-15}"
+
+    $REDAN exec \
+        --rootfs "$rootfs" \
+        --command "$cmd" \
+        --mount "$mount" \
+        --timeout "$timeout" 2>&1
+}
+
+redan_exec_full() {
+    local rootfs="$1"
+    local cmd="$2"
+    local secret="$3"
+    local mount="$4"
+    local timeout="${5:-30}"
+
+    $REDAN exec \
+        --rootfs "$rootfs" \
+        --command "$cmd" \
+        --secret "$secret" \
+        --mount "$mount" \
+        --timeout "$timeout" 2>&1
+}
+
 # ---- per-distro tests ----
 
 test_boot_and_echo() {
@@ -209,6 +237,181 @@ test_ca_cert_installed() {
     [[ "$output" == *"BEGIN CERTIFICATE"* ]]
 }
 
+# ---- virtio-fs mount tests ----
+
+test_mount_read() {
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    echo "redan-mount-test-content" > "$tmpdir/testfile.txt"
+
+    local output
+    output=$(redan_exec_with_mount "$rootfs" "cat /workspace/testfile.txt" "$tmpdir")
+    rm -rf "$tmpdir"
+    [[ "$output" == *"redan-mount-test-content"* ]]
+}
+
+test_mount_write() {
+    # Guest writes a file, host can read it back. Proves virtio-fs
+    # bidirectional I/O works -- this is how agent code changes
+    # reach the host project directory.
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    redan_exec_with_mount "$rootfs" \
+        "echo guest-wrote-this > /workspace/output.txt" "$tmpdir" >/dev/null
+
+    local content
+    content=$(cat "$tmpdir/output.txt" 2>/dev/null)
+    rm -rf "$tmpdir"
+    [[ "$content" == *"guest-wrote-this"* ]]
+}
+
+test_mount_preserves_permissions() {
+    # Files created by the guest should have reasonable permissions
+    # on the host side. Broken permission mapping would make agent
+    # output unusable (e.g. root-owned files on the host).
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    redan_exec_with_mount "$rootfs" \
+        "echo test > /workspace/permtest.txt" "$tmpdir" >/dev/null
+
+    # File should exist and be readable by the current user
+    local ok=false
+    [[ -f "$tmpdir/permtest.txt" ]] && [[ -r "$tmpdir/permtest.txt" ]] && ok=true
+    rm -rf "$tmpdir"
+    [[ "$ok" == "true" ]]
+}
+
+# ---- concurrent connections ----
+
+test_concurrent_https() {
+    # npm install opens 30+ parallel HTTPS connections. This test
+    # verifies the proxy handles concurrent TLS sessions without
+    # dropping connections or deadlocking.
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+
+    # Write a script that fires 10 parallel wget requests.
+    # Each hits a different httpbin endpoint to avoid caching.
+    cat > "$rootfs/tmp/concurrent_test.sh" << 'SCRIPT'
+#!/bin/sh
+PIDS=""
+FAIL=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    wget -q -O /dev/null "https://httpbin.org/get?n=$i" &
+    PIDS="$PIDS $!"
+done
+for pid in $PIDS; do
+    wait $pid || FAIL=$((FAIL + 1))
+done
+echo "concurrent_done failures=$FAIL"
+SCRIPT
+    chmod +x "$rootfs/tmp/concurrent_test.sh"
+
+    local output
+    output=$(redan_exec_with_secret \
+        "$rootfs" \
+        '/tmp/concurrent_test.sh 2>&1' \
+        "TEST_TOKEN=dummy:httpbin.org" \
+        60)
+    # All 10 should complete. Allow up to 2 failures for flaky
+    # network conditions, but not more.
+    [[ "$output" == *"concurrent_done"* ]] && \
+        [[ "$output" == *"failures=0"* || "$output" == *"failures=1"* || "$output" == *"failures=2"* ]]
+}
+
+# ---- large response ----
+
+test_large_download() {
+    # Download a 100KB response through the proxy. Tests streaming,
+    # response buffering, and that the proxy doesn't choke on
+    # responses larger than a single TCP window.
+    # httpbin.org caps /bytes/N at 102400 (100KB).
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+
+    cat > "$rootfs/tmp/large_download_test.sh" << 'SCRIPT'
+#!/bin/sh
+wget -q -O /tmp/bigfile "https://httpbin.org/bytes/102400" 2>&1
+SIZE=$(wc -c < /tmp/bigfile | tr -d ' ')
+echo "download_size=$SIZE"
+SCRIPT
+    chmod +x "$rootfs/tmp/large_download_test.sh"
+
+    local output
+    output=$(redan_exec_with_secret \
+        "$rootfs" \
+        '/tmp/large_download_test.sh 2>&1' \
+        "TEST_TOKEN=dummy:httpbin.org" \
+        60)
+    [[ "$output" == *"download_size=102400"* ]]
+}
+
+# ---- secret non-leakage across hosts ----
+
+test_secret_not_injected_wrong_host() {
+    # Secret bound to api.github.com must NOT be injected when
+    # the guest connects to a different host. This is the core
+    # security property.
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+
+    cat > "$rootfs/tmp/wrong_host_test.sh" << 'SCRIPT'
+#!/bin/sh
+# Send the placeholder to httpbin.org, but the secret is only
+# allowed for api.github.com. The proxy should NOT inject.
+wget -q -O - --header "Authorization: Bearer $SECRET_TOKEN" https://httpbin.org/headers 2>&1
+SCRIPT
+    chmod +x "$rootfs/tmp/wrong_host_test.sh"
+
+    local output
+    output=$(redan_exec_with_secret \
+        "$rootfs" \
+        '/tmp/wrong_host_test.sh 2>&1' \
+        "SECRET_TOKEN=supersecret123:api.github.com" \
+        30)
+    # httpbin should see the placeholder, not the real secret.
+    # The proxy must not inject because httpbin.org is not in the allowlist.
+    [[ "$output" == *"redan_ph_"* ]] && [[ "$output" != *"supersecret123"* ]]
+}
+
+# ---- multiple secrets ----
+
+test_multiple_secrets() {
+    # Two different secrets for two different hosts in the same session.
+    # Verifies secrets are routed correctly and don't cross-contaminate.
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+
+    cat > "$rootfs/tmp/multi_secret_test.sh" << 'SCRIPT'
+#!/bin/sh
+# Send GITHUB_TOKEN to httpbin (allowed host for it)
+wget -q -O - --header "X-Github: $GITHUB_TOKEN" https://httpbin.org/headers 2>&1
+SCRIPT
+    chmod +x "$rootfs/tmp/multi_secret_test.sh"
+
+    local output
+    output=$($REDAN exec \
+        --rootfs "$rootfs" \
+        --command '/tmp/multi_secret_test.sh 2>&1' \
+        --secret "GITHUB_TOKEN=ghp_real_github_token:httpbin.org" \
+        --secret "NPM_TOKEN=npm_real_npm_token:registry.npmjs.org" \
+        --timeout 30 2>&1)
+    # GITHUB_TOKEN should have been injected (httpbin.org is allowed) then
+    # scrubbed from the response. So we see the placeholder.
+    # NPM_TOKEN should not appear at all (not sent, wrong host).
+    [[ "$output" == *"redan_ph_github_token"* ]] && \
+        [[ "$output" != *"ghp_real_github_token"* ]] && \
+        [[ "$output" != *"npm_real_npm_token"* ]]
+}
+
+# ---- exit code propagation ----
+
+test_exit_code_zero() {
+    local rootfs="$ROOTFS_DIR/$CURRENT_DISTRO"
+    redan_exec "$rootfs" "true" >/dev/null 2>&1
+}
+
 # ---- main ----
 
 # Parse distro arguments
@@ -253,13 +456,28 @@ for distro in "${DISTROS[@]}"; do
 
     CURRENT_DISTRO="$distro"
 
+    # Basic boot and plumbing
     run_test "$distro: boot and echo"       test_boot_and_echo
     run_test "$distro: CA cert installed"    test_ca_cert_installed
     run_test "$distro: network setup"        test_network_setup
     run_test "$distro: DNS resolv.conf"      test_dns_resolution
-    run_test "$distro: env has placeholder"  test_env_has_placeholder
-    run_test "$distro: HTTPS request"        test_https_request
-    run_test "$distro: secret injection"     test_secret_injection
+    run_test "$distro: exit code zero"       test_exit_code_zero
+
+    # Secret injection
+    run_test "$distro: env has placeholder"          test_env_has_placeholder
+    run_test "$distro: HTTPS request"                test_https_request
+    run_test "$distro: secret injection + scrubbing" test_secret_injection
+    run_test "$distro: secret not injected wrong host" test_secret_not_injected_wrong_host
+    run_test "$distro: multiple secrets"             test_multiple_secrets
+
+    # virtio-fs mounts
+    run_test "$distro: mount read"               test_mount_read
+    run_test "$distro: mount write"              test_mount_write
+    run_test "$distro: mount preserves perms"    test_mount_preserves_permissions
+
+    # Proxy under load
+    run_test "$distro: 10 concurrent HTTPS"      test_concurrent_https
+    run_test "$distro: 100KB download"            test_large_download
 
     echo ""
 done

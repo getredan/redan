@@ -200,7 +200,14 @@ pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
         std::fs::remove_file(&ssl_dir)?;
     }
     std::fs::create_dir_all(&ssl_dir)?;
-    std::fs::write(ssl_dir.join("redan-ca.pem"), pem)?;
+    let pem_path = ssl_dir.join("redan-ca.pem");
+    // update-ca-certificates may have replaced our file with an absolute
+    // symlink (e.g. -> /usr/local/share/ca-certificates/redan-ca.crt)
+    // which is broken from the host. Remove it before writing.
+    if pem_path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+        std::fs::remove_file(&pem_path)?;
+    }
+    std::fs::write(&pem_path, pem)?;
 
     // Drop into each distro's CA source directory.
     // The distro's update tool reads from these and regenerates the

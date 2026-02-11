@@ -188,8 +188,8 @@ const LISTEN_BACKLOG: usize = 32;
 // --- DNS ---
 
 fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
-    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]);
-    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]);
+    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 8192]);
+    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 8192]);
     let mut sock = udp::Socket::new(rx, tx);
     sock.bind(port).unwrap();
     sockets.add(sock)
