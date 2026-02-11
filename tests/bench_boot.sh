@@ -3,8 +3,8 @@
 # Benchmark: redan boot-to-proxy-ready time.
 #
 # Measures time from `redan exec` to the first successful HTTPS
-# request through the proxy. Requires KVM, libkrun, and an image
-# with curl and ca-certificates.
+# request through the proxy. Requires KVM, libkrun, and an image.
+# Uses busybox wget (available in all Alpine images).
 #
 # Usage:
 #   ./tests/bench_boot.sh [iterations] [image]
@@ -37,7 +37,7 @@ if [[ -z "$IMAGE" ]]; then
     IMAGE=$($REDAN image list 2>/dev/null | awk '{print $1}' | head -1)
 fi
 if [[ -z "$IMAGE" ]]; then
-    echo -e "${RED}no image found. Create one: redan image create bench --packages 'curl ca-certificates'${NC}"
+    echo -e "${RED}no image found. Create one: redan image create dev${NC}"
     exit 1
 fi
 
@@ -54,10 +54,9 @@ echo ""
 # The value doesn't matter -- we just need the proxy to start.
 SECRET="BENCH_TOKEN=bench_dummy_value:httpbin.org"
 
-# Guest command: wait for network, then curl through the proxy.
-# The proxy terminates TLS so this exercises the full chain:
-# guest -> smoltcp -> TLS MITM -> upstream -> response -> scrub -> guest
-GUEST_CMD="curl -sf -o /dev/null -w '%{http_code}' https://httpbin.org/get"
+# Guest command: wget is a busybox applet, available in every Alpine image.
+# Exercises the full chain: guest -> smoltcp -> TLS MITM -> upstream -> scrub -> guest
+GUEST_CMD="wget -q -O /dev/null https://httpbin.org/get && echo 200"
 
 declare -a TIMES
 
