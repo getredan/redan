@@ -61,6 +61,11 @@ impl VirtioNetDevice {
         }
         let frame_len = u32::from_be_bytes(len_buf) as usize;
         if frame_len > 65536 {
+            // Oversized frame: something is seriously wrong. Mark peer
+            // closed to stop reading. Without consuming the body, the
+            // stream is desynchronized -- no recovery possible.
+            log::error!("oversized frame ({frame_len} bytes), disconnecting");
+            self.peer_closed = true;
             return None;
         }
         // Got length prefix; must read full frame. Temporarily switch to

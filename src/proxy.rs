@@ -204,8 +204,7 @@ struct ProxyConn {
     /// Buffered bytes from the thread waiting to be written to smoltcp.
     pending_send: Vec<u8>,
     send_offset: usize,
-    /// HTTP response for port 80 (no thread needed).
-    http_response: Option<Vec<u8>>,
+
     state: ConnState,
 }
 
@@ -236,7 +235,6 @@ impl ProxyConn {
             from_thread: None,
             pending_send: Vec::new(),
             send_offset: 0,
-            http_response: None,
             state: ConnState::WaitingForData,
         };
 
@@ -291,7 +289,6 @@ fn shuttle_bytes(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
                     Content-Type: text/plain\r\n\
                     Connection: close\r\n\r\n\
                     redan: use HTTPS. Plaintext HTTP is not proxied.\n";
-                conn.http_response = Some(response.to_vec());
                 conn.pending_send = response.to_vec();
                 conn.send_offset = 0;
                 conn.state = ConnState::Draining;
@@ -567,7 +564,10 @@ fn tls_connection_thread(
         .map(|s| s.real_value().len())
         .max()
         .unwrap_or(0);
-    let mut scrub_overlap: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(Vec::new());
+    // Not wrapped in Zeroizing: upstream response buffers (header_buf,
+    // upstream_buf, etc.) aren't zeroized either. Scrubbing is a safety
+    // net; primary defense is host allowlisting.
+    let mut scrub_overlap: Vec<u8> = Vec::new();
     let mut header_buf = Vec::new();
     let mut headers_sent = false;
     let mut total_bytes: usize = 0;
@@ -623,7 +623,7 @@ fn tls_connection_thread(
                                     &body_remainder,
                                     secrets,
                                     max_secret_len,
-                                    &mut *scrub_overlap,
+                                    &mut scrub_overlap,
                                 )?;
                             }
                             header_buf = Vec::new();
@@ -634,7 +634,7 @@ fn tls_connection_thread(
                             &upstream_buf[..n],
                             secrets,
                             max_secret_len,
-                            &mut *scrub_overlap,
+                            &mut scrub_overlap,
                         )?;
                     }
                 }
@@ -654,7 +654,7 @@ fn tls_connection_thread(
                                 &upstream_buf[..n],
                                 secrets,
                                 max_secret_len,
-                                &mut *scrub_overlap,
+                                &mut scrub_overlap,
                             )?;
                         } else {
                             header_buf.extend_from_slice(&upstream_buf[..n]);
@@ -675,8 +675,6 @@ fn tls_connection_thread(
     // Flush remaining overlap bytes
     if !scrub_overlap.is_empty() {
         tls.write_all(&scrub_overlap)?;
-        // Zeroizing<Vec<u8>> handles this on drop, but flush now.
-        scrub_overlap.clear();
     }
 
     // Close TLS cleanly

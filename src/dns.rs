@@ -270,4 +270,25 @@ mod tests {
         let query = build_query(0x1234, &hostname, 1);
         assert!(handle_query(&query, gw).is_none());
     }
+
+    #[test]
+    fn rejects_compression_pointer() {
+        let gw = Ipv4Address::new(192, 168, 127, 1);
+        // Build a query with a compression pointer (0xC0 0x0C) instead
+        // of a proper label. This would point back to offset 12 in a
+        // real DNS packet -- could cause infinite loops in naive parsers.
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&0xAAAAu16.to_be_bytes()); // ID
+        pkt.extend_from_slice(&0x0100u16.to_be_bytes()); // flags (standard query)
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+        // Question: compression pointer instead of label
+        pkt.extend_from_slice(&[0xC0, 0x0C]); // pointer to offset 12
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+
+        assert!(handle_query(&pkt, gw).is_none());
+    }
 }
