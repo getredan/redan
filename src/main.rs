@@ -2,12 +2,27 @@ use std::path::Path;
 use std::time::Duration;
 
 use clap::Parser;
+use env_logger::Env;
 
 use redan::ca::MitmCa;
 use redan::image;
 use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::vm;
+
+fn init_logging(log_file: Option<&str>) {
+    let env = Env::default().default_filter_or("info");
+    let mut builder = env_logger::Builder::from_env(env);
+    if let Some(path) = log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|e| panic!("cannot open log file {path}: {e}"));
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    builder.init();
+}
 
 #[derive(Parser)]
 #[command(name = "redan", about = "Secure execution environment for AI agents")]
@@ -49,6 +64,11 @@ enum Cli {
         /// Format: /host/path:/guest/path (default guest path: /workspace)
         #[arg(long = "mount", value_name = "HOST:GUEST")]
         mounts: Vec<String>,
+
+        /// Write proxy/VM logs to a file instead of stderr.
+        /// Useful in interactive mode where stderr interleaves with the TUI.
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<String>,
     },
 
     /// Manage rootfs images
@@ -105,8 +125,15 @@ fn main() {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    env_logger::init();
     let cli = Cli::parse();
+
+    // Initialize logging. --log-file redirects to a file (useful for
+    // interactive mode where stderr interleaves with the guest TUI).
+    let log_file = match &cli {
+        Cli::Exec { log_file, .. } => log_file.clone(),
+        _ => None,
+    };
+    init_logging(log_file.as_deref());
 
     match cli {
         Cli::Doctor => doctor(),
@@ -118,6 +145,7 @@ fn main() {
             timeout,
             secrets,
             mounts,
+            log_file: _,
         } => {
             let rootfs_path = match (&image_name, &rootfs) {
                 (Some(name), _) => {
