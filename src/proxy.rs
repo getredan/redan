@@ -188,14 +188,15 @@ const LISTEN_BACKLOG: usize = 32;
 // --- DNS ---
 
 fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
-    // glibc and musl both send A+AAAA in parallel per name, so a
-    // burst of 50 names = 100 in-flight queries. dnsmasq defaults
-    // to 150 concurrent (FTABSIZ, config.h), systemd-resolved to
-    // 4096 (TRANSACTIONS_MAX). 150 matches dnsmasq.
-    // 512 bytes per packet (RFC 1035 NS_PACKETSZ; EDNS0 goes to
-    // 1232 but our synthetic DNS responses are well under 512).
-    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 150], vec![0; 150 * 512]);
-    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 150], vec![0; 150 * 512]);
+    // Metadata slots = max packets queued between poll() calls, not
+    // total concurrent DNS transactions. Our loop drains every 100us-1ms,
+    // so this only needs to absorb one virtio-net delivery batch.
+    // Embassy-net uses 16 for general UDP; we use more because a burst
+    // of DNS queries (glibc/musl send A+AAAA in parallel per name) can
+    // deliver many packets in one virtio batch.
+    // Payload: 512 bytes per RFC 1035 NS_PACKETSZ.
+    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
+    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
     let mut sock = udp::Socket::new(rx, tx);
     sock.bind(port).unwrap();
     sockets.add(sock)
