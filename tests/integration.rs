@@ -37,7 +37,7 @@ fn end_to_end_secret_injection() {
         return;
     }
 
-    let mut ca = MitmCa::generate();
+    let ca = MitmCa::generate();
     vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
 
     let placeholder = "redan_ph_test_e2e_abcd1234";
@@ -80,7 +80,7 @@ fn end_to_end_secret_injection() {
 
     // Proxy runs until timeout. The guest output (DNS, HTTPS, JSON response)
     // goes to the VM console. The proxy logs show injection + scrubbing.
-    proxy::run(net_sock, &mut ca, &secrets, Duration::from_secs(45));
+    proxy::run(net_sock, std::sync::Arc::new(std::sync::Mutex::new(ca)), &secrets, Duration::from_secs(45));
 }
 
 /// Boot a VM and verify DNS resolution works (all names -> gateway).
@@ -96,7 +96,7 @@ fn synthetic_dns_resolution() {
         return;
     }
 
-    let mut ca = MitmCa::generate();
+    let ca = MitmCa::generate();
     vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
@@ -124,5 +124,5 @@ fn synthetic_dns_resolution() {
     let vm_handle = vm::Vm::boot(config);
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
-    proxy::run(net_sock, &mut ca, &[], Duration::from_secs(20));
+    proxy::run(net_sock, std::sync::Arc::new(std::sync::Mutex::new(ca)), &[], Duration::from_secs(20));
 }

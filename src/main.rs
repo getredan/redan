@@ -418,7 +418,7 @@ fn exec(
     secret_specs: &[String],
     mount_specs: &[String],
 ) {
-    let mut ca = MitmCa::generate();
+    let ca = MitmCa::generate();
     log::info!("MITM CA generated");
 
     // Install CA cert in guest rootfs
@@ -515,7 +515,7 @@ fn exec(
         vm.net_sock
             .try_clone()
             .expect("failed to clone VM network socket"),
-        &mut ca,
+        std::sync::Arc::new(std::sync::Mutex::new(ca)),
         &secrets,
         Duration::from_secs(timeout_secs),
     );

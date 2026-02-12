@@ -51,13 +51,7 @@ fn reap_done(connections: &mut HashMap<SocketHandle, ProxyConn>, sockets: &mut S
     });
 }
 
-pub fn run(host_sock: UnixStream, ca_instance: &mut MitmCa, secrets: &[SecretBinding], timeout: Duration) {
-    // Move CA into Arc<Mutex> for sharing with connection threads.
-    // We take ownership via swap to avoid changing the public API.
-    let mut owned_ca = MitmCa::generate(); // placeholder
-    std::mem::swap(ca_instance, &mut owned_ca);
-    let ca = Arc::new(Mutex::new(owned_ca));
-
+pub fn run(host_sock: UnixStream, ca: Arc<Mutex<MitmCa>>, secrets: &[SecretBinding], timeout: Duration) {
     let resolver = Arc::new(MitmCertResolver { ca: Arc::clone(&ca) });
     let server_config = ca::mitm_server_config(resolver);
     let secrets: Arc<[SecretBinding]> = secrets.into();
@@ -146,12 +140,6 @@ pub fn run(host_sock: UnixStream, ca_instance: &mut MitmCa, secrets: &[SecretBin
         }
     }
 
-    // Swap CA back so caller still has it (for cert PEM access, etc.)
-    let restored = Arc::try_unwrap(ca)
-        .expect("connection threads still running")
-        .into_inner()
-        .expect("mutex poisoned");
-    *ca_instance = restored;
 }
 
 struct ListenBacklog {

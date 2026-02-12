@@ -204,7 +204,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
 
     // Step 4: boot VM with network, run setup
     eprintln!("building image (this boots a VM with network)...");
-    let mut ca = MitmCa::generate();
+    let ca = MitmCa::generate();
     vm::install_ca_cert(dest, ca.ca_cert_pem())?;
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
@@ -229,7 +229,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     // Run proxy until VM completes (generous timeout for package installation)
     proxy::run(
         vm_handle.net_sock.try_clone()?,
-        &mut ca,
+        std::sync::Arc::new(std::sync::Mutex::new(ca)),
         &[],                      // no secrets during build
         Duration::from_secs(600), // 10 min timeout for builds
     );
