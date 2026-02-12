@@ -19,6 +19,13 @@ fn init_logging(log_file: Option<&str>) {
             .append(true)
             .open(path)
             .unwrap_or_else(|e| panic!("cannot open log file {path}: {e}"));
+        // Redirect stderr to the log file. libkrun writes directly
+        // to stderr (bypassing the Rust log crate), so Target::Pipe
+        // alone isn't enough.
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+        }
         builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
     builder.init();
