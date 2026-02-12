@@ -188,8 +188,12 @@ const LISTEN_BACKLOG: usize = 32;
 // --- DNS ---
 
 fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
-    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 8192]);
-    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 8192]);
+    // 128 slots handles realistic bursts (npm install: 30-50 names,
+    // glibc sends A+AAAA per name = 60-100 concurrent queries).
+    // dnsmasq defaults to 150, systemd-resolved to 512.
+    // 512 bytes per RFC 1035 max UDP DNS message.
+    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 128], vec![0; 128 * 512]);
+    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 128], vec![0; 128 * 512]);
     let mut sock = udp::Socket::new(rx, tx);
     sock.bind(port).unwrap();
     sockets.add(sock)
