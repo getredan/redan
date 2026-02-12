@@ -89,6 +89,18 @@ impl Vm {
     }
 
     fn run_vm(config: VmConfig, guest_sock: UnixStream, guest_fd: i32) -> i32 {
+        // Raise host process fd limit to hard max. libkrun needs fds
+        // for KVM vcpus, virtio devices, etc. (Same as smolvm.)
+        unsafe {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+                limit.rlim_cur = limit.rlim_max;
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+            }
+        }
         let ret = unsafe {
             ffi::krun_init_log(
                 ffi::KRUN_LOG_TARGET_DEFAULT,
@@ -141,6 +153,22 @@ impl Vm {
         // Interactive mode adds raw terminal on the host (caller handles).
         // Non-interactive: console output goes to host stdout as-is.
 
+        // Set guest RLIMIT_NOFILE via libkrun (before init runs).
+        // Format per libkrun.h: "RESOURCE=RLIM_CUR:RLIM_MAX"
+        // RLIMIT_NOFILE = 7 on Linux (libc::RLIMIT_NOFILE).
+        let nofile = CString::new(format!(
+            "{}={}:{}",
+            libc::RLIMIT_NOFILE,
+            65536,
+            65536
+        ))
+        .unwrap();
+        let rlimits: Vec<*const i8> = vec![nofile.as_ptr(), std::ptr::null()];
+        let ret = unsafe { ffi::krun_set_rlimits(ctx_id, rlimits.as_ptr()) };
+        if ret < 0 {
+            log::warn!("krun_set_rlimits returned {ret}");
+        }
+
         // exec: /bin/sh -c "<command>"
         // /bin/sh exists on every distro (ash on Alpine, bash/dash elsewhere).
         // libkrun's init uses exec_path as argv[0] (via KRUN_INIT), so
@@ -174,7 +202,7 @@ impl Vm {
 /// Build the network setup commands for a guest with static IP config.
 pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
     format!(
-        "ulimit -n 65536; \
+        "ulimit -n 65536 2>/dev/null; \
          ip link set eth0 up; \
          ip addr add {guest_ip}/24 dev eth0; \
          ip route add default via {gateway_ip}; \
