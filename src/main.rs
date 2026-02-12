@@ -389,14 +389,9 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
     let real_value = redan::provider::resolve_secret_value(value_ref)
         .map_err(|e| format!("failed to resolve secret: {e}"))?;
 
-    // CWE-93: CRLF in secret values would corrupt HTTP framing when
-    // injected into headers. Reject at configuration time.
-    if real_value.contains('\r') || real_value.contains('\n') {
-        return Err("secret value contains CRLF (would corrupt HTTP headers)".into());
-    }
-
     let allowed_hosts: Vec<String> = hosts.split(',').map(|h| h.trim().to_string()).collect();
-    let binding = SecretBinding::new(env_name, real_value, allowed_hosts);
+    let binding =
+        SecretBinding::new(env_name, real_value, allowed_hosts).map_err(|e| e.to_string())?;
 
     Ok((env_name.to_string(), binding))
 }

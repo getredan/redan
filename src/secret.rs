@@ -49,8 +49,23 @@ impl SecretBinding {
     /// The placeholder embeds the env name (lowercased) and a hash suffix
     /// for uniqueness. Not cryptographic -- the guest sees the placeholder
     /// via env var, so it's not secret.
-    #[must_use]
-    pub fn new(env_name: &str, real_value: String, allowed_hosts: Vec<String>) -> Self {
+    /// Create a binding with an auto-generated placeholder.
+    ///
+    /// Returns `Err` if `real_value` contains CRLF sequences -- those
+    /// would enable HTTP header injection when the proxy substitutes
+    /// the placeholder.
+    pub fn new(
+        env_name: &str,
+        real_value: String,
+        allowed_hosts: Vec<String>,
+    ) -> Result<Self, crate::error::Error> {
+        if real_value.contains('\r') || real_value.contains('\n') {
+            return Err(format!(
+                "secret for {env_name} contains CR/LF (header injection risk)"
+            )
+            .into());
+        }
+
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         use std::time::SystemTime;
@@ -61,11 +76,11 @@ impl SecretBinding {
         std::process::id().hash(&mut h);
         let suffix = h.finish();
 
-        Self {
+        Ok(Self {
             placeholder: format!("redan_ph_{}_{:016x}", env_name.to_lowercase(), suffix),
             real_value: Zeroizing::new(real_value),
             allowed_hosts,
-        }
+        })
     }
 }
 
@@ -110,7 +125,11 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
     let mut count = 0;
 
     for secret in secrets {
-        if !secret.allowed_hosts.iter().any(|h| h == hostname) {
+        if !secret
+            .allowed_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(hostname))
+        {
             continue;
         }
         if let Some((replaced, n)) = byte_replace(
@@ -167,7 +186,7 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
 /// (obs-fold, case-insensitive names). The body is passed through
 /// as raw bytes.
 pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
-    let mut parsed_headers = [httparse::EMPTY_HEADER; 64];
+    let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
     let mut req = httparse::Request::new(&mut parsed_headers);
     let body_offset = match req.parse(data) {
         Ok(httparse::Status::Complete(n)) => n,

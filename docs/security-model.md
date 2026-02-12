@@ -34,6 +34,20 @@ Secrets reflected in any encoded form will not be caught:
 - JSON unicode escapes (`\u0041`)
 - HTML entity encoding
 - Compression (gzip, brotli) -- mitigated by stripping Accept-Encoding
+- Chunked Transfer-Encoding framing in responses (chunk headers can
+  split a secret across chunk boundaries)
+
+#### Chunked Transfer-Encoding
+
+Redan rejects incoming requests with `Transfer-Encoding: chunked`
+(responds with HTTP 411 Length Required). The proxy reads request
+bodies using `Content-Length`; chunked encoding has no length, so
+the body would be truncated.
+
+For upstream responses, servers may use chunked encoding regardless
+of the request. Chunk framing bytes embedded in the response stream
+can split a secret across chunk boundaries, preventing literal
+match during scrubbing. This is a documented scrubbing limitation.
 
 Scrubbing is a safety net, not the load-bearing wall. The primary
 defense is that secrets are only injected for allowed hosts.

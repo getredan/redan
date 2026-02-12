@@ -1,5 +1,4 @@
-/// TLS utilities: SNI extraction and upstream connection.
-use std::io::{Read, Write};
+/// TLS utilities: upstream connection and SNI extraction (test only).
 use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -18,7 +17,37 @@ static UPSTREAM_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(
     Arc::new(config)
 });
 
+/// Connect to an upstream server over TLS, returning the TCP stream and
+/// rustls client connection.
+pub fn connect_upstream(
+    hostname: &str,
+    port: u16,
+) -> Result<(TcpStream, rustls::ClientConnection), crate::error::Error> {
+    use std::net::ToSocketAddrs;
+
+    let addr = format!("{hostname}:{port}")
+        .to_socket_addrs()?
+        .find(|a| a.is_ipv4())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution failed")
+        })?;
+
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+    stream.set_nonblocking(false)?;
+
+    let server_name = hostname
+        .to_owned()
+        .try_into()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let tls_conn = rustls::ClientConnection::new(Arc::clone(&UPSTREAM_TLS_CONFIG), server_name)?;
+
+    Ok((stream, tls_conn))
+}
+
 /// Extract SNI hostname from a TLS ClientHello message.
+///
+/// Hand-rolled parser used only by tests. Production code uses
+/// `rustls::ServerConnection::server_name()` after the handshake.
 pub fn extract_sni(data: &[u8]) -> Option<String> {
     // TLS record: type(1) + version(2) + length(2) + handshake
     if data.len() < 5 || data[0] != 0x16 {
@@ -88,201 +117,6 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
     }
 
     None
-}
-
-/// Connect to an upstream server over TLS, returning the TCP stream and
-/// rustls client connection.
-pub fn connect_upstream(
-    hostname: &str,
-    port: u16,
-) -> Result<(TcpStream, rustls::ClientConnection), crate::error::Error> {
-    use std::net::ToSocketAddrs;
-
-    let addr = format!("{hostname}:{port}")
-        .to_socket_addrs()?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution failed")
-        })?;
-
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
-    stream.set_nonblocking(false)?;
-
-    let server_name = hostname
-        .to_owned()
-        .try_into()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let tls_conn = rustls::ClientConnection::new(Arc::clone(&UPSTREAM_TLS_CONFIG), server_name)?;
-
-    Ok((stream, tls_conn))
-}
-
-/// Maximum total bytes we'll relay per response. Safety cap against
-/// OOM on malicious upstreams. Individual chunks stream through without
-/// buffering the whole thing.
-const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
-
-/// Messages sent from the upstream relay thread to the proxy loop.
-pub enum UpstreamMsg {
-    /// HTTP response headers (everything up to and including \r\n\r\n).
-    Headers(Vec<u8>),
-    /// A chunk of response body.
-    Body(Vec<u8>),
-    /// Upstream finished.
-    Done,
-    /// Upstream error.
-    Error(String),
-}
-
-/// Relay an HTTP request to upstream and stream the response back.
-///
-/// Sends headers as a single `UpstreamMsg::Headers`, then body as
-/// `UpstreamMsg::Body` chunks, then `UpstreamMsg::Done`.
-pub fn relay_upstream_streaming(
-    stream: &mut TcpStream,
-    tls: &mut rustls::ClientConnection,
-    request: &[u8],
-    tx: &std::sync::mpsc::Sender<UpstreamMsg>,
-) -> Result<(), crate::error::Error> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
-
-    // Complete TLS handshake
-    while tls.is_handshaking() {
-        if tls.wants_write() {
-            tls.write_tls(stream)?;
-        }
-        if tls.wants_read() {
-            tls.read_tls(stream)?;
-            tls.process_new_packets()?;
-        }
-    }
-
-    // Send request
-    for chunk in request.chunks(16384) {
-        tls.writer().write_all(chunk)?;
-        while tls.wants_write() {
-            tls.write_tls(stream)?;
-        }
-        stream.flush()?;
-    }
-
-    // Read response, streaming chunks through the channel
-    let mut header_buf = Vec::new();
-    let mut headers_sent = false;
-    let mut total_bytes: usize = 0;
-    let mut buf = vec![0u8; 16384];
-
-    loop {
-        match tls.read_tls(stream) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e.into()),
-        }
-
-        let state = tls.process_new_packets()?;
-
-        loop {
-            match tls.reader().read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    total_bytes += n;
-                    if total_bytes > MAX_RESPONSE_SIZE {
-                        return Err(format!(
-                            "response too large ({total_bytes} bytes, max {MAX_RESPONSE_SIZE})"
-                        )
-                        .into());
-                    }
-
-                    if !headers_sent {
-                        header_buf.extend_from_slice(&buf[..n]);
-                        if let Some(end) = header_end_offset(&header_buf) {
-                            // Split: headers go as one message, remaining as body
-                            let headers = header_buf[..end].to_vec();
-                            let body_remainder = header_buf[end..].to_vec();
-                            tx.send(UpstreamMsg::Headers(headers))?;
-                            headers_sent = true;
-                            if !body_remainder.is_empty() {
-                                tx.send(UpstreamMsg::Body(body_remainder))?;
-                            }
-                            header_buf = Vec::new(); // free
-                        }
-                    } else {
-                        tx.send(UpstreamMsg::Body(buf[..n].to_vec()))?;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
-
-        if state.peer_has_closed() {
-            // Drain remaining plaintext
-            loop {
-                match tls.reader().read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        if headers_sent {
-                            tx.send(UpstreamMsg::Body(buf[..n].to_vec()))?;
-                        } else {
-                            header_buf.extend_from_slice(&buf[..n]);
-                        }
-                    }
-                    _ => break,
-                }
-            }
-            // If headers never completed (malformed response), send what we have
-            if !headers_sent && !header_buf.is_empty() {
-                tx.send(UpstreamMsg::Headers(header_buf))?;
-            }
-            break;
-        }
-    }
-
-    tx.send(UpstreamMsg::Done)?;
-    Ok(())
-}
-
-/// Find the byte offset of \r\n\r\n (end of HTTP headers, exclusive).
-fn header_end_offset(data: &[u8]) -> Option<usize> {
-    data.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
-}
-
-/// Check if a buffer contains a complete HTTP response.
-/// Only used by tests; streaming relay uses peer_has_closed.
-///
-/// Supports Content-Length and chunked Transfer-Encoding. For chunked
-/// responses, looks for the terminal chunk marker `0\r\n\r\n`.
-#[cfg(test)]
-fn response_complete(data: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(data);
-    let Some(header_end) = text.find("\r\n\r\n") else {
-        return false;
-    };
-    let headers = &text[..header_end].to_lowercase();
-    let body_start = header_end + 4;
-
-    // Content-Length: exact byte count
-    if let Some(cl_line) = headers.lines().find(|l| l.starts_with("content-length:"))
-        && let Ok(cl) = cl_line
-            .split(':')
-            .nth(1)
-            .unwrap_or("0")
-            .trim()
-            .parse::<usize>()
-    {
-        return data.len() - body_start >= cl;
-    }
-
-    // Chunked Transfer-Encoding: terminal chunk is "0\r\n\r\n"
-    if headers.contains("transfer-encoding: chunked") {
-        return data[body_start..].ends_with(b"0\r\n\r\n");
-    }
-
-    false
 }
 
 #[cfg(test)]
@@ -359,40 +193,5 @@ mod tests {
     #[test]
     fn extract_sni_rejects_non_tls() {
         assert_eq!(extract_sni(b"GET / HTTP/1.1\r\n"), None);
-    }
-
-    #[test]
-    fn response_complete_with_content_length() {
-        let body = "x".repeat(80);
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
-        assert!(response_complete(resp.as_bytes()));
-    }
-
-    #[test]
-    fn response_incomplete_body() {
-        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\nhello";
-        assert!(!response_complete(resp));
-    }
-
-    #[test]
-    fn response_complete_chunked() {
-        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
-                      5\r\nhello\r\n0\r\n\r\n";
-        assert!(response_complete(resp));
-    }
-
-    #[test]
-    fn response_incomplete_chunked() {
-        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
-                      5\r\nhello\r\n";
-        assert!(!response_complete(resp));
-    }
-
-    #[test]
-    fn response_complete_no_headers_yet() {
-        assert!(!response_complete(b"HTTP/1.1 200 OK\r\n"));
     }
 }

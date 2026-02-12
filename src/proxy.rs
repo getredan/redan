@@ -39,6 +39,9 @@ pub const GUEST_IP: &str = "192.168.127.2";
 const TCP_SOCKET_BUF: usize = 256 * 1024;
 const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
 const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
+/// Max active TLS connections. Each spawns a thread (~8MB stack).
+/// 128 connections = ~1GB stack memory worst case.
+const MAX_CONNECTIONS: usize = 128;
 
 fn reap_done(connections: &mut HashMap<SocketHandle, ProxyConn>, sockets: &mut SocketSet) {
     connections.retain(|handle, conn| {
@@ -109,6 +112,13 @@ pub fn run(host_sock: UnixStream, ca: Arc<Mutex<MitmCa>>, secrets: &[SecretBindi
                     let handle = backlog.handles[i];
                     let sock = sockets.get_mut::<tcp::Socket>(handle);
                     if sock.may_recv() && sock.state() != tcp::State::Listen {
+                        if connections.len() >= MAX_CONNECTIONS {
+                            log::warn!("connection limit ({MAX_CONNECTIONS}), rejecting");
+                            sock.close();
+                            backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
+                            i += 1;
+                            continue;
+                        }
                         log::info!(
                             "connection on :{} from {:?}",
                             backlog.port,
@@ -234,7 +244,9 @@ impl ProxyConn {
             // Pre-create channels and spawn the handler thread.
             // The thread blocks on rx until the poll loop feeds it data.
             let (to_tx, to_rx) = mpsc::channel::<Vec<u8>>();
-            let (from_tx, from_rx) = mpsc::channel::<Vec<u8>>();
+            // Bounded: backpressure when guest TCP window is full.
+            // 64 * 16KB chunks = ~1MB buffered before thread blocks.
+            let (from_tx, from_rx) = mpsc::sync_channel::<Vec<u8>>(64);
             conn.to_thread = Some(to_tx);
             conn.from_thread = Some(from_rx);
             conn.state = ConnState::Shuttling;
@@ -381,13 +393,13 @@ fn drain_to_socket(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
 /// drive the TLS state machine over channel-transported bytes.
 struct ChannelStream {
     rx: mpsc::Receiver<Vec<u8>>,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::SyncSender<Vec<u8>>,
     read_buf: Vec<u8>,
     read_pos: usize,
 }
 
 impl ChannelStream {
-    fn new(rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::Sender<Vec<u8>>) -> Self {
+    fn new(rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::SyncSender<Vec<u8>>) -> Self {
         Self {
             rx,
             tx,
@@ -439,7 +451,7 @@ impl Write for ChannelStream {
 /// the TLS state machine automatically.
 fn tls_connection_thread(
     rx: mpsc::Receiver<Vec<u8>>,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::SyncSender<Vec<u8>>,
     server_config: Arc<rustls::ServerConfig>,
     secrets: &[SecretBinding],
 ) -> Result<(), crate::error::Error> {
@@ -493,6 +505,17 @@ fn tls_connection_thread(
         return Ok(());
     }
 
+    // Reject chunked Transfer-Encoding. We read until Content-Length
+    // is satisfied or headers are complete (for bodyless requests).
+    // Chunked bodies have no Content-Length, so the body would be
+    // truncated. Reject with 411 Length Required.
+    if request_has_chunked_te(&request) {
+        log::warn!("rejected chunked Transfer-Encoding request");
+        let resp = b"HTTP/1.1 411 Length Required\r\nConnection: close\r\n\r\n";
+        tls.write_all(resp)?;
+        return Ok(());
+    }
+
     // Rewrite headers and inject secrets
     let request = crate::secret::rewrite_request_headers(&request);
     let (request_data, inject_count) = crate::secret::inject(&request, &sni, secrets);
@@ -534,7 +557,7 @@ fn tls_connection_thread(
         .map(|s| s.real_value.len())
         .max()
         .unwrap_or(0);
-    let mut scrub_overlap: Vec<u8> = Vec::new();
+    let mut scrub_overlap: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(Vec::new());
     let mut header_buf = Vec::new();
     let mut headers_sent = false;
     let mut total_bytes: usize = 0;
@@ -585,23 +608,23 @@ fn tls_connection_thread(
                             headers_sent = true;
 
                             if !body_remainder.is_empty() {
-                                write_scrubbed_body(
+                                write_scrubbed_chunk(
                                     &mut tls,
                                     &body_remainder,
                                     secrets,
                                     max_secret_len,
-                                    &mut scrub_overlap,
+                                    &mut *scrub_overlap,
                                 )?;
                             }
                             header_buf = Vec::new();
                         }
                     } else {
-                        write_scrubbed_body(
+                        write_scrubbed_chunk(
                             &mut tls,
                             &upstream_buf[..n],
                             secrets,
                             max_secret_len,
-                            &mut scrub_overlap,
+                            &mut *scrub_overlap,
                         )?;
                     }
                 }
@@ -616,12 +639,12 @@ fn tls_connection_thread(
                 match upstream_tls.reader().read(&mut upstream_buf) {
                     Ok(n) if n > 0 => {
                         if headers_sent {
-                            write_scrubbed_body(
+                            write_scrubbed_chunk(
                                 &mut tls,
                                 &upstream_buf[..n],
                                 secrets,
                                 max_secret_len,
-                                &mut scrub_overlap,
+                                &mut *scrub_overlap,
                             )?;
                         } else {
                             header_buf.extend_from_slice(&upstream_buf[..n]);
@@ -642,7 +665,8 @@ fn tls_connection_thread(
     // Flush remaining overlap bytes
     if !scrub_overlap.is_empty() {
         tls.write_all(&scrub_overlap)?;
-        zeroize::Zeroize::zeroize(&mut scrub_overlap);
+        // Zeroizing<Vec<u8>> handles this on drop, but flush now.
+        scrub_overlap.clear();
     }
 
     // Close TLS cleanly
@@ -653,17 +677,17 @@ fn tls_connection_thread(
     Ok(())
 }
 
-/// Write a body chunk through the guest TLS stream with secret scrubbing.
-/// Maintains an overlap buffer to catch secrets spanning chunk boundaries.
-fn write_scrubbed_body(
-    tls: &mut rustls::StreamOwned<rustls::ServerConnection, ChannelStream>,
+/// Write a body chunk with secret scrubbing. Maintains an overlap
+/// buffer to catch secrets spanning chunk boundaries.
+fn write_scrubbed_chunk(
+    out: &mut impl Write,
     chunk: &[u8],
     secrets: &[SecretBinding],
     max_secret_len: usize,
     scrub_overlap: &mut Vec<u8>,
 ) -> Result<(), crate::error::Error> {
     if max_secret_len == 0 || secrets.is_empty() {
-        tls.write_all(chunk)?;
+        out.write_all(chunk)?;
         return Ok(());
     }
 
@@ -678,7 +702,7 @@ fn write_scrubbed_body(
     let overlap_size = max_secret_len.saturating_sub(1);
     if scrubbed.len() > overlap_size {
         let safe_end = scrubbed.len() - overlap_size;
-        tls.write_all(&scrubbed[..safe_end])?;
+        out.write_all(&scrubbed[..safe_end])?;
         *scrub_overlap = scrubbed[safe_end..].to_vec();
     } else {
         *scrub_overlap = scrubbed;
@@ -690,7 +714,7 @@ fn write_scrubbed_body(
 // --- HTTP helpers ---
 
 fn http_request_complete(data: &[u8]) -> bool {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut req = httparse::Request::new(&mut headers);
     let body_offset = match req.parse(data) {
         Ok(httparse::Status::Complete(n)) => n,
@@ -714,8 +738,23 @@ fn http_request_complete(data: &[u8]) -> bool {
     true
 }
 
+fn request_has_chunked_te(data: &[u8]) -> bool {
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_err() {
+        return false;
+    }
+    req.headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("transfer-encoding")
+            && std::str::from_utf8(h.value)
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("chunked")
+    })
+}
+
 fn request_has_upgrade(data: &[u8]) -> bool {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut req = httparse::Request::new(&mut headers);
     if req.parse(data).is_err() {
         return false;
@@ -732,7 +771,7 @@ fn header_end_offset(data: &[u8]) -> Option<usize> {
 }
 
 fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
-    let mut parsed_headers = [httparse::EMPTY_HEADER; 64];
+    let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
     let mut resp = httparse::Response::new(&mut parsed_headers);
     let body_offset = match resp.parse(data) {
         Ok(httparse::Status::Complete(n)) => n,
@@ -845,5 +884,95 @@ mod tests {
             &binary[..],
             "binary body corrupted by rewrite"
         );
+    }
+
+    #[test]
+    fn chunked_te_detected() {
+        let req = b"POST /api HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(request_has_chunked_te(req));
+    }
+
+    #[test]
+    fn chunked_te_case_insensitive() {
+        let req = b"POST /api HTTP/1.1\r\ntransfer-encoding: Chunked\r\n\r\n";
+        assert!(request_has_chunked_te(req));
+    }
+
+    #[test]
+    fn chunked_te_absent() {
+        let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(!request_has_chunked_te(req));
+    }
+
+    // --- write_scrubbed_chunk overlap tests ---
+
+    fn make_secret(placeholder: &str, real: &str) -> SecretBinding {
+        SecretBinding {
+            placeholder: placeholder.to_string(),
+            real_value: zeroize::Zeroizing::new(real.to_string()),
+            allowed_hosts: vec![],
+        }
+    }
+
+    #[test]
+    fn scrub_chunk_single_chunk() {
+        let secret = make_secret("ph", "SECRET123");
+        let mut out = Vec::new();
+        let mut overlap = Vec::new();
+        write_scrubbed_chunk(&mut out, b"prefix SECRET123 suffix", &[secret], 9, &mut overlap).unwrap();
+        // Flush remaining overlap
+        out.extend_from_slice(&overlap);
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("ph"), "secret should be replaced with placeholder");
+        assert!(!text.contains("SECRET123"), "secret must not appear in output");
+    }
+
+    #[test]
+    fn scrub_chunk_secret_spans_boundary() {
+        let secret = make_secret("ph", "ABCDEFGHIJ");
+        let mut out = Vec::new();
+        let mut overlap = Vec::new();
+        // Split secret: "ABCDE" in chunk 1, "FGHIJ" in chunk 2
+        write_scrubbed_chunk(&mut out, b"prefix ABCDE", &[secret.clone()], 10, &mut overlap).unwrap();
+        write_scrubbed_chunk(&mut out, b"FGHIJ suffix", &[secret], 10, &mut overlap).unwrap();
+        out.extend_from_slice(&overlap);
+        let text = String::from_utf8_lossy(&out);
+        assert!(!text.contains("ABCDEFGHIJ"), "secret spanning chunks must be scrubbed");
+        assert!(text.contains("ph"), "placeholder should appear");
+    }
+
+    #[test]
+    fn scrub_chunk_secret_at_end_of_stream() {
+        let secret = make_secret("ph", "TOKEN");
+        let mut out = Vec::new();
+        let mut overlap = Vec::new();
+        write_scrubbed_chunk(&mut out, b"data TOKEN", &[secret], 5, &mut overlap).unwrap();
+        // Flush overlap (may contain the tail)
+        out.extend_from_slice(&overlap);
+        let text = String::from_utf8_lossy(&out);
+        assert!(!text.contains("TOKEN"), "secret at end must be scrubbed");
+    }
+
+    #[test]
+    fn scrub_chunk_no_secrets_passthrough() {
+        let mut out = Vec::new();
+        let mut overlap = Vec::new();
+        write_scrubbed_chunk(&mut out, b"hello world", &[], 0, &mut overlap).unwrap();
+        assert_eq!(out, b"hello world");
+        assert!(overlap.is_empty());
+    }
+
+    #[test]
+    fn scrub_chunk_multiple_secrets() {
+        let s1 = make_secret("P1", "ALPHA");
+        let s2 = make_secret("P2", "BETA");
+        let mut out = Vec::new();
+        let mut overlap = Vec::new();
+        let max_len = 5;
+        write_scrubbed_chunk(&mut out, b"got ALPHA and BETA here", &[s1, s2], max_len, &mut overlap).unwrap();
+        out.extend_from_slice(&overlap);
+        let text = String::from_utf8_lossy(&out);
+        assert!(!text.contains("ALPHA"), "first secret must be scrubbed");
+        assert!(!text.contains("BETA"), "second secret must be scrubbed");
     }
 }

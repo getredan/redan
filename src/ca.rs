@@ -62,14 +62,19 @@ impl MitmCa {
     }
 
     /// Mint (or return cached) leaf CertifiedKey for `hostname`.
-    pub fn certified_key_for(&mut self, hostname: &str) -> Arc<CertifiedKey> {
+    /// Returns None if the hostname is not a valid DNS name.
+    pub fn certified_key_for(&mut self, hostname: &str) -> Option<Arc<CertifiedKey>> {
         if let Some(cached) = self.key_cache.get(hostname) {
-            return Arc::clone(cached);
+            return Some(Arc::clone(cached));
         }
 
+        let san: SanType = hostname
+            .try_into()
+            .map(SanType::DnsName)
+            .ok()?;
         let mut params = CertificateParams::default();
         params.distinguished_name.push(DnType::CommonName, hostname);
-        params.subject_alt_names = vec![SanType::DnsName(hostname.try_into().unwrap())];
+        params.subject_alt_names = vec![san];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let now = time::OffsetDateTime::now_utc();
         params.not_before = now;
@@ -93,7 +98,7 @@ impl MitmCa {
 
         self.key_cache
             .insert(hostname.to_string(), Arc::clone(&certified));
-        certified
+        Some(certified)
     }
 }
 
@@ -112,7 +117,7 @@ impl ResolvesServerCert for MitmCertResolver {
     ) -> Option<Arc<CertifiedKey>> {
         let sni = client_hello.server_name()?;
         let mut ca = self.ca.lock().ok()?;
-        Some(ca.certified_key_for(sni))
+        ca.certified_key_for(sni)
     }
 }
 
@@ -147,8 +152,8 @@ mod tests {
     #[test]
     fn test_certified_key_generation() {
         let mut ca = MitmCa::generate();
-        let key1 = ca.certified_key_for("example.com");
-        let key2 = ca.certified_key_for("example.com");
+        let key1 = ca.certified_key_for("example.com").unwrap();
+        let key2 = ca.certified_key_for("example.com").unwrap();
         // Same pointer (cached)
         assert!(Arc::ptr_eq(&key1, &key2));
     }

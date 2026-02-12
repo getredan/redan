@@ -163,12 +163,15 @@ fn a03_host_allowlist_requires_exact_match() {
         "",
     );
 
-    // Test various hostname manipulation attempts
+    // Case-insensitive match (RFC 4343): should inject
+    let (_, count) = inject(&req, "API.GITHUB.COM", &secrets);
+    assert_eq!(count, 1, "case-insensitive hostname must match");
+
+    // Hostname manipulation attacks: must not inject
     let bypass_hosts = [
         "api.github.com.evil.com",     // suffix attack
         "evil-api.github.com",         // prefix attack
         "api.github.com:443@evil.com", // URL authority confusion
-        "API.GITHUB.COM",              // case variation
         "api.github.com.",             // trailing dot (FQDN)
     ];
 
