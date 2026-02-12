@@ -251,9 +251,12 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
 /// Import a rootfs from an existing Docker image.
 ///
 /// Runs the image (to flatten layers), exports the filesystem,
-/// and stores it as a redan image. Adds iproute2 and ca-certificates
-/// if not already present.
+/// and stores it as a redan image.
 pub fn import_docker(name: &str, docker_image: &str) -> io::Result<PathBuf> {
+    import_docker_inner(name, docker_image, true)
+}
+
+fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result<PathBuf> {
     let dest = image_path(name)?;
     if dest.exists() {
         return Err(io::Error::new(
@@ -262,14 +265,16 @@ pub fn import_docker(name: &str, docker_image: &str) -> io::Result<PathBuf> {
         ));
     }
 
-    eprintln!("pulling {docker_image}...");
-    let pull = std::process::Command::new("docker")
-        .args(["pull", "-q", docker_image])
-        .status()?;
-    if !pull.success() {
-        return Err(io::Error::other(format!(
-            "docker pull failed for {docker_image}"
-        )));
+    if pull {
+        eprintln!("pulling {docker_image}...");
+        let status = std::process::Command::new("docker")
+            .args(["pull", "-q", docker_image])
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "docker pull failed for {docker_image}"
+            )));
+        }
     }
 
     eprintln!("exporting rootfs...");
@@ -333,7 +338,8 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
         return Err(io::Error::other("docker build failed"));
     }
 
-    let result = import_docker(name, &tag);
+    // Skip pull -- image was just built locally.
+    let result = import_docker_inner(name, &tag, false);
 
     // Clean up the temporary image
     let _ = std::process::Command::new("docker")
