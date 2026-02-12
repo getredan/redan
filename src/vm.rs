@@ -174,7 +174,8 @@ impl Vm {
 /// Build the network setup commands for a guest with static IP config.
 pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
     format!(
-        "ip link set eth0 up; \
+        "ulimit -n 65536; \
+         ip link set eth0 up; \
          ip addr add {guest_ip}/24 dev eth0; \
          ip route add default via {gateway_ip}; \
          echo 'nameserver {gateway_ip}' > /etc/resolv.conf"
