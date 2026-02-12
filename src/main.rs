@@ -74,6 +74,20 @@ enum ImageAction {
         run_commands: Vec<String>,
     },
 
+    /// Import a rootfs from a Docker image or Dockerfile
+    Import {
+        /// Image name (for redan)
+        name: String,
+
+        /// Docker image to import (e.g. ubuntu:24.04)
+        #[arg(long, conflicts_with = "dockerfile")]
+        from: Option<String>,
+
+        /// Path to a Dockerfile to build and import
+        #[arg(long, conflicts_with = "from")]
+        dockerfile: Option<String>,
+    },
+
     /// List local images
     List,
 
@@ -176,6 +190,27 @@ fn main() {
                     std::process::exit(1);
                 }
             },
+            ImageAction::Import {
+                name,
+                from,
+                dockerfile,
+            } => {
+                let result = if let Some(docker_image) = from {
+                    image::import_docker(&name, &docker_image)
+                } else if let Some(path) = dockerfile {
+                    image::import_dockerfile(&name, &path)
+                } else {
+                    eprintln!("specify --from <image> or --dockerfile <path>");
+                    std::process::exit(1);
+                };
+                match result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("import failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
         },
     }
 }

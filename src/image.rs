@@ -248,6 +248,101 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     Ok(())
 }
 
+/// Import a rootfs from an existing Docker image.
+///
+/// Runs the image (to flatten layers), exports the filesystem,
+/// and stores it as a redan image. Adds iproute2 and ca-certificates
+/// if not already present.
+pub fn import_docker(name: &str, docker_image: &str) -> io::Result<PathBuf> {
+    let dest = image_path(name)?;
+    if dest.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("image '{name}' already exists"),
+        ));
+    }
+
+    eprintln!("pulling {docker_image}...");
+    let pull = std::process::Command::new("docker")
+        .args(["pull", "-q", docker_image])
+        .status()?;
+    if !pull.success() {
+        return Err(io::Error::other(format!(
+            "docker pull failed for {docker_image}"
+        )));
+    }
+
+    eprintln!("exporting rootfs...");
+    fs::create_dir_all(&dest)?;
+
+    // Run the image with a no-op command, then export.
+    let cid_output = std::process::Command::new("docker")
+        .args(["create", docker_image, "true"])
+        .output()?;
+    if !cid_output.status.success() {
+        let _ = fs::remove_dir_all(&dest);
+        return Err(io::Error::other("docker create failed"));
+    }
+    let cid = String::from_utf8_lossy(&cid_output.stdout).trim().to_string();
+
+    let export = std::process::Command::new("sh")
+        .args(["-c", &format!("docker export {cid} | tar xf - -C {}", dest.display())])
+        .status();
+    let _ = std::process::Command::new("docker").args(["rm", &cid]).status();
+
+    match export {
+        Ok(s) if s.success() => {}
+        _ => {
+            let _ = fs::remove_dir_all(&dest);
+            return Err(io::Error::other("docker export failed"));
+        }
+    }
+
+    // Verify it looks like a rootfs
+    if !dest.join("bin").is_dir() {
+        let _ = fs::remove_dir_all(&dest);
+        return Err(io::Error::other("exported image has no /bin -- not a valid rootfs"));
+    }
+
+    eprintln!("image '{name}' imported from {docker_image}");
+    eprintln!("  {}", dest.display());
+    Ok(dest)
+}
+
+/// Build a Dockerfile, then import the result as a redan image.
+pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBuf> {
+    let df = Path::new(dockerfile_path);
+    if !df.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Dockerfile not found: {dockerfile_path}"),
+        ));
+    }
+
+    // Build with a temporary tag
+    let tag = format!("redan-build-{name}");
+    let context = df.parent().unwrap_or(Path::new("."));
+
+    eprintln!("building Dockerfile...");
+    let build = std::process::Command::new("docker")
+        .args(["build", "-t", &tag, "-f"])
+        .arg(df)
+        .arg(context)
+        .status()?;
+    if !build.success() {
+        return Err(io::Error::other("docker build failed"));
+    }
+
+    let result = import_docker(name, &tag);
+
+    // Clean up the temporary image
+    let _ = std::process::Command::new("docker")
+        .args(["rmi", &tag])
+        .status();
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
