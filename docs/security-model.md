@@ -13,9 +13,15 @@ and are injected into HTTP requests at the network layer.
 - **Secret exfiltration via unauthorized hosts**: the host allowlist
   gates injection. A request to `evil.com` carrying a GitHub placeholder
   gets the placeholder, not the token.
-- **DNS exfiltration**: all DNS queries resolve to the gateway IP.
-  No real DNS queries leave the host. Data encoded in DNS labels
-  resolves to the same gateway address.
+- **Guest DNS exfiltration**: all guest DNS queries resolve to the
+  gateway IP via synthetic DNS. No guest DNS queries leave the host.
+  However, the host proxy makes real DNS queries (via the system
+  resolver) when connecting upstream to the hostname specified in
+  TLS SNI. A guest cannot exfiltrate secrets this way (it only has
+  placeholders), but it could encode other data (source code, file
+  contents) in DNS labels of hostnames it connects to. The upstream
+  connection will fail (no server), but the DNS query reaches the
+  attacker's authoritative nameserver.
 - **Secret exposure in logs**: `Debug` formatting on `SecretBinding`
   prints `[REDACTED]`. Secrets are wrapped in `Zeroizing<String>`
   and overwritten on drop.
@@ -129,3 +135,18 @@ text. Binary framing would bypass this parsing entirely.
 Redan rejects HTTP Upgrade requests (including WebSocket) with
 HTTP 501. After a `101 Switching Protocols` response, the connection
 switches to an opaque binary protocol that bypasses HTTP scrubbing.
+
+#### Domain fronting
+
+The proxy injects secrets based on TLS SNI hostname and connects
+upstream to that hostname. The HTTP Host header is not validated
+against the SNI. On shared CDN infrastructure (Cloudflare, AWS
+CloudFront), the CDN may route based on the Host header, not SNI.
+A malicious guest could set SNI to an allowed host on a shared CDN
+and Host to an attacker-controlled origin, causing the CDN to
+forward the request (with injected secrets) to the attacker.
+
+Mitigations:
+- Use direct API endpoints, not CDN-fronted ones, in allowed_hosts
+- Avoid allowing CDN domains that host untrusted origins
+- Future: optional `--strict-host` flag to reject Host/SNI mismatches

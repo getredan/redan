@@ -377,13 +377,19 @@ fn drain_to_socket(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
         }
         let can_send = sock.send_capacity() - sock.send_queue();
         if can_send == 0 {
-            return;
+            break;
         }
         let n = remaining.len().min(can_send).min(65535);
         match sock.send_slice(&remaining[..n]) {
             Ok(sent) => conn.send_offset += sent,
-            Err(_) => return,
+            Err(_) => break,
         }
+    }
+
+    // Compact: reclaim already-sent bytes to bound memory
+    if conn.send_offset > conn.pending_send.len() / 2 && conn.send_offset > 65536 {
+        conn.pending_send.drain(..conn.send_offset);
+        conn.send_offset = 0;
     }
 }
 
@@ -527,9 +533,10 @@ fn tls_connection_thread(
     log::info!("upstream connect for {sni}");
     let (mut upstream_tcp, mut upstream_tls) = tls::connect_upstream(&sni, 443)?;
 
-    // Send request upstream
+    // Set timeouts before handshake to prevent slowloris-style stalls
     upstream_tcp.set_nonblocking(false)?;
-    upstream_tcp.set_read_timeout(Some(Duration::from_secs(120)))?;
+    upstream_tcp.set_read_timeout(Some(Duration::from_secs(30)))?;
+    upstream_tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     // Complete TLS handshake with upstream
     while upstream_tls.is_handshaking() {
@@ -541,6 +548,9 @@ fn tls_connection_thread(
             upstream_tls.process_new_packets()?;
         }
     }
+
+    // Relax timeout for data transfer (large responses may be slow)
+    upstream_tcp.set_read_timeout(Some(Duration::from_secs(120)))?;
 
     // Send request
     for chunk in request_data.chunks(16384) {
@@ -554,7 +564,7 @@ fn tls_connection_thread(
     // Read response and stream back to guest
     let max_secret_len = secrets
         .iter()
-        .map(|s| s.real_value.len())
+        .map(|s| s.real_value().len())
         .max()
         .unwrap_or(0);
     let mut scrub_overlap: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(Vec::new());
@@ -907,11 +917,11 @@ mod tests {
     // --- write_scrubbed_chunk overlap tests ---
 
     fn make_secret(placeholder: &str, real: &str) -> SecretBinding {
-        SecretBinding {
-            placeholder: placeholder.to_string(),
-            real_value: zeroize::Zeroizing::new(real.to_string()),
-            allowed_hosts: vec![],
-        }
+        SecretBinding::new_unchecked(
+            placeholder.to_string(),
+            real.to_string(),
+            vec![],
+        )
     }
 
     #[test]

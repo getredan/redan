@@ -43,11 +43,11 @@ fn end_to_end_secret_injection() {
     let placeholder = "redan_ph_test_e2e_abcd1234";
     let real_value = "ghp_FAKE_E2E_TOKEN_99999";
 
-    let secrets = vec![SecretBinding {
-        placeholder: placeholder.into(),
-        real_value: zeroize::Zeroizing::new(real_value.into()),
-        allowed_hosts: vec!["httpbin.org".into()],
-    }];
+    let secrets = vec![SecretBinding::new_unchecked(
+        placeholder.into(),
+        real_value.into(),
+        vec!["httpbin.org".into()],
+    )];
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
 

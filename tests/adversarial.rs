@@ -43,11 +43,11 @@ use redan::tls::extract_sni;
 use smoltcp::wire::Ipv4Address;
 
 fn secret(placeholder: &str, real: &str, hosts: &[&str]) -> SecretBinding {
-    SecretBinding {
-        placeholder: placeholder.to_string(),
-        real_value: zeroize::Zeroizing::new(real.to_string()),
-        allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
-    }
+    SecretBinding::new_unchecked(
+        placeholder.to_string(),
+        real.to_string(),
+        hosts.iter().map(|h| h.to_string()).collect(),
+    )
 }
 
 fn http_request(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
@@ -737,11 +737,11 @@ fn f01_placeholder_format_documented() {
         &["github.com"],
     );
     assert!(
-        binding.placeholder.starts_with("redan_ph_"),
+        binding.placeholder().starts_with("redan_ph_"),
         "placeholder must start with redan_ph_ prefix"
     );
     // Suffix should be long enough to prevent brute-force
-    let suffix = &binding.placeholder["redan_ph_".len()..];
+    let suffix = &binding.placeholder()["redan_ph_".len()..];
     assert!(
         suffix.len() >= 8,
         "placeholder suffix must be >= 8 chars for entropy"
@@ -777,7 +777,7 @@ fn f03_clone_preserves_redaction() {
     let debug = format!("{cloned:?}");
     assert!(!debug.contains("ghp_SuperSecret123"));
     // But the actual value must still work for injection
-    assert_eq!(*cloned.real_value, "ghp_SuperSecret123");
+    assert_eq!(cloned.real_value(), "ghp_SuperSecret123");
 }
 
 /// WebSocket upgrade must be rejected by the proxy. After a 101
@@ -858,11 +858,11 @@ fn h01_rewrite_request_headers() {
 fn h02_crlf_in_secret_body_does_not_corrupt_headers() {
     // Even if a secret somehow contained CRLF, inject() should not
     // split it into multiple headers. Test the injection path directly.
-    let malicious = SecretBinding {
-        placeholder: "redan_ph_evil_abc".into(),
-        real_value: zeroize::Zeroizing::new("value\r\nX-Injected: evil".into()),
-        allowed_hosts: vec!["api.example.com".into()],
-    };
+    let malicious = SecretBinding::new_unchecked(
+        "redan_ph_evil_abc".into(),
+        "value\r\nX-Injected: evil".into(),
+        vec!["api.example.com".into()],
+    );
     let req = http_request(
         "GET",
         "/api",

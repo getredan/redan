@@ -431,10 +431,10 @@ fn exec(
             Ok((env_name, binding)) => {
                 log::info!(
                     "secret: {env_name} -> placeholder {} for [{}]",
-                    binding.placeholder,
-                    binding.allowed_hosts.join(", ")
+                    binding.placeholder(),
+                    binding.allowed_hosts().join(", ")
                 );
-                secret_env.push((env_name, binding.placeholder.clone()));
+                secret_env.push((env_name, binding.placeholder().to_string()));
                 secrets.push(binding);
             }
             Err(e) => {
@@ -552,9 +552,9 @@ mod tests {
     fn parse_secret_basic() {
         let (name, binding) = parse_secret("TOKEN=secret123:api.github.com").unwrap();
         assert_eq!(name, "TOKEN");
-        assert_eq!(*binding.real_value, "secret123");
-        assert_eq!(binding.allowed_hosts, vec!["api.github.com"]);
-        assert!(binding.placeholder.starts_with("redan_ph_token_"));
+        assert_eq!(binding.real_value(), "secret123");
+        assert_eq!(binding.allowed_hosts(), &["api.github.com"]);
+        assert!(binding.placeholder().starts_with("redan_ph_token_"));
     }
 
     #[test]
@@ -563,16 +563,16 @@ mod tests {
         let (name, binding) =
             parse_secret("DB_URL=postgres://user:pass@host:5432:db.example.com").unwrap();
         assert_eq!(name, "DB_URL");
-        assert_eq!(*binding.real_value, "postgres://user:pass@host:5432");
-        assert_eq!(binding.allowed_hosts, vec!["db.example.com"]);
+        assert_eq!(binding.real_value(), "postgres://user:pass@host:5432");
+        assert_eq!(binding.allowed_hosts(), &["db.example.com"]);
     }
 
     #[test]
     fn parse_secret_multiple_hosts() {
         let (_, binding) = parse_secret("KEY=val:api.github.com, registry.npmjs.org").unwrap();
         assert_eq!(
-            binding.allowed_hosts,
-            vec!["api.github.com", "registry.npmjs.org"]
+            binding.allowed_hosts(),
+            &["api.github.com", "registry.npmjs.org"]
         );
     }
 
@@ -610,8 +610,8 @@ mod tests {
         let (name, binding) =
             parse_secret("TOKEN=vault://redan/test#github_token:api.github.com").unwrap();
         assert_eq!(name, "TOKEN");
-        assert_eq!(*binding.real_value, "ghp_test123");
-        assert_eq!(binding.allowed_hosts, vec!["api.github.com"]);
+        assert_eq!(binding.real_value(), "ghp_test123");
+        assert_eq!(binding.allowed_hosts(), &["api.github.com"]);
     }
 
     #[test]

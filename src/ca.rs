@@ -63,9 +63,20 @@ impl MitmCa {
 
     /// Mint (or return cached) leaf CertifiedKey for `hostname`.
     /// Returns None if the hostname is not a valid DNS name.
+    /// Max cached leaf certs. Prevents memory exhaustion if guest
+    /// connects to many unique hostnames.
+    const MAX_CACHE_SIZE: usize = 1024;
+
     pub fn certified_key_for(&mut self, hostname: &str) -> Option<Arc<CertifiedKey>> {
         if let Some(cached) = self.key_cache.get(hostname) {
             return Some(Arc::clone(cached));
+        }
+
+        // Evict oldest entries when cache is full (not LRU, just clear).
+        // Full LRU is overkill; clearing is rare and certs are cheap to regenerate.
+        if self.key_cache.len() >= Self::MAX_CACHE_SIZE {
+            log::info!("cert cache full ({}), clearing", Self::MAX_CACHE_SIZE);
+            self.key_cache.clear();
         }
 
         let san: SanType = hostname
@@ -80,17 +91,32 @@ impl MitmCa {
         params.not_before = now;
         params.not_after = now + time::Duration::days(1);
 
-        let leaf_key = KeyPair::generate().expect("leaf key generation failed");
+        let leaf_key = match KeyPair::generate() {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("leaf key generation failed for {hostname}: {e}");
+                return None;
+            }
+        };
         let issuer = Issuer::from_params(&self.ca_params, &self.ca_key);
-        let leaf_cert = params
-            .signed_by(&leaf_key, &issuer)
-            .expect("leaf cert signing failed");
+        let leaf_cert = match params.signed_by(&leaf_key, &issuer) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("leaf cert signing failed for {hostname}: {e}");
+                return None;
+            }
+        };
 
         let cert_der = CertificateDer::from(leaf_cert.der().to_vec());
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
 
-        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
-            .expect("signing key creation failed");
+        let signing_key = match rustls::crypto::ring::sign::any_supported_type(&key_der) {
+            Ok(k) => k,
+            Err(e) => {
+                log::error!("signing key creation failed for {hostname}: {e}");
+                return None;
+            }
+        };
         let certified = Arc::new(CertifiedKey::new(
             vec![cert_der, self.ca_cert_der.clone()],
             signing_key,

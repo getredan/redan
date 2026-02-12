@@ -33,27 +33,30 @@ use zeroize::{Zeroize, Zeroizing};
 /// secrets from lingering in freed heap memory (core dumps, swap, etc.).
 #[derive(Clone)]
 pub struct SecretBinding {
-    /// Placeholder token visible to the guest (e.g., `redan_ph_github_a1b2c3d4`)
-    pub placeholder: String,
-    /// Real secret value, only in host memory. Zeroized on drop.
-    pub real_value: Zeroizing<String>,
-    /// Hosts this secret may be injected for (e.g., `["api.github.com"]`).
-    /// Exact match only -- no wildcards, no subdomain matching. This prevents
-    /// subdomain takeover attacks.
-    pub allowed_hosts: Vec<String>,
+    placeholder: String,
+    real_value: Zeroizing<String>,
+    allowed_hosts: Vec<String>,
+}
+
+impl SecretBinding {
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+
+    pub fn real_value(&self) -> &str {
+        &self.real_value
+    }
+
+    pub fn allowed_hosts(&self) -> &[String] {
+        &self.allowed_hosts
+    }
 }
 
 impl SecretBinding {
     /// Create a binding with an auto-generated placeholder.
     ///
-    /// The placeholder embeds the env name (lowercased) and a hash suffix
-    /// for uniqueness. Not cryptographic -- the guest sees the placeholder
-    /// via env var, so it's not secret.
-    /// Create a binding with an auto-generated placeholder.
-    ///
-    /// Returns `Err` if `real_value` contains CRLF sequences -- those
-    /// would enable HTTP header injection when the proxy substitutes
-    /// the placeholder.
+    /// Returns `Err` if `real_value` contains CR or LF (header injection risk).
+    /// Placeholder embeds env name (lowercased) + hash suffix.
     pub fn new(
         env_name: &str,
         real_value: String,
@@ -89,8 +92,27 @@ impl std::fmt::Debug for SecretBinding {
         f.debug_struct("SecretBinding")
             .field("placeholder", &self.placeholder)
             .field("real_value", &"[REDACTED]")
-            .field("allowed_hosts", &self.allowed_hosts)
+            .field("allowed_hosts", &self.allowed_hosts())
             .finish()
+    }
+}
+
+impl SecretBinding {
+    /// Construct with explicit fields, bypassing CRLF validation.
+    ///
+    /// Intended for tests that need malformed inputs. Production code
+    /// should use `new()` which validates.
+    #[doc(hidden)]
+    pub fn new_unchecked(
+        placeholder: String,
+        real_value: String,
+        allowed_hosts: Vec<String>,
+    ) -> Self {
+        Self {
+            placeholder,
+            real_value: Zeroizing::new(real_value),
+            allowed_hosts,
+        }
     }
 }
 
@@ -126,7 +148,7 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
 
     for secret in secrets {
         if !secret
-            .allowed_hosts
+            .allowed_hosts()
             .iter()
             .any(|h| h.eq_ignore_ascii_case(hostname))
         {
@@ -134,8 +156,8 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
         }
         if let Some((replaced, n)) = byte_replace(
             &header_bytes,
-            secret.placeholder.as_bytes(),
-            secret.real_value.as_bytes(),
+            secret.placeholder().as_bytes(),
+            secret.real_value().as_bytes(),
         ) {
             header_bytes = replaced;
             count += n;
@@ -166,8 +188,8 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     for secret in secrets {
         if let Some((replaced, n)) = byte_replace(
             &result,
-            secret.real_value.as_bytes(),
-            secret.placeholder.as_bytes(),
+            secret.real_value().as_bytes(),
+            secret.placeholder().as_bytes(),
         ) {
             result = replaced;
             count += n;
@@ -270,11 +292,11 @@ mod tests {
     use super::*;
 
     fn test_binding() -> SecretBinding {
-        SecretBinding {
-            placeholder: "redan_ph_test_1234".into(),
-            real_value: Zeroizing::new("ghp_RealSecretValue99".into()),
-            allowed_hosts: vec!["api.github.com".into(), "httpbin.org".into()],
-        }
+        SecretBinding::new_unchecked(
+            "redan_ph_test_1234".into(),
+            "ghp_RealSecretValue99".into(),
+            vec!["api.github.com".into(), "httpbin.org".into()],
+        )
     }
 
     #[test]
