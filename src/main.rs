@@ -41,6 +41,10 @@ enum Cli {
         #[arg(long = "secret", value_name = "SPEC")]
         secrets: Vec<String>,
 
+        /// Read secret specs from a file for validation
+        #[arg(long, value_name = "PATH")]
+        secret_file: Option<String>,
+
         /// Check that a named image exists
         #[arg(long)]
         image: Option<String>,
@@ -74,11 +78,17 @@ enum Cli {
         ///
         /// Multiple hosts: separate with commas (not colons).
         /// Values may contain colons (last colon separates value from hosts).
-        /// Visible in ps output; use vault:// for sensitive environments.
+        /// Visible in ps output; prefer --secret-file for sensitive environments.
         /// The real value is replaced with a placeholder in the guest.
         /// The proxy injects the real value only for requests to allowed hosts.
         #[arg(long = "secret", value_name = "SPEC")]
         secrets: Vec<String>,
+
+        /// Read secret specs from a file (one per line, same format as --secret).
+        /// Lines starting with # are comments. Empty lines are skipped.
+        /// Avoids exposing secrets in process listings.
+        #[arg(long, value_name = "PATH")]
+        secret_file: Option<String>,
 
         /// Restrict outbound HTTPS to these hosts only.
         /// When set, the proxy rejects connections to unlisted hosts.
@@ -163,7 +173,14 @@ fn main() {
     init_logging(log_file.as_deref());
 
     match cli {
-        Cli::Doctor { secrets, image } => doctor(&secrets, image.as_deref()),
+        Cli::Doctor {
+            secrets,
+            secret_file,
+            image,
+        } => {
+            let all_secrets = collect_secret_specs(&secrets, secret_file.as_deref());
+            doctor(&all_secrets, image.as_deref());
+        }
         Cli::Exec {
             image: image_name,
             rootfs,
@@ -171,10 +188,12 @@ fn main() {
             interactive,
             timeout,
             secrets,
+            secret_file,
             allow_hosts,
             mounts,
             log_file: _,
         } => {
+            let secrets = collect_secret_specs(&secrets, secret_file.as_deref());
             let rootfs_path = match (&image_name, &rootfs) {
                 (Some(name), _) => {
                     let p = match image::image_path(name) {
@@ -452,6 +471,66 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
     Ok((env_name.to_string(), binding))
 }
 
+/// Read secret specs from a file. One spec per line, `#` comments, blank lines skipped.
+/// Opens the file once, checks permissions on the fd (no TOCTOU).
+fn read_secret_file(path: &str) -> Result<Vec<String>, String> {
+    use std::io::Read as _;
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot stat {path}: {e}"))?;
+
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    if meta.len() > 1_048_576 {
+        return Err(format!("{path}: too large (max 1MB)"));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            eprintln!(
+                "warning: {path} is accessible by other users (mode {:o}). Consider chmod 600.",
+                mode & 0o777
+            );
+        }
+    }
+
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+
+    Ok(content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect())
+}
+
+/// Merge --secret and --secret-file into a single list.
+fn collect_secret_specs(
+    cli_secrets: &[String],
+    secret_file: Option<&str>,
+) -> Vec<String> {
+    let mut specs: Vec<String> = cli_secrets.to_vec();
+    if let Some(path) = secret_file {
+        match read_secret_file(path) {
+            Ok(file_specs) => specs.extend(file_specs),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    specs
+}
+
 /// Parse mount spec: `/host/path:/guest/path` or `/host/path` (defaults to /workspace)
 fn parse_mount(spec: &str) -> (String, String) {
     if let Some((host, guest)) = spec.split_once(':') {
@@ -714,5 +793,26 @@ mod tests {
         let (host, guest) = parse_mount("/home/chris/project");
         assert_eq!(host, "/home/chris/project");
         assert_eq!(guest, "/workspace");
+    }
+
+    #[test]
+    fn read_secret_file_parses_lines() {
+        let dir = std::env::temp_dir().join("redan-test-secret-file");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.conf");
+        std::fs::write(
+            &path,
+            "# comment\nTOKEN=abc:api.github.com\n\n  KEY=xyz:host.com  \n# another comment\n",
+        )
+        .unwrap();
+        // Set restrictive permissions to avoid the warning
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let specs = read_secret_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(specs, vec!["TOKEN=abc:api.github.com", "KEY=xyz:host.com"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
