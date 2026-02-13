@@ -102,6 +102,11 @@ enum Cli {
         #[arg(long = "mount", value_name = "HOST:GUEST")]
         mounts: Vec<String>,
 
+        /// Write structured audit events to a JSON-lines file.
+        /// Records: connections, injections, scrubs, rejections.
+        #[arg(long, value_name = "PATH")]
+        audit_log: Option<String>,
+
         /// Write proxy/VM logs to a file instead of stderr.
         /// Useful in interactive mode where stderr interleaves with the TUI.
         #[arg(long, value_name = "PATH")]
@@ -191,6 +196,7 @@ fn main() {
             secret_file,
             allow_hosts,
             mounts,
+            audit_log,
             log_file: _,
         } => {
             let secrets = collect_secret_specs(&secrets, secret_file.as_deref());
@@ -230,6 +236,7 @@ fn main() {
                 &secrets,
                 &allow_hosts,
                 &mounts,
+                audit_log.as_deref(),
             );
         }
 
@@ -548,6 +555,7 @@ fn exec(
     secret_specs: &[String],
     allow_host_specs: &[String],
     mount_specs: &[String],
+    audit_log_path: Option<&str>,
 ) {
     let ca = MitmCa::generate();
     log::info!("MITM CA generated");
@@ -680,6 +688,7 @@ fn exec(
         &secrets,
         Duration::from_secs(timeout_secs),
         allowed_hosts,
+        audit_log_path,
     );
     // _raw_guard drops here, restoring terminal settings.
 }

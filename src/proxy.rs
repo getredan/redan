@@ -15,7 +15,7 @@
 /// The poll loop shuttles encrypted bytes between smoltcp TCP sockets
 /// and per-connection channels. No manual TLS state machine.
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -43,6 +43,27 @@ const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
 /// 128 connections = ~1GB stack memory worst case.
 const MAX_CONNECTIONS: usize = 128;
 
+/// Shared audit log writer. None = no audit logging.
+type AuditLog = Option<Arc<Mutex<BufWriter<std::fs::File>>>>;
+
+/// Write a JSON-lines audit event. Silently drops on error.
+fn audit(log: &AuditLog, event: &str, fields: &[(&str, &str)]) {
+    let Some(log) = log else { return };
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let mut map = serde_json::Map::new();
+    map.insert("ts".into(), serde_json::Value::String(ts));
+    map.insert("event".into(), serde_json::Value::String(event.into()));
+    for (k, v) in fields {
+        map.insert((*k).into(), serde_json::Value::String((*v).into()));
+    }
+    if let Ok(mut w) = log.lock() {
+        let _ = serde_json::to_writer(&mut *w, &serde_json::Value::Object(map));
+        let _ = writeln!(w);
+    }
+}
+
 fn reap_done(connections: &mut HashMap<SocketHandle, ProxyConn>, sockets: &mut SocketSet) {
     connections.retain(|handle, conn| {
         if conn.state == ConnState::Done {
@@ -60,11 +81,21 @@ pub fn run(
     secrets: &[SecretBinding],
     timeout: Duration,
     allowed_hosts: Option<Vec<String>>,
+    audit_log_path: Option<&str>,
 ) {
     let resolver = Arc::new(MitmCertResolver { ca: Arc::clone(&ca) });
     let server_config = ca::mitm_server_config(resolver);
     let secrets: Arc<[SecretBinding]> = secrets.into();
     let allowed_hosts: Option<Arc<[String]>> = allowed_hosts.map(|h| h.into());
+
+    let audit_log: AuditLog = audit_log_path.map(|path| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|e| panic!("cannot open audit log {path}: {e}"));
+        Arc::new(Mutex::new(BufWriter::new(file)))
+    });
 
     let mut device = VirtioNetDevice::new(host_sock);
     let config = Config::new(GATEWAY_MAC.into());
@@ -111,7 +142,7 @@ pub fn run(
         device.flush_tx();
 
         if matches!(result, PollResult::SocketStateChanged) {
-            process_dns(&mut sockets, dns_handle);
+            process_dns(&mut sockets, dns_handle, &audit_log);
 
             for backlog in &mut backlogs {
                 let mut i = 0;
@@ -131,7 +162,7 @@ pub fn run(
                             backlog.port,
                             sock.remote_endpoint()
                         );
-                        connections.insert(handle, ProxyConn::new(handle, backlog.is_tls, &server_config, &secrets, &allowed_hosts));
+                        connections.insert(handle, ProxyConn::new(handle, backlog.is_tls, &server_config, &secrets, &allowed_hosts, &audit_log));
                         backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
                     }
                     i += 1;
@@ -177,13 +208,14 @@ fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     sockets.add(sock)
 }
 
-fn process_dns(sockets: &mut SocketSet, handle: SocketHandle) {
+fn process_dns(sockets: &mut SocketSet, handle: SocketHandle, audit_log: &AuditLog) {
     let sock = sockets.get_mut::<udp::Socket>(handle);
     while sock.can_recv() {
         if let Ok((data, sender)) = sock.recv()
             && let Some((hostname, response)) = dns::handle_query(data, GATEWAY_IP)
         {
             log::info!("DNS: {hostname} -> {GATEWAY_IP}");
+            audit(audit_log, "dns", &[("hostname", &hostname)]);
             sock.send_slice(&response, sender).ok();
         }
     }
@@ -235,6 +267,7 @@ impl ProxyConn {
         server_config: &Arc<rustls::ServerConfig>,
         secrets: &Arc<[SecretBinding]>,
         allowed_hosts: &Option<Arc<[String]>>,
+        audit_log: &AuditLog,
     ) -> Self {
         let mut conn = Self {
             handle,
@@ -260,10 +293,16 @@ impl ProxyConn {
             let config = Arc::clone(server_config);
             let secrets = Arc::clone(secrets);
             let allowed = allowed_hosts.clone();
+            let alog = audit_log.clone();
             std::thread::spawn(move || {
-                if let Err(e) =
-                    tls_connection_thread(to_rx, from_tx, config, &secrets, allowed.as_deref())
-                {
+                if let Err(e) = tls_connection_thread(
+                    to_rx,
+                    from_tx,
+                    config,
+                    &secrets,
+                    allowed.as_deref(),
+                    &alog,
+                ) {
                     log::warn!("TLS connection thread error: {e}");
                 }
             });
@@ -479,6 +518,7 @@ fn tls_connection_thread(
     server_config: Arc<rustls::ServerConfig>,
     secrets: &[SecretBinding],
     allowed_hosts: Option<&[String]>,
+    audit_log: &AuditLog,
 ) -> Result<(), crate::error::Error> {
     let stream = ChannelStream::new(rx, tx.clone());
     let server_conn = rustls::ServerConnection::new(server_config)?;
@@ -533,6 +573,7 @@ fn tls_connection_thread(
             .any(|h| h.eq_ignore_ascii_case(&sni))
         {
             log::warn!("blocked connection to {sni}: not in --allow-host list");
+            audit(audit_log, "reject", &[("host", &sni), ("reason", "not_allowed")]);
             return Err(format!("host not allowed: {sni}").into());
         }
     }
@@ -570,10 +611,16 @@ fn tls_connection_thread(
     let (request_data, inject_count) = crate::secret::inject(&request, &sni, secrets);
     if inject_count > 0 {
         log::info!("SECRET INJECTED: {inject_count} replacement(s) for {sni}");
+        audit(
+            audit_log,
+            "inject",
+            &[("host", &sni), ("count", &inject_count.to_string())],
+        );
     }
 
     // Connect upstream
     log::info!("upstream connect for {sni}");
+    audit(audit_log, "connect", &[("host", &sni)]);
     let (mut upstream_tcp, mut upstream_tls) = tls::connect_upstream(&sni, 443)?;
 
     // Set timeouts before handshake to prevent slowloris-style stalls
@@ -666,6 +713,11 @@ fn tls_connection_thread(
                                 crate::secret::scrub(&headers, secrets);
                             if scrub_count > 0 {
                                 log::info!("HEADERS SCRUBBED: {scrub_count} value(s)");
+                                audit(
+                                    audit_log,
+                                    "scrub",
+                                    &[("host", &sni), ("count", &scrub_count.to_string()), ("location", "headers")],
+                                );
                             }
                             let rewritten = rewrite_connection_close(&scrubbed);
                             tls.write_all(&rewritten)?;

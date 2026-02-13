@@ -233,6 +233,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         &[],                      // no secrets during build
         Duration::from_secs(600), // 10 min timeout for builds
         None,                     // no host restriction during build
+        None,                     // no audit log during build
     );
 
     // Verify the build completed successfully by checking for the
