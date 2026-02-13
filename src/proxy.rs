@@ -90,8 +90,8 @@ pub fn run(host_sock: UnixStream, ca: Arc<Mutex<MitmCa>>, secrets: &[SecretBindi
     let start = Instant::now();
 
     loop {
-        if start.elapsed() > timeout {
-            log::info!("proxy timeout ({timeout:?})");
+        if !timeout.is_zero() && start.elapsed() > timeout {
+            log::info!("proxy timeout ({timeout:?}). Use --timeout 0 for no limit.");
             break;
         }
         if device.peer_closed && connections.is_empty() {
@@ -499,6 +499,18 @@ fn tls_connection_thread(
 
     if sni.is_empty() {
         return Err("no SNI in ClientHello".to_string().into());
+    }
+
+    // Validate SNI is a reasonable hostname. Guest controls this value;
+    // reject anything that isn't DNS-safe to prevent log injection
+    // (ANSI escapes) or weird resolver behavior.
+    if sni.len() > 253
+        || !sni
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        log::warn!("rejected invalid SNI: {:?}", sni);
+        return Err("invalid SNI hostname".to_string().into());
     }
 
     log::info!(
