@@ -34,8 +34,17 @@ fn init_logging(log_file: Option<&str>) {
 #[derive(Parser)]
 #[command(name = "redan", about = "Secure execution environment for AI agents")]
 enum Cli {
-    /// Check system prerequisites (KVM, libkrun, images)
-    Doctor,
+    /// Check system prerequisites (KVM, libkrun, images).
+    /// Pass --secret and/or --image to validate a specific configuration.
+    Doctor {
+        /// Validate a secret spec (same format as `redan exec --secret`)
+        #[arg(long = "secret", value_name = "SPEC")]
+        secrets: Vec<String>,
+
+        /// Check that a named image exists
+        #[arg(long)]
+        image: Option<String>,
+    },
 
     /// Execute a command inside a microVM
     Exec {
@@ -154,7 +163,7 @@ fn main() {
     init_logging(log_file.as_deref());
 
     match cli {
-        Cli::Doctor => doctor(),
+        Cli::Doctor { secrets, image } => doctor(&secrets, image.as_deref()),
         Cli::Exec {
             image: image_name,
             rootfs,
@@ -263,63 +272,56 @@ fn main() {
     }
 }
 
-fn doctor() {
+fn doctor(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
 
     // KVM
     let kvm_path = Path::new("/dev/kvm");
     if kvm_path.exists() {
-        // Check we can open it, not just that the node exists
         match std::fs::File::open(kvm_path) {
-            Ok(_) => println!("[ok] /dev/kvm: accessible"),
+            Ok(_) => println!("[ok]   kvm: /dev/kvm accessible"),
             Err(e) => {
-                println!("[err] /dev/kvm: exists but not accessible: {e}");
-                println!("      add your user to the kvm group: sudo usermod -aG kvm $USER");
+                println!("[err]  kvm: exists but not accessible: {e}");
+                println!("       add your user to the kvm group: sudo usermod -aG kvm $USER");
                 ok = false;
             }
         }
     } else {
-        println!("[err] /dev/kvm: not found");
-        println!("      enable KVM in your kernel or BIOS settings");
+        println!("[err]  kvm: not found");
+        println!("       enable KVM in your kernel or BIOS settings");
         ok = false;
     }
 
-    // libkrun.so
-    let libkrun_found = [
-        "/usr/lib/libkrun.so",
-        "/usr/lib64/libkrun.so",
-        "/usr/local/lib/libkrun.so",
-        "/usr/lib/x86_64-linux-gnu/libkrun.so",
-        "/usr/lib/aarch64-linux-gnu/libkrun.so",
-    ]
-    .iter()
-    .find(|p| Path::new(p).exists());
+    // Shared library search paths
+    let lib_paths = [
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/local/lib",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+    ];
 
-    match libkrun_found {
-        Some(path) => println!("[ok] libkrun: {path}"),
+    let find_lib = |name: &str| -> Option<&str> {
+        lib_paths
+            .iter()
+            .find(|dir| Path::new(&format!("{dir}/{name}")).exists())
+            .copied()
+    };
+
+    match find_lib("libkrun.so") {
+        Some(dir) => println!("[ok]   libkrun: {dir}/libkrun.so"),
         None => {
-            println!("[err] libkrun: not found in standard paths");
-            println!("      install libkrun from your distro packages");
+            println!("[err]  libkrun: not found");
+            println!("       install libkrun from your distro packages");
             ok = false;
         }
     }
 
-    // libkrunfw.so
-    let libkrunfw_found = [
-        "/usr/lib/libkrunfw.so",
-        "/usr/lib64/libkrunfw.so",
-        "/usr/local/lib/libkrunfw.so",
-        "/usr/lib/x86_64-linux-gnu/libkrunfw.so",
-        "/usr/lib/aarch64-linux-gnu/libkrunfw.so",
-    ]
-    .iter()
-    .find(|p| Path::new(p).exists());
-
-    match libkrunfw_found {
-        Some(path) => println!("[ok] libkrunfw: {path}"),
+    match find_lib("libkrunfw.so") {
+        Some(dir) => println!("[ok]   libkrunfw: {dir}/libkrunfw.so"),
         None => {
-            println!("[err] libkrunfw: not found in standard paths");
-            println!("      install libkrunfw from your distro packages");
+            println!("[err]  libkrunfw: not found");
+            println!("       install libkrunfw from your distro packages");
             ok = false;
         }
     }
@@ -327,17 +329,58 @@ fn doctor() {
     // Images
     let images = image::list();
     if images.is_empty() {
-        println!("[warn] no images found");
+        println!("[warn] images: none");
         println!(
             "       create one with: redan image create dev --packages 'curl ca-certificates'"
         );
     } else {
-        println!("[ok] images: {}", images.join(", "));
+        println!("[ok]   images: {}", images.join(", "));
     }
 
-    // Image storage path
-    let img_dir = image::image_dir();
-    println!("[info] image dir: {}", img_dir.display());
+    // Check specific image if requested
+    if let Some(name) = check_image {
+        match image::image_path(name) {
+            Ok(p) if p.exists() => println!("[ok]   image {name}: found"),
+            Ok(_) => {
+                println!("[err]  image {name}: not found");
+                println!("       run: redan image create {name} --packages '...'");
+                ok = false;
+            }
+            Err(e) => {
+                println!("[err]  image {name}: {e}");
+                ok = false;
+            }
+        }
+    }
+
+    // Validate secrets if provided. Never print secret values.
+    for spec in secret_specs {
+        // Extract env name before parsing (safe prefix before '=')
+        let env_label = spec
+            .split_once('=')
+            .map(|(name, _)| name)
+            .unwrap_or("(invalid)");
+
+        match parse_secret(spec) {
+            Ok((env_name, binding)) => {
+                let provider = if spec.contains("vault://") {
+                    "vault"
+                } else {
+                    "literal"
+                };
+                println!(
+                    "[ok]   {env_name}: {provider}  hosts: {}",
+                    binding.allowed_hosts().join(", "),
+                );
+            }
+            Err(e) => {
+                println!("[err]  {env_label}: {e}");
+                ok = false;
+            }
+        }
+    }
+
+    println!("[info] image dir: {}", image::image_dir().display());
 
     if ok {
         println!("\nready to go");
