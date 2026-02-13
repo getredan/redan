@@ -55,6 +55,11 @@ The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
 injects the real key only in HTTPS requests to `api.anthropic.com`.
 Responses are scrubbed of the real value before the agent sees them.
 
+**Note:** `--secret` values are visible in process listings (`ps`).
+For production use, prefer the Vault provider (`vault://`) or set
+secrets in environment variables and pass them through:
+`--secret "KEY=$(cat /path/to/secret):host"`.
+
 ### 3. Interactive mode
 
 ```bash

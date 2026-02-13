@@ -62,6 +62,10 @@ enum Cli {
         timeout: u64,
 
         /// Inject a secret: ENV_VAR=real_value:host1,host2
+        ///
+        /// Multiple hosts: separate with commas (not colons).
+        /// Values may contain colons (last colon separates value from hosts).
+        /// Visible in ps output; use vault:// for sensitive environments.
         /// The real value is replaced with a placeholder in the guest.
         /// The proxy injects the real value only for requests to allowed hosts.
         #[arg(long = "secret", value_name = "SPEC")]

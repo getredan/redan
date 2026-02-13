@@ -545,8 +545,13 @@ fn tls_connection_thread(
     upstream_tcp.set_read_timeout(Some(Duration::from_secs(30)))?;
     upstream_tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
 
-    // Complete TLS handshake with upstream
-    while upstream_tls.is_handshaking() {
+    // Complete TLS handshake with upstream.
+    // TCP socket has 30s read/write timeout so read_tls/write_tls
+    // won't block indefinitely. Iteration cap as defense in depth.
+    for _ in 0..1000 {
+        if !upstream_tls.is_handshaking() {
+            break;
+        }
         if upstream_tls.wants_write() {
             upstream_tls.write_tls(&mut upstream_tcp)?;
         }
@@ -554,6 +559,9 @@ fn tls_connection_thread(
             upstream_tls.read_tls(&mut upstream_tcp)?;
             upstream_tls.process_new_packets()?;
         }
+    }
+    if upstream_tls.is_handshaking() {
+        return Err("upstream TLS handshake did not complete".to_string().into());
     }
 
     // Relax timeout for data transfer (large responses may be slow)
