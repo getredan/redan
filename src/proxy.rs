@@ -54,10 +54,17 @@ fn reap_done(connections: &mut HashMap<SocketHandle, ProxyConn>, sockets: &mut S
     });
 }
 
-pub fn run(host_sock: UnixStream, ca: Arc<Mutex<MitmCa>>, secrets: &[SecretBinding], timeout: Duration) {
+pub fn run(
+    host_sock: UnixStream,
+    ca: Arc<Mutex<MitmCa>>,
+    secrets: &[SecretBinding],
+    timeout: Duration,
+    allowed_hosts: Option<Vec<String>>,
+) {
     let resolver = Arc::new(MitmCertResolver { ca: Arc::clone(&ca) });
     let server_config = ca::mitm_server_config(resolver);
     let secrets: Arc<[SecretBinding]> = secrets.into();
+    let allowed_hosts: Option<Arc<[String]>> = allowed_hosts.map(|h| h.into());
 
     let mut device = VirtioNetDevice::new(host_sock);
     let config = Config::new(GATEWAY_MAC.into());
@@ -124,7 +131,7 @@ pub fn run(host_sock: UnixStream, ca: Arc<Mutex<MitmCa>>, secrets: &[SecretBindi
                             backlog.port,
                             sock.remote_endpoint()
                         );
-                        connections.insert(handle, ProxyConn::new(handle, backlog.is_tls, &server_config, &secrets));
+                        connections.insert(handle, ProxyConn::new(handle, backlog.is_tls, &server_config, &secrets, &allowed_hosts));
                         backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
                     }
                     i += 1;
@@ -227,6 +234,7 @@ impl ProxyConn {
         is_tls: bool,
         server_config: &Arc<rustls::ServerConfig>,
         secrets: &Arc<[SecretBinding]>,
+        allowed_hosts: &Option<Arc<[String]>>,
     ) -> Self {
         let mut conn = Self {
             handle,
@@ -251,8 +259,11 @@ impl ProxyConn {
 
             let config = Arc::clone(server_config);
             let secrets = Arc::clone(secrets);
+            let allowed = allowed_hosts.clone();
             std::thread::spawn(move || {
-                if let Err(e) = tls_connection_thread(to_rx, from_tx, config, &secrets) {
+                if let Err(e) =
+                    tls_connection_thread(to_rx, from_tx, config, &secrets, allowed.as_deref())
+                {
                     log::warn!("TLS connection thread error: {e}");
                 }
             });
@@ -467,6 +478,7 @@ fn tls_connection_thread(
     tx: mpsc::SyncSender<Vec<u8>>,
     server_config: Arc<rustls::ServerConfig>,
     secrets: &[SecretBinding],
+    allowed_hosts: Option<&[String]>,
 ) -> Result<(), crate::error::Error> {
     let stream = ChannelStream::new(rx, tx.clone());
     let server_conn = rustls::ServerConnection::new(server_config)?;
@@ -511,6 +523,18 @@ fn tls_connection_thread(
     {
         log::warn!("rejected invalid SNI: {:?}", sni);
         return Err("invalid SNI hostname".to_string().into());
+    }
+
+    // Enforce outbound host allowlist. When set, only SNI hostnames
+    // in the list may be connected to upstream.
+    if let Some(hosts) = allowed_hosts {
+        if !hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&sni))
+        {
+            log::warn!("blocked connection to {sni}: not in --allow-host list");
+            return Err(format!("host not allowed: {sni}").into());
+        }
     }
 
     log::info!(

@@ -71,6 +71,13 @@ enum Cli {
         #[arg(long = "secret", value_name = "SPEC")]
         secrets: Vec<String>,
 
+        /// Restrict outbound HTTPS to these hosts only.
+        /// When set, the proxy rejects connections to unlisted hosts.
+        /// Hosts from --secret specs are included automatically.
+        /// Omit to allow all outbound connections (default).
+        #[arg(long = "allow-host", value_name = "HOST")]
+        allow_hosts: Vec<String>,
+
         /// Mount a host directory into the guest via virtio-fs.
         /// Format: /host/path:/guest/path (default guest path: /workspace)
         #[arg(long = "mount", value_name = "HOST:GUEST")]
@@ -155,6 +162,7 @@ fn main() {
             interactive,
             timeout,
             secrets,
+            allow_hosts,
             mounts,
             log_file: _,
         } => {
@@ -192,6 +200,7 @@ fn main() {
                 interactive,
                 timeout,
                 &secrets,
+                &allow_hosts,
                 &mounts,
             );
         }
@@ -415,6 +424,7 @@ fn exec(
     interactive: bool,
     timeout_secs: u64,
     secret_specs: &[String],
+    allow_host_specs: &[String],
     mount_specs: &[String],
 ) {
     let ca = MitmCa::generate();
@@ -447,6 +457,36 @@ fn exec(
             }
         }
     }
+
+    // Validate --allow-host values are hostnames, not URLs or host:port
+    for host in allow_host_specs {
+        if host.contains("://") || host.contains('/') || host.contains(':') {
+            eprintln!("error: --allow-host takes a hostname, not a URL or host:port: {host}");
+            std::process::exit(1);
+        }
+    }
+
+    // Build allowed hosts list. Combines explicit --allow-host flags
+    // with hosts from --secret specs. None means allow all outbound.
+    let allowed_hosts: Option<Vec<String>> = if allow_host_specs.is_empty() {
+        None
+    } else {
+        let mut hosts: Vec<String> = allow_host_specs
+            .iter()
+            .map(|h| h.to_ascii_lowercase())
+            .collect();
+        // Include secret hosts automatically so injection still works
+        for s in &secrets {
+            for h in s.allowed_hosts() {
+                let lower = h.to_ascii_lowercase();
+                if !hosts.contains(&lower) {
+                    hosts.push(lower);
+                }
+            }
+        }
+        log::info!("allowed hosts: {}", hosts.join(", "));
+        Some(hosts)
+    };
 
     // Parse mounts
     let mut virtiofs_mounts: Vec<(String, String)> = Vec::new();
@@ -517,6 +557,7 @@ fn exec(
         std::sync::Arc::new(std::sync::Mutex::new(ca)),
         &secrets,
         Duration::from_secs(timeout_secs),
+        allowed_hosts,
     );
     // _raw_guard drops here, restoring terminal settings.
 }
