@@ -72,12 +72,16 @@ impl VirtioNetDevice {
         // blocking mode. Safe because libkrun writes length-prefixed
         // frames atomically via the unix socketpair -- if the 4-byte
         // prefix arrived, the frame body is already in the kernel buffer.
-        self.sock.set_nonblocking(false).ok();
+        if self.sock.set_nonblocking(false).is_err() {
+            self.peer_closed = true;
+            return None;
+        }
         let mut buf = vec![0u8; frame_len];
         let result = self.sock.read_exact(&mut buf);
-        self.sock
-            .set_nonblocking(true)
-            .expect("failed to restore nonblocking mode on virtio-net socket");
+        if self.sock.set_nonblocking(true).is_err() {
+            self.peer_closed = true;
+            return None;
+        }
         result.ok().map(|_| buf)
     }
 }

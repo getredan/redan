@@ -57,8 +57,8 @@ enum Cli {
         #[arg(long, short = 'i')]
         interactive: bool,
 
-        /// Proxy timeout in seconds
-        #[arg(long, default_value = "60")]
+        /// Proxy timeout in seconds (0 = no timeout, wait for VM exit)
+        #[arg(long, default_value = "3600")]
         timeout: u64,
 
         /// Inject a secret: ENV_VAR=real_value:host1,host2

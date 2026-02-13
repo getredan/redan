@@ -423,10 +423,20 @@ impl Read for ChannelStream {
             return Ok(n);
         }
 
-        // Block until more data arrives
-        self.read_buf = self.rx.recv().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "channel closed")
-        })?;
+        // Block until more data arrives, with timeout to prevent
+        // a malicious guest from holding threads indefinitely with
+        // partial TLS handshakes.
+        self.read_buf = self
+            .rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "channel read timeout")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    std::io::Error::new(std::io::ErrorKind::ConnectionReset, "channel closed")
+                }
+            })?;
         self.read_pos = 0;
 
         let n = buf.len().min(self.read_buf.len());

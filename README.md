@@ -7,8 +7,9 @@
 
 Redan runs AI coding agents inside [libkrun] microVMs with network-layer
 secret injection. Agents get a real dev environment -- node, git, python,
-your project files -- but can't see host credentials, can't reach hosts
-you didn't allow, and never observe the real values of injected secrets.
+your project files -- but can't see host credentials and never observe
+the real values of injected secrets. Secrets are only injected for hosts
+you explicitly allow.
 
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
