@@ -5,6 +5,7 @@ use clap::Parser;
 use env_logger::Env;
 
 use redan::ca::MitmCa;
+use redan::config;
 use redan::image;
 use redan::proxy;
 use redan::secret::SecretBinding;
@@ -70,9 +71,10 @@ enum Cli {
         #[arg(long, short = 'i')]
         interactive: bool,
 
-        /// Proxy timeout in seconds (0 = no timeout, wait for VM exit)
-        #[arg(long, default_value = "3600")]
-        timeout: u64,
+        /// Proxy timeout in seconds (0 = no timeout, wait for VM exit).
+        /// Default: 3600
+        #[arg(long)]
+        timeout: Option<u64>,
 
         /// Inject a secret: ENV_VAR=real_value:host1,host2
         ///
@@ -199,7 +201,41 @@ fn main() {
             audit_log,
             log_file: _,
         } => {
-            let secrets = collect_secret_specs(&secrets, secret_file.as_deref());
+            // Load config file (redan.toml), merge with CLI args.
+            // CLI flags take precedence over config file values.
+            let cfg = config::find_and_load();
+            if let Some((path, _)) = &cfg {
+                log::info!("loaded config from {}", path.display());
+            }
+            let cfg = cfg.map(|(_, c)| c).unwrap_or_default();
+
+            // Merge secrets: CLI + --secret-file + config file
+            let mut all_secrets = collect_secret_specs(&secrets, secret_file.as_deref());
+            for s in &cfg.secret {
+                all_secrets.push(s.to_spec());
+            }
+            let secrets = all_secrets;
+
+            // Merge image: CLI > config
+            let image_name = image_name.or(cfg.image.as_ref().and_then(|i| i.name.clone()));
+            let rootfs = rootfs.or(cfg.image.as_ref().and_then(|i| i.rootfs.clone()));
+
+            // Merge exec options: CLI > config
+            let cfg_exec = cfg.exec.unwrap_or_default();
+            let command = command.or(cfg_exec.command);
+            let timeout = timeout.or(cfg_exec.timeout).unwrap_or(3600);
+            let interactive = if interactive { true } else { cfg_exec.interactive.unwrap_or(false) };
+            let audit_log = audit_log.or(cfg_exec.audit_log);
+
+            // Merge allow_hosts: CLI + config
+            let mut allow_hosts = allow_hosts;
+            allow_hosts.extend(cfg.allow_host);
+
+            // Merge mounts: CLI + config
+            let mut mounts = mounts;
+            for m in &cfg.mount {
+                mounts.push(m.to_spec());
+            }
             let rootfs_path = match (&image_name, &rootfs) {
                 (Some(name), _) => {
                     let p = match image::image_path(name) {
