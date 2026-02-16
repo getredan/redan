@@ -4,6 +4,7 @@ pub mod dns;
 pub mod error;
 pub mod ffi;
 pub mod image;
+pub mod session;
 pub mod net;
 pub mod provider;
 pub mod proxy;

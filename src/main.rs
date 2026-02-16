@@ -9,6 +9,7 @@ use redan::config;
 use redan::image;
 use redan::proxy;
 use redan::secret::SecretBinding;
+use redan::session;
 use redan::vm;
 
 fn init_logging(log_file: Option<&str>) {
@@ -92,10 +93,9 @@ enum Cli {
         #[arg(long, value_name = "PATH")]
         secret_file: Option<String>,
 
-        /// Restrict outbound HTTPS to these hosts only.
-        /// When set, the proxy rejects connections to unlisted hosts.
+        /// Allow outbound HTTPS to a host. Default: deny all.
         /// Hosts from --secret specs are included automatically.
-        /// Omit to allow all outbound connections (default).
+        /// Use '*' to allow all outbound connections.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
 
@@ -120,6 +120,13 @@ enum Cli {
         #[command(subcommand)]
         action: ImageAction,
     },
+
+    /// List recent sessions
+    #[command(name = "sessions")]
+    Sessions,
+
+    /// Generate a redan.toml for the current project
+    Init,
 }
 
 #[derive(clap::Subcommand)]
@@ -211,31 +218,26 @@ fn main() {
 
             // Merge secrets: CLI + --secret-file + config file
             let mut all_secrets = collect_secret_specs(&secrets, secret_file.as_deref());
-            for s in &cfg.secret {
-                all_secrets.push(s.to_spec());
-            }
+            all_secrets.extend(cfg.secret_specs());
             let secrets = all_secrets;
 
             // Merge image: CLI > config
-            let image_name = image_name.or(cfg.image.as_ref().and_then(|i| i.name.clone()));
-            let rootfs = rootfs.or(cfg.image.as_ref().and_then(|i| i.rootfs.clone()));
+            let image_name = image_name.or(cfg.image.clone());
+            let rootfs = rootfs.or(cfg.rootfs.clone());
 
             // Merge exec options: CLI > config
-            let cfg_exec = cfg.exec.unwrap_or_default();
-            let command = command.or(cfg_exec.command);
-            let timeout = timeout.or(cfg_exec.timeout).unwrap_or(3600);
-            let interactive = if interactive { true } else { cfg_exec.interactive.unwrap_or(false) };
-            let audit_log = audit_log.or(cfg_exec.audit_log);
+            let command = command.or(cfg.command.clone());
+            let timeout = timeout.or(cfg.timeout).unwrap_or(3600);
+            let interactive = if interactive { true } else { cfg.interactive.unwrap_or(false) };
+            let audit_log = audit_log.or(cfg.audit_log.clone());
 
             // Merge allow_hosts: CLI + config
             let mut allow_hosts = allow_hosts;
-            allow_hosts.extend(cfg.allow_host);
+            allow_hosts.extend(cfg.network.allow.clone());
 
             // Merge mounts: CLI + config
             let mut mounts = mounts;
-            for m in &cfg.mount {
-                mounts.push(m.to_spec());
-            }
+            mounts.extend(cfg.mount_specs());
             let rootfs_path = match (&image_name, &rootfs) {
                 (Some(name), _) => {
                     let p = match image::image_path(name) {
@@ -273,6 +275,7 @@ fn main() {
                 &allow_hosts,
                 &mounts,
                 audit_log.as_deref(),
+                image_name.as_deref(),
             );
         }
 
@@ -331,7 +334,135 @@ fn main() {
                 }
             }
         },
+        Cli::Init => init(),
+        Cli::Sessions => {
+            let sessions = session::list_sessions();
+            if sessions.is_empty() {
+                eprintln!("no sessions. Run: redan exec --image <name> --command <cmd>");
+            } else {
+                for s in &sessions {
+                    let status = match &s.status {
+                        session::SessionStatus::Running => "running",
+                        session::SessionStatus::Finished => "finished",
+                        session::SessionStatus::Failed => "failed",
+                    };
+                    println!(
+                        "{}  {:10} {:20} {}",
+                        s.id,
+                        status,
+                        s.image.as_deref().unwrap_or("-"),
+                        s.started_at,
+                    );
+                }
+            }
+        }
     }
+}
+
+fn init() {
+    if Path::new("redan.toml").exists() {
+        eprintln!("redan.toml already exists. Remove it first to re-initialize.");
+        std::process::exit(1);
+    }
+
+    let mut cfg = config::Config::default();
+
+    // Detect project type and suggest defaults
+    let detections = detect_project();
+    if detections.is_empty() {
+        eprintln!("no project type detected. Generating minimal config.");
+    } else {
+        for d in &detections {
+            eprintln!("detected: {}", d.description);
+            for host in &d.hosts {
+                if !cfg.network.allow.contains(host) {
+                    cfg.network.allow.push(host.clone());
+                }
+            }
+        }
+    }
+
+    // Default mount: current directory
+    cfg.mount.insert(
+        "workspace".into(),
+        config::MountConfig {
+            source: ".".into(),
+            target: Some("/workspace".into()),
+        },
+    );
+
+    // Write
+    let toml = cfg.to_toml().unwrap_or_else(|e| {
+        eprintln!("error serializing config: {e}");
+        std::process::exit(1);
+    });
+
+    // Add header comment (toml crate doesn't support comments)
+    let content = format!(
+        "# redan.toml -- generated by `redan init`\n\
+         # See: https://github.com/getredan/redan\n\
+         \n\
+         {toml}"
+    );
+
+    std::fs::write("redan.toml", &content).unwrap_or_else(|e| {
+        eprintln!("cannot write redan.toml: {e}");
+        std::process::exit(1);
+    });
+
+    eprintln!("wrote redan.toml");
+    eprintln!("\nnext steps:");
+    eprintln!("  1. Add secrets:  [secrets.API_KEY]");
+    eprintln!("  2. Set image:    image = \"claude-code\"");
+    eprintln!("  3. Run:          redan exec");
+}
+
+struct ProjectDetection {
+    description: String,
+    hosts: Vec<String>,
+}
+
+fn detect_project() -> Vec<ProjectDetection> {
+    let mut detections = Vec::new();
+
+    // Detection table: file -> description + hosts
+    let rules: &[(&str, &str, &[&str])] = &[
+        ("package.json", "Node.js (package.json)", &["registry.npmjs.org"]),
+        ("yarn.lock", "Yarn (yarn.lock)", &["registry.yarnpkg.com", "registry.npmjs.org"]),
+        ("pnpm-lock.yaml", "pnpm (pnpm-lock.yaml)", &["registry.npmjs.org"]),
+        ("requirements.txt", "Python (requirements.txt)", &["pypi.org", "files.pythonhosted.org"]),
+        ("pyproject.toml", "Python (pyproject.toml)", &["pypi.org", "files.pythonhosted.org"]),
+        ("Cargo.toml", "Rust (Cargo.toml)", &["crates.io", "static.crates.io"]),
+        ("go.mod", "Go (go.mod)", &["proxy.golang.org", "sum.golang.org"]),
+        ("Gemfile", "Ruby (Gemfile)", &["rubygems.org"]),
+        ("composer.json", "PHP (composer.json)", &["repo.packagist.org"]),
+    ];
+
+    for (file, desc, hosts) in rules {
+        if Path::new(file).exists() {
+            detections.push(ProjectDetection {
+                description: desc.to_string(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            });
+        }
+    }
+
+    // Git remote detection
+    if let Ok(config) = std::fs::read_to_string(".git/config") {
+        if config.contains("github.com") {
+            detections.push(ProjectDetection {
+                description: "GitHub remote".into(),
+                hosts: vec!["github.com".into(), "api.github.com".into()],
+            });
+        } else if config.contains("gitlab.com") {
+            detections.push(ProjectDetection {
+                description: "GitLab remote".into(),
+                hosts: vec!["gitlab.com".into()],
+            });
+        }
+    }
+
+    detections
 }
 
 fn doctor(secret_specs: &[String], check_image: Option<&str>) {
@@ -592,7 +723,23 @@ fn exec(
     allow_host_specs: &[String],
     mount_specs: &[String],
     audit_log_path: Option<&str>,
+    image_name: Option<&str>,
 ) {
+    // Create session
+    let session_id = session::new_id();
+    let mut meta = session::SessionMeta::new(&session_id, image_name, Some(command));
+    if let Err(e) = meta.save() {
+        log::warn!("cannot save session metadata: {e}");
+    }
+    log::info!("session {session_id} started");
+
+    // Use session audit log if no explicit --audit-log
+    let session_audit = session::audit_log_path(&session_id);
+    let audit_log_path = audit_log_path
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| session_audit.to_string_lossy().into_owned());
+    let audit_log_path = Some(audit_log_path.as_str());
+
     let ca = MitmCa::generate();
     log::info!("MITM CA generated");
 
@@ -626,16 +773,19 @@ fn exec(
 
     // Validate --allow-host values are hostnames, not URLs or host:port
     for host in allow_host_specs {
+        if host == "*" {
+            continue; // wildcard = allow all
+        }
         if host.contains("://") || host.contains('/') || host.contains(':') {
             eprintln!("error: --allow-host takes a hostname, not a URL or host:port: {host}");
             std::process::exit(1);
         }
     }
 
-    // Build allowed hosts list. Combines explicit --allow-host flags
-    // with hosts from --secret specs. None means allow all outbound.
-    let allowed_hosts: Option<Vec<String>> = if allow_host_specs.is_empty() {
-        None
+    // Default-deny: all outbound HTTPS blocked unless explicitly allowed.
+    // --allow-host '*' or network.allow = ["*"] opts out to allow all.
+    let allowed_hosts: Option<Vec<String>> = if allow_host_specs.iter().any(|h| h == "*") {
+        None // explicit wildcard = allow all
     } else {
         let mut hosts: Vec<String> = allow_host_specs
             .iter()
@@ -650,7 +800,11 @@ fn exec(
                 }
             }
         }
-        log::info!("allowed hosts: {}", hosts.join(", "));
+        if hosts.is_empty() {
+            log::info!("network: default-deny (no hosts allowed)");
+        } else {
+            log::info!("allowed hosts: {}", hosts.join(", "));
+        }
         Some(hosts)
     };
 
@@ -726,6 +880,9 @@ fn exec(
         allowed_hosts,
         audit_log_path,
     );
+
+    meta.finish(true);
+    log::info!("session {session_id} finished");
     // _raw_guard drops here, restoring terminal settings.
 }
 
