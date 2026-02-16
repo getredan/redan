@@ -341,6 +341,7 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
 
     eprintln!("building Dockerfile...");
     let build = std::process::Command::new("docker")
+        .env("DOCKER_BUILDKIT", "1")
         .args(["build", "-t", &tag, "-f"])
         .arg(df)
         .arg(context)
