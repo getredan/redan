@@ -12,6 +12,31 @@ use redan::secret::SecretBinding;
 use redan::session;
 use redan::vm;
 
+fn redan_banner() -> &'static str {
+    // Red banner with dim taglines. Only colorize if stderr is a terminal.
+    // clap prints help to stdout, so check that.
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        "\x1b[1;31m\
+  ┌─────────────────────────────────────┐\n\
+  │                                     │\n\
+  │   ██████  ███████ ██████   █████    │\n\
+  │   ██   ██ ██      ██   ██ ██   ██   │\n\
+  │   ██████  █████   ██   ██ ███████   │\n\
+  │   ██   ██ ██      ██   ██ ██   ██   │\n\
+  │   ██   ██ ███████ ██████  ██   ██   │\n\
+  │                                     │\n\
+  │\x1b[0m\x1b[2m   Run AI agents in microVMs.        \x1b[0m\x1b[1;31m│\n\
+  │\x1b[0m\x1b[2m   Your code stays yours.            \x1b[0m\x1b[1;31m│\n\
+  │                                     │\n\
+  └─────────────────────────────────────┘\x1b[0m\n"
+    } else {
+        "\
+  redan -- secure execution environment for AI agents\n\
+  Run AI agents in microVMs. Your code stays yours.\n"
+    }
+}
+
 fn init_logging(log_file: Option<&str>) {
     let env = Env::default().default_filter_or("info");
     let mut builder = env_logger::Builder::from_env(env);
@@ -34,10 +59,13 @@ fn init_logging(log_file: Option<&str>) {
 }
 
 #[derive(Parser)]
-#[command(name = "redan", about = "Secure execution environment for AI agents")]
+#[command(
+    name = "redan",
+    about = redan_banner(),
+    long_about = redan_banner(),
+)]
 enum Cli {
-    /// Check system prerequisites (KVM, libkrun, images).
-    /// Pass --secret and/or --image to validate a specific configuration.
+    /// Check system readiness and validate configs
     Doctor {
         /// Validate a secret spec (same format as `redan exec --secret`)
         #[arg(long = "secret", value_name = "SPEC")]
@@ -52,7 +80,7 @@ enum Cli {
         image: Option<String>,
     },
 
-    /// Execute a command inside a microVM
+    /// Run a command in a sandboxed microVM
     Exec {
         /// Named image to use (from `redan image create`).
         /// Mutually exclusive with --rootfs.
@@ -115,17 +143,17 @@ enum Cli {
         log_file: Option<String>,
     },
 
-    /// Manage rootfs images
+    /// Build and manage VM images
     Image {
         #[command(subcommand)]
         action: ImageAction,
     },
 
-    /// List recent sessions
+    /// Show past execution sessions
     #[command(name = "sessions")]
     Sessions,
 
-    /// Generate a redan.toml for the current project
+    /// Set up redan for the current project
     Init,
 }
 
