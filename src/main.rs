@@ -54,7 +54,28 @@ fn init_logging(log_file: Option<&str>) {
         }
         builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
-    builder.init();
+    // try_init: no-op if logger already initialized (interactive re-init)
+    let _ = builder.try_init();
+}
+
+/// Redirect stderr (and thus all log output) to a file.
+/// Used when interactive mode auto-routes logs after initial setup.
+fn redirect_logs_to_file(path: &std::path::Path) {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("cannot open log file {}: {e}", path.display());
+            return;
+        }
+    };
+    use std::os::unix::io::AsRawFd;
+    unsafe {
+        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+    }
 }
 
 #[derive(Parser)]
@@ -1168,8 +1189,8 @@ fn exec(
     // interleave with the guest TUI.
     if interactive {
         let log_path = session::session_dir(&session_id).join("redan.log");
-        init_logging(Some(log_path.to_str().unwrap_or("redan.log")));
         eprintln!("session: {session_id} (logs: {})", log_path.display());
+        redirect_logs_to_file(&log_path);
     }
 
     // Use session audit log if no explicit --audit-log
