@@ -152,6 +152,16 @@ enum Cli {
     #[command(name = "sessions")]
     Sessions,
 
+    /// Show logs from the most recent (or specified) session
+    Logs {
+        /// Session ID (default: most recent)
+        session: Option<String>,
+
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+    },
+
     /// Set up redan for the current project
     Init {
         /// Include Claude Code in the generated devcontainer
@@ -377,6 +387,7 @@ fn main() {
                 }
             }
         },
+        Cli::Logs { session, follow } => logs(session.as_deref(), follow),
         Cli::Init { claude } => init(claude),
         Cli::Sessions => {
             let sessions = session::list_sessions();
@@ -397,6 +408,48 @@ fn main() {
                         s.started_at,
                     );
                 }
+            }
+        }
+    }
+}
+
+fn logs(session_id: Option<&str>, follow: bool) {
+    // Find the session to show
+    let id = if let Some(id) = session_id {
+        id.to_string()
+    } else {
+        // Most recent session
+        let sessions = session::list_sessions();
+        match sessions.first() {
+            Some(s) => s.id.clone(),
+            None => {
+                eprintln!("no sessions found");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let log_path = session::session_dir(&id).join("redan.log");
+    if !log_path.exists() {
+        eprintln!("no logs for session {id} ({})", log_path.display());
+        std::process::exit(1);
+    }
+
+    if follow {
+        // tail -f
+        let status = std::process::Command::new("tail")
+            .args(["-f", log_path.to_str().unwrap_or("")])
+            .status();
+        if let Err(e) = status {
+            eprintln!("cannot run tail: {e}");
+            std::process::exit(1);
+        }
+    } else {
+        match std::fs::read_to_string(&log_path) {
+            Ok(content) => print!("{content}"),
+            Err(e) => {
+                eprintln!("cannot read {}: {e}", log_path.display());
+                std::process::exit(1);
             }
         }
     }
