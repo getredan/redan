@@ -172,18 +172,22 @@ enum ImageAction {
         run_commands: Vec<String>,
     },
 
-    /// Import a rootfs from a Docker image or Dockerfile
+    /// Import a rootfs from a Docker image, Dockerfile, or devcontainer
     Import {
         /// Image name (for redan)
         name: String,
 
         /// Docker image to import (e.g. ubuntu:24.04)
-        #[arg(long, conflicts_with = "dockerfile")]
+        #[arg(long, conflicts_with_all = ["dockerfile", "devcontainer"])]
         from: Option<String>,
 
         /// Path to a Dockerfile to build and import
-        #[arg(long, conflicts_with = "from")]
+        #[arg(long, conflicts_with_all = ["from", "devcontainer"])]
         dockerfile: Option<String>,
+
+        /// Path to a devcontainer.json (or directory containing one)
+        #[arg(long, conflicts_with_all = ["from", "dockerfile"])]
+        devcontainer: Option<String>,
     },
 
     /// List local images
@@ -347,13 +351,17 @@ fn main() {
                 name,
                 from,
                 dockerfile,
+                devcontainer,
             } => {
                 let result = if let Some(docker_image) = from {
                     image::import_docker(&name, &docker_image)
                 } else if let Some(path) = dockerfile {
                     image::import_dockerfile(&name, &path)
+                } else if let Some(path) = devcontainer {
+                    let config_path = resolve_devcontainer_path(&path);
+                    image::import_devcontainer(&name, &config_path)
                 } else {
-                    eprintln!("specify --from <image> or --dockerfile <path>");
+                    eprintln!("specify --from <image>, --dockerfile <path>, or --devcontainer <path>");
                     std::process::exit(1);
                 };
                 match result {
@@ -462,13 +470,23 @@ fn init() {
     eprintln!("wrote redan.toml");
     let img = cfg.image.as_deref().unwrap_or("dev");
 
-    // Check if a Dockerfile exists for a better suggestion
+    // Find the best image build suggestion
+    let devcontainer_path = detections.iter().find_map(|d| d.devcontainer.as_deref());
     let dockerfile = ["Dockerfile", "dockerfile", "Containerfile"]
         .iter()
-        .find(|f| Path::new(f).exists());
+        .find(|f| Path::new(f).exists())
+        .copied();
 
     eprintln!("\nnext steps:");
-    if let Some(df) = dockerfile {
+    if let Some(dc) = devcontainer_path {
+        let dc_dir = Path::new(dc)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".into());
+        eprintln!("  1. Build the image from your devcontainer:");
+        eprintln!("     redan image import {img} --devcontainer {dc_dir}");
+    } else if let Some(df) = dockerfile {
         eprintln!("  1. Build the image from your {df}:");
         eprintln!("     redan image import {img} --dockerfile {df}");
     } else {
@@ -488,6 +506,8 @@ struct ProjectDetection {
     description: String,
     hosts: Vec<String>,
     packages: Vec<String>,
+    /// If set, this detection found a devcontainer config at this path
+    devcontainer: Option<String>,
 }
 
 fn detect_project() -> Vec<ProjectDetection> {
@@ -552,13 +572,36 @@ fn detect_project() -> Vec<ProjectDetection> {
                 description: desc.to_string(),
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 packages: pkgs.iter().map(|p| p.to_string()).collect(),
+                devcontainer: None,
             });
         }
     }
 
-    // Dockerfile detection
+    // Devcontainer detection (takes priority over Dockerfile)
+    let devcontainer_paths = [
+        ".devcontainer/devcontainer.json",
+        ".devcontainer.json",
+    ];
+    let mut found_devcontainer = false;
+    for path in devcontainer_paths {
+        if Path::new(path).exists() {
+            detections.push(ProjectDetection {
+                description: format!("devcontainer ({path})"),
+                hosts: vec![],
+                packages: vec![],
+                devcontainer: Some(path.to_string()),
+            });
+            found_devcontainer = true;
+            break;
+        }
+    }
+
+    // Dockerfile detection (skip if devcontainer found -- it has its own Dockerfile)
     let dockerfile_names = ["Dockerfile", "dockerfile", "Containerfile"];
     for name in dockerfile_names {
+        if found_devcontainer {
+            break;
+        }
         if Path::new(name).exists() {
             let mut pkgs = Vec::new();
             if let Ok(content) = std::fs::read_to_string(name) {
@@ -577,6 +620,7 @@ fn detect_project() -> Vec<ProjectDetection> {
                 description: format!("Dockerfile ({name})"),
                 hosts: vec![],
                 packages: pkgs,
+                devcontainer: None,
             });
             break; // only detect one
         }
@@ -589,12 +633,14 @@ fn detect_project() -> Vec<ProjectDetection> {
                 description: "GitHub remote".into(),
                 hosts: vec!["github.com".into(), "api.github.com".into()],
                 packages: vec![],
+                devcontainer: None,
             });
         } else if config.contains("gitlab.com") {
             detections.push(ProjectDetection {
                 description: "GitLab remote".into(),
                 hosts: vec!["gitlab.com".into()],
                 packages: vec![],
+                devcontainer: None,
             });
         }
     }
@@ -629,6 +675,28 @@ fn parse_dockerfile_packages(line: &str) -> Vec<String> {
         }
     }
     packages
+}
+
+/// Resolve a --devcontainer argument to a devcontainer.json path.
+/// Accepts a direct path to the JSON file, or a directory containing it.
+fn resolve_devcontainer_path(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_file() {
+        return path.to_string();
+    }
+    // Try standard locations within the directory
+    let candidates = [
+        p.join("devcontainer.json"),
+        p.join(".devcontainer/devcontainer.json"),
+        p.join(".devcontainer.json"),
+    ];
+    for c in &candidates {
+        if c.is_file() {
+            return c.to_string_lossy().into_owned();
+        }
+    }
+    // Fall through -- import_devcontainer will report the error
+    path.to_string()
 }
 
 fn doctor(secret_specs: &[String], check_image: Option<&str>) {

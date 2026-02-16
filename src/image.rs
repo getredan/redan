@@ -361,6 +361,128 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
     result
 }
 
+/// Build from a devcontainer.json spec.
+///
+/// Supports two modes:
+/// - `build.dockerfile`: builds from the referenced Dockerfile
+/// - `image`: imports the specified Docker image
+///
+/// The devcontainer.json can live at `.devcontainer/devcontainer.json`
+/// or `.devcontainer.json` (per the spec).
+pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf> {
+    let config_file = Path::new(config_path);
+    if !config_file.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("devcontainer config not found: {config_path}"),
+        ));
+    }
+
+    let raw = fs::read_to_string(config_file)?;
+    // Strip JSON comments (// and /* */) since devcontainer.json allows them
+    let stripped = strip_jsonc_comments(&raw);
+    let config: serde_json::Value = serde_json::from_str(&stripped)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {e}")))?;
+
+    let config_dir = config_file.parent().unwrap_or(Path::new("."));
+
+    // Try build.dockerfile first, then image
+    if let Some(build) = config.get("build") {
+        if let Some(dockerfile) = build.get("dockerfile").and_then(|v| v.as_str()) {
+            let context = build
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let df_path = config_dir.join(dockerfile);
+            let ctx_path = config_dir.join(context);
+
+            eprintln!("building from devcontainer: {dockerfile}");
+            let tag = format!("redan-build-{name}");
+            let build_status = std::process::Command::new("docker")
+                .env("DOCKER_BUILDKIT", "1")
+                .args(["build", "-t", &tag, "-f"])
+                .arg(&df_path)
+                .arg(&ctx_path)
+                .status()?;
+            if !build_status.success() {
+                return Err(io::Error::other("docker build failed"));
+            }
+
+            let result = import_docker_inner(name, &tag, false);
+            let _ = std::process::Command::new("docker")
+                .args(["rmi", &tag])
+                .status();
+            return result;
+        }
+    }
+
+    if let Some(image) = config.get("image").and_then(|v| v.as_str()) {
+        eprintln!("importing devcontainer image: {image}");
+        return import_docker(name, image);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "devcontainer.json has no 'build.dockerfile' or 'image' field",
+    ))
+}
+
+/// Strip // and /* */ comments from JSONC (JSON with Comments).
+/// Devcontainer.json allows comments per the spec.
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    out.push(next);
+                    chars.next();
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next(); // consume second /
+                // Skip until end of line
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next(); // consume *
+                // Skip until */
+                loop {
+                    match chars.next() {
+                        Some('*') if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +511,36 @@ mod tests {
         let err = image_path("../../etc/passwd").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("invalid image name"));
+    }
+
+    #[test]
+    fn strip_jsonc_line_comments() {
+        let input = r#"{
+            // This is a comment
+            "image": "ubuntu" // inline
+        }"#;
+        let stripped = strip_jsonc_comments(input);
+        let v: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(v["image"], "ubuntu");
+    }
+
+    #[test]
+    fn strip_jsonc_block_comments() {
+        let input = r#"{
+            /* multi
+               line */
+            "image": "alpine"
+        }"#;
+        let stripped = strip_jsonc_comments(input);
+        let v: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(v["image"], "alpine");
+    }
+
+    #[test]
+    fn strip_jsonc_preserves_strings() {
+        let input = r#"{"url": "https://example.com // not a comment"}"#;
+        let stripped = strip_jsonc_comments(input);
+        let v: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(v["url"], "https://example.com // not a comment");
     }
 }
