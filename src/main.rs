@@ -453,6 +453,8 @@ fn init(claude: bool) {
             "api.anthropic.com",
             "statsig.anthropic.com",
             "sentry.io",
+            "platform.claude.com",
+            "raw.githubusercontent.com",
         ];
         for host in claude_hosts {
             if !cfg.network.allow.contains(&host.to_string()) {
@@ -1108,6 +1110,14 @@ fn exec(
         log::warn!("cannot save session metadata: {e}");
     }
     log::info!("session {session_id} started");
+
+    // In interactive mode, redirect logs to a file so they don't
+    // interleave with the guest TUI.
+    if interactive {
+        let log_path = session::session_dir(&session_id).join("redan.log");
+        init_logging(Some(log_path.to_str().unwrap_or("redan.log")));
+        eprintln!("session: {session_id} (logs: {})", log_path.display());
+    }
 
     // Use session audit log if no explicit --audit-log
     let session_audit = session::audit_log_path(&session_id);
