@@ -446,29 +446,31 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
             return Err(io::Error::other("docker compose build failed"));
         }
 
-        // docker compose tags as <project>-<service>, but we can also
-        // read the image name from `docker compose images`
-        let images_output = std::process::Command::new("docker")
+        // Find the image name compose assigned. Try `docker compose config`
+        // to read the resolved image name for the service.
+        let config_output = std::process::Command::new("docker")
             .args(["compose", "-f"])
             .arg(&compose_path)
-            .args(["images", service, "--format", "{{.Image}}"])
+            .args(["config", "--images"])
             .output()?;
-        let compose_image = String::from_utf8_lossy(&images_output.stdout)
-            .trim()
+        let config_images = String::from_utf8_lossy(&config_output.stdout);
+        // config --images lists one image per line. For locally-built
+        // services, compose uses <project>-<service> as the tag.
+        // Pick the first line that contains the service name.
+        let source_tag = config_images
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| l.contains(service))
+            .unwrap_or("")
             .to_string();
 
-        // If compose didn't give us an image name, try the conventional tag
-        let source_tag = if compose_image.is_empty() {
-            // Compose uses the directory name as project name
-            let project = compose_path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "default".into());
-            format!("{project}-{service}")
-        } else {
-            compose_image
-        };
+        if source_tag.is_empty() {
+            return Err(io::Error::other(format!(
+                "cannot determine image name for service '{service}' after build"
+            )));
+        }
+
+        eprintln!("importing image: {source_tag}");
 
         // Tag it so we can export with a known name, then import
         let _ = std::process::Command::new("docker")
