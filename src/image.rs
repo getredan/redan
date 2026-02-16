@@ -421,9 +421,70 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
         return import_docker(name, image);
     }
 
+    // dockerComposeFile: build the target service with docker compose
+    if let Some(compose_file) = config.get("dockerComposeFile").and_then(|v| v.as_str()) {
+        let service = config
+            .get("service")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "devcontainer.json has 'dockerComposeFile' but no 'service'",
+                )
+            })?;
+        let compose_path = config_dir.join(compose_file);
+        let tag = format!("redan-build-{name}");
+
+        eprintln!("building from docker-compose: {compose_file} (service: {service})");
+        let build_status = std::process::Command::new("docker")
+            .env("DOCKER_BUILDKIT", "1")
+            .args(["compose", "-f"])
+            .arg(&compose_path)
+            .args(["build", service])
+            .status()?;
+        if !build_status.success() {
+            return Err(io::Error::other("docker compose build failed"));
+        }
+
+        // docker compose tags as <project>-<service>, but we can also
+        // read the image name from `docker compose images`
+        let images_output = std::process::Command::new("docker")
+            .args(["compose", "-f"])
+            .arg(&compose_path)
+            .args(["images", service, "--format", "{{.Image}}"])
+            .output()?;
+        let compose_image = String::from_utf8_lossy(&images_output.stdout)
+            .trim()
+            .to_string();
+
+        // If compose didn't give us an image name, try the conventional tag
+        let source_tag = if compose_image.is_empty() {
+            // Compose uses the directory name as project name
+            let project = compose_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "default".into());
+            format!("{project}-{service}")
+        } else {
+            compose_image
+        };
+
+        // Tag it so we can export with a known name, then import
+        let _ = std::process::Command::new("docker")
+            .args(["tag", &source_tag, &tag])
+            .status();
+
+        let result = import_docker_inner(name, &tag, false);
+        let _ = std::process::Command::new("docker")
+            .args(["rmi", &tag])
+            .status();
+        return result;
+    }
+
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        "devcontainer.json has no 'build.dockerfile' or 'image' field",
+        "devcontainer.json has no 'build.dockerfile', 'image', or 'dockerComposeFile' field",
     ))
 }
 
