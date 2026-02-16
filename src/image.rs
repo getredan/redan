@@ -337,7 +337,7 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
 
     // Build with a temporary tag
     let tag = format!("redan-build-{name}");
-    let context = df.parent().unwrap_or(Path::new("."));
+    let context = df.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
 
     eprintln!("building Dockerfile...");
     let build = std::process::Command::new("docker")
