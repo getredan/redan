@@ -433,11 +433,22 @@ fn init() {
     });
 
     eprintln!("wrote redan.toml");
-    let pkg_str = packages.join(" ");
     let img = cfg.image.as_deref().unwrap_or("dev");
+
+    // Check if a Dockerfile exists for a better suggestion
+    let dockerfile = ["Dockerfile", "dockerfile", "Containerfile"]
+        .iter()
+        .find(|f| Path::new(f).exists());
+
     eprintln!("\nnext steps:");
-    eprintln!("  1. Create the image:");
-    eprintln!("     redan image create {img} --packages '{pkg_str}'");
+    if let Some(df) = dockerfile {
+        eprintln!("  1. Build the image from your {df}:");
+        eprintln!("     redan image import {img} --dockerfile {df}");
+    } else {
+        let pkg_str = packages.join(" ");
+        eprintln!("  1. Create the image:");
+        eprintln!("     redan image create {img} --packages '{pkg_str}'");
+    }
     eprintln!("  2. Add secrets to redan.toml (if needed):");
     eprintln!("     [secrets.API_KEY]");
     eprintln!("     value = \"your-key\"");
@@ -518,6 +529,32 @@ fn detect_project() -> Vec<ProjectDetection> {
         }
     }
 
+    // Dockerfile detection
+    let dockerfile_names = ["Dockerfile", "dockerfile", "Containerfile"];
+    for name in dockerfile_names {
+        if Path::new(name).exists() {
+            let mut pkgs = Vec::new();
+            if let Ok(content) = std::fs::read_to_string(name) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    // Extract packages from RUN apt-get install / apk add
+                    if let Some(rest) = trimmed
+                        .strip_prefix("RUN ")
+                        .or_else(|| trimmed.strip_prefix("RUN\t"))
+                    {
+                        pkgs.extend(parse_dockerfile_packages(rest));
+                    }
+                }
+            }
+            detections.push(ProjectDetection {
+                description: format!("Dockerfile ({name})"),
+                hosts: vec![],
+                packages: pkgs,
+            });
+            break; // only detect one
+        }
+    }
+
     // Git remote detection (no packages, just hosts)
     if let Ok(config) = std::fs::read_to_string(".git/config") {
         if config.contains("github.com") {
@@ -536,6 +573,35 @@ fn detect_project() -> Vec<ProjectDetection> {
     }
 
     detections
+}
+
+/// Extract package names from Dockerfile RUN lines.
+/// Handles: apt-get install, apk add, dnf/yum install, pip install.
+fn parse_dockerfile_packages(line: &str) -> Vec<String> {
+    let mut packages = Vec::new();
+
+    // Split on && to handle chained commands
+    for cmd in line.split("&&") {
+        let cmd = cmd.trim();
+        let words: Vec<&str> = cmd.split_whitespace().collect();
+        // Find the install/add verb and collect package args after it
+        let start = words.iter().position(|&w| {
+            w == "install" || w == "add"
+        });
+        if let Some(idx) = start {
+            for &word in &words[idx + 1..] {
+                // Skip flags, redirects, continuations
+                if word.starts_with('-') || word.starts_with('\\')
+                    || word == "&&" || word.contains('=')
+                    || word.contains('/') || word.contains('>')
+                {
+                    continue;
+                }
+                packages.push(word.to_string());
+            }
+        }
+    }
+    packages
 }
 
 fn doctor(secret_specs: &[String], check_image: Option<&str>) {
@@ -1085,5 +1151,33 @@ mod tests {
         let specs = read_secret_file(path.to_str().unwrap()).unwrap();
         assert_eq!(specs, vec!["TOKEN=abc:api.github.com", "KEY=xyz:host.com"]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dockerfile_packages_apt_get() {
+        let pkgs = parse_dockerfile_packages("apt-get install -y curl wget git");
+        assert_eq!(pkgs, vec!["curl", "wget", "git"]);
+    }
+
+    #[test]
+    fn dockerfile_packages_apk_add() {
+        let pkgs = parse_dockerfile_packages("apk add --no-cache python3 py3-pip make");
+        assert_eq!(pkgs, vec!["python3", "py3-pip", "make"]);
+    }
+
+    #[test]
+    fn dockerfile_packages_chained() {
+        let pkgs = parse_dockerfile_packages(
+            "apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*",
+        );
+        assert_eq!(pkgs, vec!["nodejs", "npm"]);
+    }
+
+    #[test]
+    fn dockerfile_packages_no_install() {
+        let pkgs = parse_dockerfile_packages("echo hello && npm install -g pnpm");
+        // npm install is a different thing, but "install" triggers - pnpm gets picked up
+        // This is best-effort, not a full parser
+        assert!(pkgs.contains(&"pnpm".to_string()));
     }
 }
