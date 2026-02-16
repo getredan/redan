@@ -83,7 +83,9 @@ pub fn run(
     allowed_hosts: Option<Vec<String>>,
     audit_log_path: Option<&str>,
 ) {
-    let resolver = Arc::new(MitmCertResolver { ca: Arc::clone(&ca) });
+    let resolver = Arc::new(MitmCertResolver {
+        ca: Arc::clone(&ca),
+    });
     let server_config = ca::mitm_server_config(resolver);
     let secrets: Arc<[SecretBinding]> = secrets.into();
     let allowed_hosts: Option<Arc<[String]>> = allowed_hosts.map(|h| h.into());
@@ -162,7 +164,17 @@ pub fn run(
                             backlog.port,
                             sock.remote_endpoint()
                         );
-                        connections.insert(handle, ProxyConn::new(handle, backlog.is_tls, &server_config, &secrets, &allowed_hosts, &audit_log));
+                        connections.insert(
+                            handle,
+                            ProxyConn::new(
+                                handle,
+                                backlog.is_tls,
+                                &server_config,
+                                &secrets,
+                                &allowed_hosts,
+                                &audit_log,
+                            ),
+                        );
                         backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
                     }
                     i += 1;
@@ -177,9 +189,9 @@ pub fn run(
         }
         reap_done(&mut connections, &mut sockets);
 
-        let has_pending = connections.values().any(|c| {
-            matches!(c.state, ConnState::Shuttling | ConnState::Draining)
-        });
+        let has_pending = connections
+            .values()
+            .any(|c| matches!(c.state, ConnState::Shuttling | ConnState::Draining));
 
         if has_pending {
             std::thread::sleep(Duration::from_micros(100));
@@ -187,7 +199,6 @@ pub fn run(
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-
 }
 
 struct ListenBacklog {
@@ -498,9 +509,9 @@ impl Read for ChannelStream {
 
 impl Write for ChannelStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.tx.send(buf.to_vec()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "channel closed")
-        })?;
+        self.tx
+            .send(buf.to_vec())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "channel closed"))?;
         Ok(buf.len())
     }
 
@@ -543,11 +554,7 @@ fn tls_connection_thread(
     }
 
     // Get SNI from the completed handshake
-    let sni = tls
-        .conn
-        .server_name()
-        .unwrap_or("")
-        .to_string();
+    let sni = tls.conn.server_name().unwrap_or("").to_string();
 
     if sni.is_empty() {
         return Err("no SNI in ClientHello".to_string().into());
@@ -568,12 +575,13 @@ fn tls_connection_thread(
     // Enforce outbound host allowlist. When set, only SNI hostnames
     // in the list may be connected to upstream.
     if let Some(hosts) = allowed_hosts {
-        if !hosts
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case(&sni))
-        {
+        if !hosts.iter().any(|h| h.eq_ignore_ascii_case(&sni)) {
             log::warn!("blocked connection to {sni}: not in --allow-host list");
-            audit(audit_log, "reject", &[("host", &sni), ("reason", "not_allowed")]);
+            audit(
+                audit_log,
+                "reject",
+                &[("host", &sni), ("reason", "not_allowed")],
+            );
             return Err(format!("host not allowed: {sni}").into());
         }
     }
@@ -709,14 +717,17 @@ fn tls_connection_thread(
                                     .unwrap_or("")
                             );
 
-                            let (scrubbed, scrub_count) =
-                                crate::secret::scrub(&headers, secrets);
+                            let (scrubbed, scrub_count) = crate::secret::scrub(&headers, secrets);
                             if scrub_count > 0 {
                                 log::info!("HEADERS SCRUBBED: {scrub_count} value(s)");
                                 audit(
                                     audit_log,
                                     "scrub",
-                                    &[("host", &sni), ("count", &scrub_count.to_string()), ("location", "headers")],
+                                    &[
+                                        ("host", &sni),
+                                        ("count", &scrub_count.to_string()),
+                                        ("location", "headers"),
+                                    ],
                                 );
                             }
                             let rewritten = rewrite_connection_close(&scrubbed);
@@ -1021,11 +1032,7 @@ mod tests {
     // --- write_scrubbed_chunk overlap tests ---
 
     fn make_secret(placeholder: &str, real: &str) -> SecretBinding {
-        SecretBinding::new_unchecked(
-            placeholder.to_string(),
-            real.to_string(),
-            vec![],
-        )
+        SecretBinding::new_unchecked(placeholder.to_string(), real.to_string(), vec![])
     }
 
     #[test]
@@ -1033,12 +1040,25 @@ mod tests {
         let secret = make_secret("ph", "SECRET123");
         let mut out = Vec::new();
         let mut overlap = Vec::new();
-        write_scrubbed_chunk(&mut out, b"prefix SECRET123 suffix", &[secret], 9, &mut overlap).unwrap();
+        write_scrubbed_chunk(
+            &mut out,
+            b"prefix SECRET123 suffix",
+            &[secret],
+            9,
+            &mut overlap,
+        )
+        .unwrap();
         // Flush remaining overlap
         out.extend_from_slice(&overlap);
         let text = String::from_utf8_lossy(&out);
-        assert!(text.contains("ph"), "secret should be replaced with placeholder");
-        assert!(!text.contains("SECRET123"), "secret must not appear in output");
+        assert!(
+            text.contains("ph"),
+            "secret should be replaced with placeholder"
+        );
+        assert!(
+            !text.contains("SECRET123"),
+            "secret must not appear in output"
+        );
     }
 
     #[test]
@@ -1047,11 +1067,21 @@ mod tests {
         let mut out = Vec::new();
         let mut overlap = Vec::new();
         // Split secret: "ABCDE" in chunk 1, "FGHIJ" in chunk 2
-        write_scrubbed_chunk(&mut out, b"prefix ABCDE", &[secret.clone()], 10, &mut overlap).unwrap();
+        write_scrubbed_chunk(
+            &mut out,
+            b"prefix ABCDE",
+            &[secret.clone()],
+            10,
+            &mut overlap,
+        )
+        .unwrap();
         write_scrubbed_chunk(&mut out, b"FGHIJ suffix", &[secret], 10, &mut overlap).unwrap();
         out.extend_from_slice(&overlap);
         let text = String::from_utf8_lossy(&out);
-        assert!(!text.contains("ABCDEFGHIJ"), "secret spanning chunks must be scrubbed");
+        assert!(
+            !text.contains("ABCDEFGHIJ"),
+            "secret spanning chunks must be scrubbed"
+        );
         assert!(text.contains("ph"), "placeholder should appear");
     }
 
@@ -1083,7 +1113,14 @@ mod tests {
         let mut out = Vec::new();
         let mut overlap = Vec::new();
         let max_len = 5;
-        write_scrubbed_chunk(&mut out, b"got ALPHA and BETA here", &[s1, s2], max_len, &mut overlap).unwrap();
+        write_scrubbed_chunk(
+            &mut out,
+            b"got ALPHA and BETA here",
+            &[s1, s2],
+            max_len,
+            &mut overlap,
+        )
+        .unwrap();
         out.extend_from_slice(&overlap);
         let text = String::from_utf8_lossy(&out);
         assert!(!text.contains("ALPHA"), "first secret must be scrubbed");

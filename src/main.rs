@@ -228,7 +228,11 @@ fn main() {
             // Merge exec options: CLI > config
             let command = command.or(cfg.command.clone());
             let timeout = timeout.or(cfg.timeout).unwrap_or(3600);
-            let interactive = if interactive { true } else { cfg.interactive.unwrap_or(false) };
+            let interactive = if interactive {
+                true
+            } else {
+                cfg.interactive.unwrap_or(false)
+            };
             let audit_log = audit_log.or(cfg.audit_log.clone());
 
             // Merge allow_hosts: CLI + config
@@ -427,15 +431,47 @@ fn detect_project() -> Vec<ProjectDetection> {
 
     // Detection table: file -> description + hosts
     let rules: &[(&str, &str, &[&str])] = &[
-        ("package.json", "Node.js (package.json)", &["registry.npmjs.org"]),
-        ("yarn.lock", "Yarn (yarn.lock)", &["registry.yarnpkg.com", "registry.npmjs.org"]),
-        ("pnpm-lock.yaml", "pnpm (pnpm-lock.yaml)", &["registry.npmjs.org"]),
-        ("requirements.txt", "Python (requirements.txt)", &["pypi.org", "files.pythonhosted.org"]),
-        ("pyproject.toml", "Python (pyproject.toml)", &["pypi.org", "files.pythonhosted.org"]),
-        ("Cargo.toml", "Rust (Cargo.toml)", &["crates.io", "static.crates.io"]),
-        ("go.mod", "Go (go.mod)", &["proxy.golang.org", "sum.golang.org"]),
+        (
+            "package.json",
+            "Node.js (package.json)",
+            &["registry.npmjs.org"],
+        ),
+        (
+            "yarn.lock",
+            "Yarn (yarn.lock)",
+            &["registry.yarnpkg.com", "registry.npmjs.org"],
+        ),
+        (
+            "pnpm-lock.yaml",
+            "pnpm (pnpm-lock.yaml)",
+            &["registry.npmjs.org"],
+        ),
+        (
+            "requirements.txt",
+            "Python (requirements.txt)",
+            &["pypi.org", "files.pythonhosted.org"],
+        ),
+        (
+            "pyproject.toml",
+            "Python (pyproject.toml)",
+            &["pypi.org", "files.pythonhosted.org"],
+        ),
+        (
+            "Cargo.toml",
+            "Rust (Cargo.toml)",
+            &["crates.io", "static.crates.io"],
+        ),
+        (
+            "go.mod",
+            "Go (go.mod)",
+            &["proxy.golang.org", "sum.golang.org"],
+        ),
         ("Gemfile", "Ruby (Gemfile)", &["rubygems.org"]),
-        ("composer.json", "PHP (composer.json)", &["repo.packagist.org"]),
+        (
+            "composer.json",
+            "PHP (composer.json)",
+            &["repo.packagist.org"],
+        ),
     ];
 
     for (file, desc, hosts) in rules {
@@ -650,8 +686,7 @@ fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
 fn read_secret_file(path: &str) -> Result<Vec<String>, String> {
     use std::io::Read as _;
 
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
     let meta = file
         .metadata()
         .map_err(|e| format!("cannot stat {path}: {e}"))?;
@@ -688,10 +723,7 @@ fn read_secret_file(path: &str) -> Result<Vec<String>, String> {
 }
 
 /// Merge --secret and --secret-file into a single list.
-fn collect_secret_specs(
-    cli_secrets: &[String],
-    secret_file: Option<&str>,
-) -> Vec<String> {
+fn collect_secret_specs(cli_secrets: &[String], secret_file: Option<&str>) -> Vec<String> {
     let mut specs: Vec<String> = cli_secrets.to_vec();
     if let Some(path) = secret_file {
         match read_secret_file(path) {

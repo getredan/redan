@@ -95,8 +95,7 @@ impl SessionMeta {
         let path = dir.join("meta.json");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("cannot serialize session meta: {e}"))?;
-        std::fs::write(&path, json)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
     /// Update status and re-save.

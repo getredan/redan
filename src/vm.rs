@@ -156,13 +156,7 @@ impl Vm {
         // Set guest RLIMIT_NOFILE via libkrun (before init runs).
         // Format per libkrun.h: "RESOURCE=RLIM_CUR:RLIM_MAX"
         // RLIMIT_NOFILE = 7 on Linux (libc::RLIMIT_NOFILE).
-        let nofile = CString::new(format!(
-            "{}={}:{}",
-            libc::RLIMIT_NOFILE,
-            65536,
-            65536
-        ))
-        .unwrap();
+        let nofile = CString::new(format!("{}={}:{}", libc::RLIMIT_NOFILE, 65536, 65536)).unwrap();
         let rlimits: Vec<*const i8> = vec![nofile.as_ptr(), std::ptr::null()];
         let ret = unsafe { ffi::krun_set_rlimits(ctx_id, rlimits.as_ptr()) };
         if ret < 0 {

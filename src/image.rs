@@ -290,12 +290,19 @@ fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result
         let _ = fs::remove_dir_all(&dest);
         return Err(io::Error::other("docker create failed"));
     }
-    let cid = String::from_utf8_lossy(&cid_output.stdout).trim().to_string();
+    let cid = String::from_utf8_lossy(&cid_output.stdout)
+        .trim()
+        .to_string();
 
     let export = std::process::Command::new("sh")
-        .args(["-c", &format!("docker export {cid} | tar xf - -C {}", dest.display())])
+        .args([
+            "-c",
+            &format!("docker export {cid} | tar xf - -C {}", dest.display()),
+        ])
         .status();
-    let _ = std::process::Command::new("docker").args(["rm", &cid]).status();
+    let _ = std::process::Command::new("docker")
+        .args(["rm", &cid])
+        .status();
 
     match export {
         Ok(s) if s.success() => {}
@@ -308,7 +315,9 @@ fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result
     // Verify it looks like a rootfs
     if !dest.join("bin").is_dir() {
         let _ = fs::remove_dir_all(&dest);
-        return Err(io::Error::other("exported image has no /bin -- not a valid rootfs"));
+        return Err(io::Error::other(
+            "exported image has no /bin -- not a valid rootfs",
+        ));
     }
 
     eprintln!("image '{name}' imported from {docker_image}");

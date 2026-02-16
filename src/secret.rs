@@ -63,10 +63,9 @@ impl SecretBinding {
         allowed_hosts: Vec<String>,
     ) -> Result<Self, crate::error::Error> {
         if real_value.contains('\r') || real_value.contains('\n') {
-            return Err(format!(
-                "secret for {env_name} contains CR/LF (header injection risk)"
-            )
-            .into());
+            return Err(
+                format!("secret for {env_name} contains CR/LF (header injection risk)").into(),
+            );
         }
 
         use std::collections::hash_map::DefaultHasher;

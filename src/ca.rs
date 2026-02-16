@@ -79,10 +79,7 @@ impl MitmCa {
             self.key_cache.clear();
         }
 
-        let san: SanType = hostname
-            .try_into()
-            .map(SanType::DnsName)
-            .ok()?;
+        let san: SanType = hostname.try_into().map(SanType::DnsName).ok()?;
         let mut params = CertificateParams::default();
         params.distinguished_name.push(DnType::CommonName, hostname);
         params.subject_alt_names = vec![san];
@@ -137,10 +134,7 @@ pub struct MitmCertResolver {
 }
 
 impl ResolvesServerCert for MitmCertResolver {
-    fn resolve(
-        &self,
-        client_hello: rustls::server::ClientHello<'_>,
-    ) -> Option<Arc<CertifiedKey>> {
+    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let sni = client_hello.server_name()?;
         let mut ca = self.ca.lock().ok()?;
         ca.certified_key_for(sni)
