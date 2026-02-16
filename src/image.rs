@@ -446,21 +446,24 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
             return Err(io::Error::other("docker compose build failed"));
         }
 
-        // Find the image name compose assigned. Try `docker compose config`
-        // to read the resolved image name for the service.
+        // Find the image name compose assigned to the service.
         let config_output = std::process::Command::new("docker")
             .args(["compose", "-f"])
             .arg(&compose_path)
-            .args(["config", "--images"])
+            .args(["config", "--format", "json"])
             .output()?;
-        let config_images = String::from_utf8_lossy(&config_output.stdout);
-        // config --images lists one image per line. For locally-built
-        // services, compose uses <project>-<service> as the tag.
-        // Pick the first line that contains the service name.
-        let source_tag = config_images
-            .lines()
-            .map(|l| l.trim())
-            .find(|l| l.contains(service))
+        let config_json: serde_json::Value =
+            serde_json::from_slice(&config_output.stdout).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("cannot parse compose config: {e}"),
+                )
+            })?;
+        let source_tag = config_json
+            .get("services")
+            .and_then(|s| s.get(service))
+            .and_then(|s| s.get("image"))
+            .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
