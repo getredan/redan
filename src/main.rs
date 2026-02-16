@@ -535,8 +535,47 @@ fn init(claude: bool) {
     }
 }
 
+const DOCKERFILE_TEMPLATE: &str = r#"FROM {{ base_image }}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    {% for pkg in apt_packages %}{{ pkg }}{% if not loop.last %} \
+    {% endif %}{% endfor %} \
+    && rm -rf /var/lib/apt/lists/*
+{% if needs_node %}
+# Node.js (for Claude Code)
+ARG NODE_MAJOR=22
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+{% endif %}
+# Claude Code
+RUN npm install -g @anthropic-ai/claude-code
+{% if has_python %}
+# uv (Python package manager)
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /usr/local/bin/
+{% endif %}
+# Non-root user
+RUN groupadd --gid 1000 dev \
+    && useradd --uid 1000 --gid 1000 -m -s /bin/bash dev \
+    && mkdir -p /workspace && chown dev:dev /workspace
+
+USER dev
+WORKDIR /workspace
+CMD ["claude"]
+"#;
+
+const DEVCONTAINER_JSON_TEMPLATE: &str = r#"{
+  "name": "redan-claude",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "../.."
+  },
+  "remoteUser": "dev",
+  "workspaceFolder": "/workspace"
+}
+"#;
+
 /// Generate a .devcontainer/redan/ directory with a Dockerfile for Claude Code.
-/// Layers detected project dependencies on top of a base image.
 fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String]) {
     let dir = Path::new(".devcontainer/redan");
     if dir.exists() {
@@ -548,8 +587,8 @@ fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String
         std::process::exit(1);
     });
 
-    // Detect base image from project type
     let has = |name: &str| detections.iter().any(|d| d.description.contains(name));
+
     let base_image = if has("Python") {
         "python:3.13-trixie"
     } else if has("Node") || has("Yarn") || has("pnpm") {
@@ -564,82 +603,43 @@ fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String
         "debian:trixie"
     };
 
-    // Build apt-get install line from detected packages
-    let mut apt_pkgs: Vec<&str> = vec![
-        "git", "curl", "ca-certificates", "make", "build-essential",
+    let mut apt_packages: Vec<&str> = vec![
+        "build-essential", "ca-certificates", "curl", "git", "make",
     ];
-    // Add Node.js install if base isn't already node
-    let needs_node = !base_image.starts_with("node:");
+    for pkg in packages {
+        match pkg.as_str() {
+            // Skip names handled by base image or node install
+            "nodejs" | "npm" | "python3" | "py3-pip" | "cargo" | "rust"
+            | "go" | "ruby" | "php" | "composer" => {}
+            other if !apt_packages.contains(&other) => apt_packages.push(other),
+            _ => {}
+        }
+    }
+    apt_packages.sort();
+    apt_packages.dedup();
 
-    // Extra apt packages from project detection (filter to known apt names)
-    let apt_extras: Vec<&str> = packages
-        .iter()
-        .filter_map(|p| match p.as_str() {
-            // Map Alpine/generic package names to Debian equivalents
-            "nodejs" | "npm" | "python3" | "py3-pip" | "cargo" | "rust" | "go" | "ruby"
-            | "php" | "composer" => None, // handled by base image or node install
-            other => Some(other),
+    let mut env = minijinja::Environment::new();
+    env.add_template("Dockerfile", DOCKERFILE_TEMPLATE).unwrap();
+
+    let dockerfile = env
+        .get_template("Dockerfile")
+        .unwrap()
+        .render(minijinja::context! {
+            base_image,
+            apt_packages,
+            needs_node => !base_image.starts_with("node:"),
+            has_python => has("Python"),
         })
-        .collect();
-    apt_pkgs.extend(apt_extras);
-    apt_pkgs.sort();
-    apt_pkgs.dedup();
-
-    let apt_line = apt_pkgs.join(" \\\n    ");
-
-    let node_install = if needs_node {
-        "\n\
-# Node.js (for Claude Code)\n\
-ARG NODE_MAJOR=22\n\
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \\\n\
-    && apt-get install -y --no-install-recommends nodejs \\\n\
-    && rm -rf /var/lib/apt/lists/*\n"
-    } else {
-        ""
-    };
-
-    let uv_copy = if has("Python") {
-        "\n# uv (Python package manager)\nCOPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /usr/local/bin/\n"
-    } else {
-        ""
-    };
-
-    let dockerfile = format!(
-        "FROM {base_image}\n\
-         \n\
-         RUN apt-get update && apt-get install -y --no-install-recommends \\\n\
-         \x20   {apt_line} \\\n\
-         \x20   && rm -rf /var/lib/apt/lists/*\n\
-         {node_install}\
-         # Claude Code\n\
-         RUN npm install -g @anthropic-ai/claude-code\n\
-         {uv_copy}\
-         # Non-root user\n\
-         RUN groupadd --gid 1000 dev \\\n\
-         \x20   && useradd --uid 1000 --gid 1000 -m -s /bin/bash dev \\\n\
-         \x20   && mkdir -p /workspace && chown dev:dev /workspace\n\
-         \n\
-         USER dev\n\
-         WORKDIR /workspace\n\
-         CMD [\"claude\"]\n"
-    );
-
-    let devcontainer_json = r#"{
-  "name": "redan-claude",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": "../.."
-  },
-  "remoteUser": "dev",
-  "workspaceFolder": "/workspace"
-}
-"#;
+        .unwrap_or_else(|e| {
+            eprintln!("template error: {e}");
+            std::process::exit(1);
+        });
 
     std::fs::write(dir.join("Dockerfile"), &dockerfile).unwrap_or_else(|e| {
         eprintln!("cannot write Dockerfile: {e}");
         std::process::exit(1);
     });
-    std::fs::write(dir.join("devcontainer.json"), devcontainer_json).unwrap_or_else(|e| {
+    std::fs::write(dir.join("devcontainer.json"), DEVCONTAINER_JSON_TEMPLATE).unwrap_or_else(|e| {
         eprintln!("cannot write devcontainer.json: {e}");
         std::process::exit(1);
     });
