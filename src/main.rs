@@ -26,7 +26,7 @@ fn redan_banner() -> &'static str {
   │   ██   ██ ██      ██   ██ ██   ██ ██  ██ ██      │\n\
   │   ██   ██ ███████ ██████  ██   ██ ██   ████      │\n\
   │                                                  │\n\
-  │\x1b[0m\x1b[2m   Run AI agents in microVMs. Your code stays yours.\x1b[0m\x1b[1;31m│\n\
+  │\x1b[0m\x1b[2m Run AI agents in microVMs. Your code stays yours.\x1b[0m\x1b[1;31m│\n\
   │                                                  │\n\
   └──────────────────────────────────────────────────┘\x1b[0m\n"
     } else {
