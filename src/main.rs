@@ -153,7 +153,11 @@ enum Cli {
     Sessions,
 
     /// Set up redan for the current project
-    Init,
+    Init {
+        /// Include Claude Code in the generated devcontainer
+        #[arg(long)]
+        claude: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -373,7 +377,7 @@ fn main() {
                 }
             }
         },
-        Cli::Init => init(),
+        Cli::Init { claude } => init(claude),
         Cli::Sessions => {
             let sessions = session::list_sessions();
             if sessions.is_empty() {
@@ -398,7 +402,7 @@ fn main() {
     }
 }
 
-fn init() {
+fn init(claude: bool) {
     if Path::new("redan.toml").exists() {
         eprintln!("redan.toml already exists. Remove it first to re-initialize.");
         std::process::exit(1);
@@ -438,7 +442,29 @@ fn init() {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "dev".into());
     cfg.image = Some(image_name);
-    cfg.command = Some("/bin/sh".into());
+
+    // --claude: generate devcontainer with Claude Code, wire up config
+    if claude {
+        cfg.command = Some("claude".into());
+        cfg.interactive = Some(true);
+
+        // Claude Code API hosts
+        let claude_hosts = [
+            "api.anthropic.com",
+            "statsig.anthropic.com",
+            "sentry.io",
+        ];
+        for host in claude_hosts {
+            if !cfg.network.allow.contains(&host.to_string()) {
+                cfg.network.allow.push(host.into());
+            }
+        }
+
+        // Generate the devcontainer
+        write_claude_devcontainer(&detections, &packages);
+    } else {
+        cfg.command = Some("/bin/sh".into());
+    }
 
     // Default mount: current directory
     cfg.mount.insert(
@@ -449,7 +475,7 @@ fn init() {
         },
     );
 
-    // Write
+    // Write redan.toml
     let toml = cfg.to_toml().unwrap_or_else(|e| {
         eprintln!("error serializing config: {e}");
         std::process::exit(1);
@@ -470,36 +496,156 @@ fn init() {
     eprintln!("wrote redan.toml");
     let img = cfg.image.as_deref().unwrap_or("dev");
 
-    // Find the best image build suggestion
-    let devcontainer_path = detections.iter().find_map(|d| d.devcontainer.as_deref());
-    let dockerfile = ["Dockerfile", "dockerfile", "Containerfile"]
-        .iter()
-        .find(|f| Path::new(f).exists())
-        .copied();
-
     eprintln!("\nnext steps:");
-    if let Some(dc) = devcontainer_path {
-        let dc_dir = Path::new(dc)
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| ".".into());
-        eprintln!("  1. Build the image from your devcontainer:");
-        eprintln!("     redan image import {img} --devcontainer {dc_dir}");
-    } else if let Some(df) = dockerfile {
-        eprintln!("  1. Build the image from your {df}:");
-        eprintln!("     redan image import {img} --dockerfile {df}");
+    if claude {
+        eprintln!("  1. Build the image:");
+        eprintln!("     redan image import {img} --devcontainer .devcontainer/redan");
+        eprintln!("  2. Run:");
+        eprintln!("     redan exec");
     } else {
-        let pkg_str = packages.join(" ");
-        eprintln!("  1. Create the image:");
-        eprintln!("     redan image create {img} --packages '{pkg_str}'");
+        // Find the best image build suggestion
+        let devcontainer_path = detections.iter().find_map(|d| d.devcontainer.as_deref());
+        let dockerfile = ["Dockerfile", "dockerfile", "Containerfile"]
+            .iter()
+            .find(|f| Path::new(f).exists())
+            .copied();
+
+        if let Some(dc) = devcontainer_path {
+            let dc_dir = Path::new(dc)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".into());
+            eprintln!("  1. Build the image from your devcontainer:");
+            eprintln!("     redan image import {img} --devcontainer {dc_dir}");
+        } else if let Some(df) = dockerfile {
+            eprintln!("  1. Build the image from your {df}:");
+            eprintln!("     redan image import {img} --dockerfile {df}");
+        } else {
+            let pkg_str = packages.join(" ");
+            eprintln!("  1. Create the image:");
+            eprintln!("     redan image create {img} --packages '{pkg_str}'");
+        }
+        eprintln!("  2. Add secrets to redan.toml (if needed):");
+        eprintln!("     [secrets.API_KEY]");
+        eprintln!("     value = \"your-key\"");
+        eprintln!("     hosts = [\"api.example.com\"]");
+        eprintln!("  3. Run:");
+        eprintln!("     redan exec");
     }
-    eprintln!("  2. Add secrets to redan.toml (if needed):");
-    eprintln!("     [secrets.API_KEY]");
-    eprintln!("     value = \"your-key\"");
-    eprintln!("     hosts = [\"api.example.com\"]");
-    eprintln!("  3. Run:");
-    eprintln!("     redan exec");
+}
+
+/// Generate a .devcontainer/redan/ directory with a Dockerfile for Claude Code.
+/// Layers detected project dependencies on top of a base image.
+fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String]) {
+    let dir = Path::new(".devcontainer/redan");
+    if dir.exists() {
+        eprintln!(".devcontainer/redan already exists, skipping generation");
+        return;
+    }
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+        eprintln!("cannot create {}: {e}", dir.display());
+        std::process::exit(1);
+    });
+
+    // Detect base image from project type
+    let has = |name: &str| detections.iter().any(|d| d.description.contains(name));
+    let base_image = if has("Python") {
+        "python:3.13-trixie"
+    } else if has("Node") || has("Yarn") || has("pnpm") {
+        "node:22-bookworm"
+    } else if has("Rust") {
+        "rust:1-bookworm"
+    } else if has("Go") {
+        "golang:1.23-bookworm"
+    } else if has("Ruby") {
+        "ruby:3.3-bookworm"
+    } else {
+        "debian:trixie"
+    };
+
+    // Build apt-get install line from detected packages
+    let mut apt_pkgs: Vec<&str> = vec![
+        "git", "curl", "ca-certificates", "make", "build-essential",
+    ];
+    // Add Node.js install if base isn't already node
+    let needs_node = !base_image.starts_with("node:");
+
+    // Extra apt packages from project detection (filter to known apt names)
+    let apt_extras: Vec<&str> = packages
+        .iter()
+        .filter_map(|p| match p.as_str() {
+            // Map Alpine/generic package names to Debian equivalents
+            "nodejs" | "npm" | "python3" | "py3-pip" | "cargo" | "rust" | "go" | "ruby"
+            | "php" | "composer" => None, // handled by base image or node install
+            other => Some(other),
+        })
+        .collect();
+    apt_pkgs.extend(apt_extras);
+    apt_pkgs.sort();
+    apt_pkgs.dedup();
+
+    let apt_line = apt_pkgs.join(" \\\n    ");
+
+    let node_install = if needs_node {
+        "\n\
+# Node.js (for Claude Code)\n\
+ARG NODE_MAJOR=22\n\
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \\\n\
+    && apt-get install -y --no-install-recommends nodejs \\\n\
+    && rm -rf /var/lib/apt/lists/*\n"
+    } else {
+        ""
+    };
+
+    let uv_copy = if has("Python") {
+        "\n# uv (Python package manager)\nCOPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /usr/local/bin/\n"
+    } else {
+        ""
+    };
+
+    let dockerfile = format!(
+        "FROM {base_image}\n\
+         \n\
+         RUN apt-get update && apt-get install -y --no-install-recommends \\\n\
+         \x20   {apt_line} \\\n\
+         \x20   && rm -rf /var/lib/apt/lists/*\n\
+         {node_install}\
+         # Claude Code\n\
+         RUN npm install -g @anthropic-ai/claude-code\n\
+         {uv_copy}\
+         # Non-root user\n\
+         RUN groupadd --gid 1000 dev \\\n\
+         \x20   && useradd --uid 1000 --gid 1000 -m -s /bin/bash dev \\\n\
+         \x20   && mkdir -p /workspace && chown dev:dev /workspace\n\
+         \n\
+         USER dev\n\
+         WORKDIR /workspace\n\
+         CMD [\"claude\"]\n"
+    );
+
+    let devcontainer_json = r#"{
+  "name": "redan-claude",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "../.."
+  },
+  "remoteUser": "dev",
+  "workspaceFolder": "/workspace"
+}
+"#;
+
+    std::fs::write(dir.join("Dockerfile"), &dockerfile).unwrap_or_else(|e| {
+        eprintln!("cannot write Dockerfile: {e}");
+        std::process::exit(1);
+    });
+    std::fs::write(dir.join("devcontainer.json"), devcontainer_json).unwrap_or_else(|e| {
+        eprintln!("cannot write devcontainer.json: {e}");
+        std::process::exit(1);
+    });
+
+    eprintln!("wrote .devcontainer/redan/Dockerfile");
+    eprintln!("wrote .devcontainer/redan/devcontainer.json");
 }
 
 struct ProjectDetection {
