@@ -604,7 +604,7 @@ fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String
     };
 
     let mut apt_packages: Vec<&str> = vec![
-        "build-essential", "ca-certificates", "curl", "git", "make",
+        "build-essential", "ca-certificates", "curl", "git", "iproute2", "make",
     ];
     for pkg in packages {
         match pkg.as_str() {
