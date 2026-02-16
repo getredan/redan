@@ -397,8 +397,12 @@ fn init() {
         }
     }
 
-    // Set defaults that make something bootable
-    cfg.image = Some("dev".into());
+    // Image name from current directory name (same convention as docker-compose)
+    let image_name = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "dev".into());
+    cfg.image = Some(image_name);
     cfg.command = Some("/bin/sh".into());
 
     // Default mount: current directory
@@ -430,9 +434,10 @@ fn init() {
 
     eprintln!("wrote redan.toml");
     let pkg_str = packages.join(" ");
+    let img = cfg.image.as_deref().unwrap_or("dev");
     eprintln!("\nnext steps:");
     eprintln!("  1. Create the image:");
-    eprintln!("     redan image create dev --packages '{pkg_str}'");
+    eprintln!("     redan image create {img} --packages '{pkg_str}'");
     eprintln!("  2. Add secrets to redan.toml (if needed):");
     eprintln!("     [secrets.API_KEY]");
     eprintln!("     value = \"your-key\"");
