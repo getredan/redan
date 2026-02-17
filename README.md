@@ -351,9 +351,8 @@ threat model, side-channel analysis, and known limitations.
 ## Status
 
 **Alpha.** The full chain works end-to-end: `redan init --claude` through
-interactive Claude Code sessions with network policy enforcement. 125
-tests (unit, integration, adversarial). Not yet packaged for binary
-distribution.
+interactive Claude Code sessions with network policy enforcement. Not
+yet packaged for binary distribution.
 
 ## Acknowledgments
 
