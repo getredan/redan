@@ -65,16 +65,18 @@ redan doctor
 
 ## Quick start
 
-### 1. Create an image
+### 1. Build an image
 
 ```bash
-redan image create claude-code \
-  --packages "nodejs npm git openssh-client" \
-  --run "npm install -g @anthropic-ai/claude-code"
+redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile
 ```
 
-This downloads Alpine Linux, boots a microVM, installs packages, and
-saves the result. Takes about 5 minutes.
+Or generate a project-specific devcontainer:
+
+```bash
+redan init --claude
+redan image import myproject --devcontainer .devcontainer/redan
+```
 
 ### 2. Run an agent
 
