@@ -921,6 +921,39 @@ fn resolve_devcontainer_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Write /etc/redan/policy to the guest rootfs.
+/// AI agents can read this to understand network restrictions.
+fn write_guest_policy(rootfs: &Path, allowed_hosts: &Option<Vec<String>>) {
+    let dir = rootfs.join("etc/redan");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let policy = match allowed_hosts {
+        None => "network: allow-all\n\
+                 \n\
+                 All outbound HTTPS connections are permitted.\n"
+            .to_string(),
+        Some(hosts) if hosts.is_empty() => "network: deny-all\n\
+                 \n\
+                 All outbound network connections are blocked.\n\
+                 This environment has no internet access.\n"
+            .to_string(),
+        Some(hosts) => {
+            let mut s = String::from("network: restrict\n\n");
+            s.push_str("Outbound HTTPS is restricted to the following hosts:\n");
+            for h in hosts {
+                s.push_str(&format!("  - {h}\n"));
+            }
+            s.push_str("\nConnections to other hosts will be refused.\n");
+            s.push_str("Do not attempt to access hosts not on this list.\n");
+            s
+        }
+    };
+
+    let _ = std::fs::write(dir.join("policy"), &policy);
+}
+
 fn doctor(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
 
@@ -1299,7 +1332,26 @@ fn exec(
         "TERM=xterm".into(),
         "SSL_CERT_FILE=/etc/ssl/certs/redan-ca.pem".into(),
         "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/redan-ca.pem".into(),
+        "REDAN=1".into(),
     ];
+
+    // Tell the guest about network policy so AI agents can adapt
+    match &allowed_hosts {
+        None => {
+            env.push("REDAN_NETWORK=allow-all".into());
+        }
+        Some(hosts) if hosts.is_empty() => {
+            env.push("REDAN_NETWORK=deny-all".into());
+            env.push("REDAN_ALLOWED_HOSTS=".into());
+        }
+        Some(hosts) => {
+            env.push("REDAN_NETWORK=restrict".into());
+            env.push(format!("REDAN_ALLOWED_HOSTS={}", hosts.join(",")));
+        }
+    }
+
+    // Write /etc/redan/policy in the guest rootfs
+    write_guest_policy(Path::new(rootfs), &allowed_hosts);
 
     // Add secret placeholders as env vars in the guest
     for (name, placeholder) in &secret_env {
