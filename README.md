@@ -348,19 +348,6 @@ accidental exposure; it's not a hard security boundary.
 See [docs/security-model.md](docs/security-model.md) for the full
 threat model, side-channel analysis, and known limitations.
 
-## Security tooling
-
-Rust security tooling (equivalent to Python's `ruff` + `bandit`):
-
-```bash
-mise run audit-deps      # cargo-audit: vulnerable dependencies
-mise run audit-unsafe    # cargo-geiger: unsafe code detection
-mise run audit-licenses  # cargo-deny: license compliance
-mise run lint            # clippy: lints including security checks
-```
-
-See [docs/security-tooling.md](docs/security-tooling.md).
-
 ## Status
 
 **Alpha.** The full chain works end-to-end: `redan init --claude` through
