@@ -3,14 +3,6 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::module_name_repetitions)]
-// Style lints - valid but low-value for now
-#![allow(clippy::similar_names)]
-#![allow(clippy::items_after_statements)]
-#![allow(clippy::too_long_first_doc_paragraph)]
-#![allow(clippy::field_reassign_with_default)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::option_if_let_else)]
-#![allow(clippy::if_not_else)]
 
 pub mod ca;
 pub mod config;

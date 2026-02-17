@@ -1,3 +1,10 @@
+#![allow(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::string_slice
+)]
 //! PS-6: Adversarial test suite for redan's security model.
 //!
 //! Tests organized by attack category. Each test references the specific

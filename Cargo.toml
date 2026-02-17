@@ -38,3 +38,4 @@ thiserror = "2.0.18"
 [dev-dependencies]
 base64 = "0.22.1"
 flate2 = "1.1.9"
+tempfile = "3"

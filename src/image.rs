@@ -14,12 +14,13 @@ const ALPINE_VERSION: &str = "3.21.3";
 const ALPINE_MINOR: &str = "3.21";
 
 fn home_dir() -> PathBuf {
-    if let Ok(h) = std::env::var("HOME") {
-        PathBuf::from(h)
-    } else {
-        eprintln!("$HOME not set -- cannot determine config directories");
-        std::process::exit(1);
-    }
+    std::env::var("HOME").map_or_else(
+        |_| {
+            eprintln!("$HOME not set -- cannot determine config directories");
+            std::process::exit(1);
+        },
+        PathBuf::from,
+    )
 }
 
 /// Where images are stored.
@@ -374,6 +375,7 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
 ///
 /// The devcontainer.json can live at `.devcontainer/devcontainer.json`
 /// or `.devcontainer.json` (per the spec).
+#[allow(clippy::too_many_lines)] // Devcontainer has 3 code paths (dockerfile, image, compose)
 pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf> {
     let config_file = Path::new(config_path);
     if !config_file.exists() {

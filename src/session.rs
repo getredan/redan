@@ -43,17 +43,19 @@ mod hex {
 }
 
 /// Base directory for session state.
+#[allow(clippy::unwrap_used)] // process::exit on missing $HOME is intentional
 pub fn sessions_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    std::env::var_os("XDG_STATE_HOME").map_or_else(
+        || {
             let home = std::env::var_os("HOME").unwrap_or_else(|| {
                 eprintln!("$HOME not set -- cannot determine state directory");
                 std::process::exit(1);
             });
             PathBuf::from(home).join(".local/state")
-        })
-        .join("redan/sessions")
+        },
+        PathBuf::from,
+    )
+    .join("redan/sessions")
 }
 
 /// Validate session ID format (hex characters only, max 32).
@@ -119,10 +121,8 @@ impl SessionMeta {
 
     /// Check if the session's process is still running.
     pub fn is_alive(&self) -> bool {
-        match self.pid {
-            Some(pid) => Path::new(&format!("/proc/{pid}")).exists(),
-            None => false,
-        }
+        self.pid
+            .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
     }
 
     /// Update status and re-save.

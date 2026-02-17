@@ -62,15 +62,15 @@ impl SecretBinding {
         real_value: String,
         allowed_hosts: Vec<String>,
     ) -> Result<Self, crate::error::Error> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::time::SystemTime;
+
         if real_value.contains('\r') || real_value.contains('\n') {
             return Err(
                 format!("secret for {env_name} contains CR/LF (header injection risk)").into(),
             );
         }
-
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use std::time::SystemTime;
 
         let mut h = DefaultHasher::new();
         env_name.hash(&mut h);
@@ -197,10 +197,12 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     (result, count)
 }
 
-/// Rewrite outgoing request headers: strip Accept-Encoding (forces
-/// uncompressed responses for scrubbing) and force Connection: close
-/// (so upstream closes after the response, preventing keep-alive stalls
-/// on responses with no Content-Length or Transfer-Encoding).
+/// Rewrite outgoing request headers.
+///
+/// Strips Accept-Encoding (forces uncompressed responses for scrubbing)
+/// and forces Connection: close (so upstream closes after the response,
+/// preventing keep-alive stalls on responses with no Content-Length or
+/// Transfer-Encoding).
 ///
 /// Uses httparse for header parsing to handle RFC 7230 edge cases
 /// (obs-fold, case-insensitive names). The body is passed through
@@ -208,10 +210,9 @@ pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
 pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
     let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
     let mut req = httparse::Request::new(&mut parsed_headers);
-    let body_offset = match req.parse(data) {
-        Ok(httparse::Status::Complete(n)) => n,
-        // Incomplete or malformed: return data as-is (safe default)
-        _ => return data.to_vec(),
+    // Incomplete or malformed: return data as-is (safe default)
+    let Ok(httparse::Status::Complete(body_offset)) = req.parse(data) else {
+        return data.to_vec();
     };
 
     // Rebuild: request line + filtered headers + body

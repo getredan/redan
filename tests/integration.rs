@@ -1,3 +1,4 @@
+#![allow(clippy::pedantic, clippy::nursery, clippy::unwrap_used, clippy::expect_used)]
 /// Integration tests that boot real libkrun VMs.
 ///
 /// These require KVM (`/dev/kvm`) and an Alpine rootfs at `/tmp/redan-rootfs`.

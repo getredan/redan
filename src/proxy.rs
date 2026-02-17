@@ -90,6 +90,7 @@ pub struct ProxyConfig<'a> {
 type DiscoveredHosts = Arc<Mutex<std::collections::BTreeSet<String>>>;
 
 /// Hosts discovered during a `--discover` run. Returned to the caller.
+#[allow(clippy::too_many_lines)] // Event loop; splitting would obscure control flow
 pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
     let ProxyConfig {
         host_sock,
@@ -562,6 +563,7 @@ impl Write for ChannelStream {
 /// Per-connection thread: TLS handshake, HTTP parsing, upstream relay,
 /// secret injection and response scrubbing. Rustls `StreamOwned` drives
 /// the TLS state machine automatically.
+#[allow(clippy::too_many_lines)] // TLS pipeline; splitting would obscure the flow
 fn tls_connection_thread(
     rx: mpsc::Receiver<Vec<u8>>,
     tx: mpsc::SyncSender<Vec<u8>>,
@@ -624,7 +626,22 @@ fn tls_connection_thread(
             "reject",
             &[("host", &sni), ("reason", "not_allowed")],
         );
-        return Err(format!("host not allowed: {sni}").into());
+        let body = format!(
+            "redan: connection to {sni} blocked by network policy.\n\
+             Host is not in the allowlist. Add it to redan.toml:\n\n\
+             [network]\n\
+             allow = [\"{sni}\"]\n"
+        );
+        let resp = format!(
+            "HTTP/1.1 403 Forbidden\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {body}",
+            body.len()
+        );
+        let _ = tls.write_all(resp.as_bytes());
+        return Ok(());
     }
 
     log::info!(
@@ -785,7 +802,15 @@ fn tls_connection_thread(
                         return Err("response too large".to_string().into());
                     }
 
-                    if !headers_sent {
+                    if headers_sent {
+                        write_scrubbed_chunk(
+                            &mut tls,
+                            &upstream_buf[..n],
+                            secrets,
+                            max_secret_len,
+                            &mut scrub_overlap,
+                        )?;
+                    } else {
                         header_buf.extend_from_slice(&upstream_buf[..n]);
                         if let Some(end) = header_end_offset(&header_buf) {
                             let headers = header_buf[..end].to_vec();
@@ -828,14 +853,6 @@ fn tls_connection_thread(
                             }
                             header_buf = Vec::new();
                         }
-                    } else {
-                        write_scrubbed_chunk(
-                            &mut tls,
-                            &upstream_buf[..n],
-                            secrets,
-                            max_secret_len,
-                            &mut scrub_overlap,
-                        )?;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -999,14 +1016,15 @@ fn request_has_upgrade(data: &[u8]) -> bool {
 /// - `"*.example.com"` matches `"api.example.com"` and `"foo.bar.example.com"`
 /// - `"*.example.com"` does NOT match `"example.com"` (must have a subdomain)
 pub(crate) fn host_matches(pattern: &str, hostname: &str) -> bool {
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        // Wildcard: hostname must end with .suffix and have something before it
-        let hostname_lower = hostname.to_ascii_lowercase();
-        let suffix_lower = suffix.to_ascii_lowercase();
-        hostname_lower.ends_with(&format!(".{suffix_lower}"))
-    } else {
-        pattern.eq_ignore_ascii_case(hostname)
-    }
+    pattern.strip_prefix("*.").map_or_else(
+        || pattern.eq_ignore_ascii_case(hostname),
+        |suffix| {
+            // Wildcard: hostname must end with .suffix and have something before it
+            let hostname_lower = hostname.to_ascii_lowercase();
+            let suffix_lower = suffix.to_ascii_lowercase();
+            hostname_lower.ends_with(&format!(".{suffix_lower}"))
+        },
+    )
 }
 
 /// Extract the Host header value from an HTTP request.

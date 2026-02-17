@@ -37,16 +37,15 @@ pub fn connect_upstream(
     // host was explicitly in the allowlist. Prevents SSRF to cloud
     // metadata (169.254.169.254) and internal networks via DNS rebinding.
     // Hosts in the allowlist are trusted -- the user explicitly chose them.
-    if !allow_private {
-        if let std::net::SocketAddr::V4(v4) = &addr {
-            if is_private_ip(*v4.ip()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("blocked connection to private IP: {}", v4.ip()),
-                )
-                .into());
-            }
-        }
+    if !allow_private
+        && let std::net::SocketAddr::V4(v4) = &addr
+        && is_private_ip(*v4.ip())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("blocked connection to private IP: {}", v4.ip()),
+        )
+        .into());
     }
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
@@ -63,20 +62,21 @@ pub fn connect_upstream(
 
 /// Returns true if the IP is in a private, loopback, or link-local range.
 /// Used to block SSRF to cloud metadata endpoints and internal services.
-fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
+#[allow(clippy::unnested_or_patterns)] // Nesting destroys per-range comments
+const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
     matches!(
         octets,
-        [10, ..] |                        // 10.0.0.0/8 (RFC 1918)
-        [172, 16..=31, ..] |              // 172.16.0.0/12 (RFC 1918)
-        [192, 168, ..] |                  // 192.168.0.0/16 (RFC 1918)
-        [169, 254, ..] |                  // 169.254.0.0/16 (link-local, cloud metadata)
-        [127, ..] |                       // 127.0.0.0/8 (loopback)
-        [0, ..] |                         // 0.0.0.0/8 (this network)
-        [100, 64..=127, ..] |             // 100.64.0.0/10 (CGN, RFC 6598)
-        [192, 0, 0, ..] |                 // 192.0.0.0/24 (IETF protocol assignments)
-        [198, 18..=19, ..] |              // 198.18.0.0/15 (benchmarking)
-        [233..=239, ..]                   // 224.0.0.0/4 (multicast, partial)
+        [10, ..]              // 10.0.0.0/8 (RFC 1918)
+        | [172, 16..=31, ..]  // 172.16.0.0/12 (RFC 1918)
+        | [192, 168, ..]      // 192.168.0.0/16 (RFC 1918)
+        | [169, 254, ..]      // 169.254.0.0/16 (link-local, cloud metadata)
+        | [127, ..]           // 127.0.0.0/8 (loopback)
+        | [0, ..]             // 0.0.0.0/8 (this network)
+        | [100, 64..=127, ..] // 100.64.0.0/10 (CGN, RFC 6598)
+        | [192, 0, 0, ..]     // 192.0.0.0/24 (IETF protocol assignments)
+        | [198, 18..=19, ..]  // 198.18.0.0/15 (benchmarking)
+        | [233..=239, ..]     // 224.0.0.0/4 (multicast, partial)
     )
 }
 
@@ -156,7 +156,12 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cast_possible_truncation,
+    clippy::ip_constant
+)]
 mod tests {
     use super::*;
 

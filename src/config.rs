@@ -81,12 +81,59 @@ impl Config {
     pub fn mount_specs(&self) -> Vec<String> {
         self.mount
             .values()
-            .map(|m| match &m.target {
-                Some(t) => format!("{}:{t}", m.source),
-                None => m.source.clone(),
+            .map(|m| {
+                m.target
+                    .as_ref()
+                    .map_or_else(|| m.source.clone(), |t| format!("{}:{t}", m.source))
             })
             .collect()
     }
+}
+
+/// Read `sandbox.network.allowedDomains` from Claude Code settings.
+/// Checks project-level `.claude/settings.local.json` first, then
+/// user-level `~/.claude/settings.json`. Returns the merged domain list.
+pub fn claude_allowed_domains() -> Vec<String> {
+    let mut domains = Vec::new();
+
+    // Project-level (higher specificity, checked first)
+    if let Some(d) = read_claude_settings(Path::new(".claude/settings.local.json")) {
+        domains.extend(d);
+    }
+    if let Some(d) = read_claude_settings(Path::new(".claude/settings.json")) {
+        domains.extend(d);
+    }
+
+    // User-level
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = Path::new(&home);
+        if let Some(d) = read_claude_settings(&home.join(".claude/settings.local.json")) {
+            domains.extend(d);
+        }
+        if let Some(d) = read_claude_settings(&home.join(".claude/settings.json")) {
+            domains.extend(d);
+        }
+    }
+
+    domains.sort();
+    domains.dedup();
+    domains
+}
+
+fn read_claude_settings(path: &Path) -> Option<Vec<String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let domains = value
+        .get("sandbox")?
+        .get("network")?
+        .get("allowedDomains")?
+        .as_array()?;
+    Some(
+        domains
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+    )
 }
 
 /// Search for a config file. Returns the path and parsed config,
@@ -185,5 +232,31 @@ target = "/workspace"
     fn unknown_fields_ignored() {
         let config: Config = toml::from_str("image = \"dev\"\ncustom_field = true").unwrap();
         assert_eq!(config.image.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn read_claude_settings_with_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"sandbox": {"network": {"allowedDomains": ["github.com", "*.npmjs.org"]}}}"#,
+        )
+        .unwrap();
+        let domains = read_claude_settings(&path).unwrap();
+        assert_eq!(domains, vec!["github.com", "*.npmjs.org"]);
+    }
+
+    #[test]
+    fn read_claude_settings_no_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"permissions": {}}"#).unwrap();
+        assert_eq!(read_claude_settings(&path), None);
+    }
+
+    #[test]
+    fn read_claude_settings_missing_file() {
+        assert_eq!(read_claude_settings(Path::new("/nonexistent")), None);
     }
 }

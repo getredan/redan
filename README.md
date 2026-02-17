@@ -287,6 +287,24 @@ allow = [
 
 Copy the output into your `redan.toml` and subsequent runs enforce it.
 
+### Claude Code integration
+
+Redan reads `sandbox.network.allowedDomains` from Claude Code settings
+(`.claude/settings.json`, `.claude/settings.local.json`, and user-level
+`~/.claude/settings.json`). Domains are merged into the allowlist
+automatically, so you define network policy once and redan enforces it
+with VM isolation.
+
+```json
+{
+  "sandbox": {
+    "network": {
+      "allowedDomains": ["api.anthropic.com", "*.npmjs.org"]
+    }
+  }
+}
+```
+
 ## Sessions
 
 Each `redan exec` creates a session with a unique ID. Session metadata,

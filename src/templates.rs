@@ -108,12 +108,14 @@ mod tests {
 
     #[test]
     fn redan_toml_claude_mode() {
-        let mut cfg = Config::default();
-        cfg.image = Some("test-project".into());
-        cfg.command = Some("claude --dangerously-skip-permissions".into());
-        cfg.interactive = Some(true);
-        cfg.network = NetworkConfig {
-            allow: vec!["api.anthropic.com".into(), "pypi.org".into()],
+        let mut cfg = Config {
+            image: Some("test-project".into()),
+            command: Some("claude --dangerously-skip-permissions".into()),
+            interactive: Some(true),
+            network: NetworkConfig {
+                allow: vec!["api.anthropic.com".into(), "pypi.org".into()],
+            },
+            ..Config::default()
         };
         cfg.mount.insert(
             "workspace".into(),
@@ -135,11 +137,13 @@ mod tests {
 
     #[test]
     fn redan_toml_plain_mode() {
-        let mut cfg = Config::default();
-        cfg.image = Some("myapp".into());
-        cfg.command = Some("/bin/sh".into());
-        cfg.network = NetworkConfig {
-            allow: vec!["registry.npmjs.org".into()],
+        let mut cfg = Config {
+            image: Some("myapp".into()),
+            command: Some("/bin/sh".into()),
+            network: NetworkConfig {
+                allow: vec!["registry.npmjs.org".into()],
+            },
+            ..Config::default()
         };
         cfg.mount.insert(
             "workspace".into(),

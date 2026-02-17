@@ -74,12 +74,10 @@ impl Vm {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 Self::run_vm(config, guest_sock, guest_fd)
             }));
-            if let Ok(code) = result {
-                code
-            } else {
+            result.unwrap_or_else(|_| {
                 log::error!("VM thread panicked, aborting to prevent UB");
                 std::process::abort();
-            }
+            })
         });
 
         Self {
@@ -170,9 +168,9 @@ impl Vm {
         // libkrun's init uses exec_path as argv[0] (via KRUN_INIT), so
         // argv here contains only the arguments after argv[0].
         let exec_path = CString::new("/bin/sh").unwrap();
-        let arg1 = CString::new("-c").unwrap();
-        let arg2 = CString::new(config.command).unwrap();
-        let argv: Vec<*const i8> = vec![arg1.as_ptr(), arg2.as_ptr(), std::ptr::null()];
+        let flag = CString::new("-c").unwrap();
+        let cmd = CString::new(config.command).unwrap();
+        let argv: Vec<*const i8> = vec![flag.as_ptr(), cmd.as_ptr(), std::ptr::null()];
 
         let env_cstrings: Vec<CString> = config
             .env

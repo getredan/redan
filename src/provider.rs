@@ -109,11 +109,10 @@ impl SecretProvider for Vault {
         // Vault KV v2: GET /v1/secret/data/<path>
         // The mount point is "secret" by default. If the path already
         // starts with the mount, the user can use the full API path.
-        let api_path = if let Some(rest) = path.strip_prefix("secret/") {
-            format!("secret/data/{rest}")
-        } else {
-            format!("secret/data/{path}")
-        };
+        let api_path = path.strip_prefix("secret/").map_or_else(
+            || format!("secret/data/{path}"),
+            |rest| format!("secret/data/{rest}"),
+        );
 
         let url = format!("{}/v1/{api_path}", self.addr);
 

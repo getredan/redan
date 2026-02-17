@@ -1,3 +1,11 @@
+// Binary crate lints
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::redundant_pub_crate)] // cmd/ modules are pub(crate) by design
+
 use clap::Parser;
 use env_logger::Env;
 use redan::config;
@@ -271,6 +279,18 @@ fn main() {
 
             let mut allow_hosts = allow_hosts;
             allow_hosts.extend(cfg.network.allow.clone());
+
+            // Import allowedDomains from Claude Code settings if present.
+            // Lets users define network policy once in .claude/settings.json
+            // and have redan enforce it with real VM isolation.
+            let claude_domains = config::claude_allowed_domains();
+            if !claude_domains.is_empty() {
+                log::info!(
+                    "imported {} domains from Claude Code settings",
+                    claude_domains.len()
+                );
+                allow_hosts.extend(claude_domains);
+            }
 
             let mut mounts = mounts;
             mounts.extend(cfg.mount_specs());
