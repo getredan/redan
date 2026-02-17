@@ -1,6 +1,6 @@
 [package]
 name = "redan"
-version = "0.1.0"
+version = "0.2.0-alpha"
 edition = "2024"
 license = "BSD-3-Clause"
 description = "Secure, local-first execution environment for AI coding agents"
