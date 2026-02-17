@@ -4,6 +4,7 @@
 /// separate thread; the caller gets back a unix socket for virtio-net
 /// communication.
 use std::ffi::CString;
+use std::os::raw::c_char;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -157,7 +158,7 @@ impl Vm {
         // Format per libkrun.h: "RESOURCE=RLIM_CUR:RLIM_MAX"
         // RLIMIT_NOFILE = 7 on Linux (libc::RLIMIT_NOFILE).
         let nofile = CString::new(format!("{}={}:{}", libc::RLIMIT_NOFILE, 65536, 65536)).unwrap();
-        let rlimits: Vec<*const i8> = vec![nofile.as_ptr(), std::ptr::null()];
+        let rlimits: Vec<*const c_char> = vec![nofile.as_ptr(), std::ptr::null()];
         let ret = unsafe { ffi::krun_set_rlimits(ctx_id, rlimits.as_ptr()) };
         if ret < 0 {
             log::warn!("krun_set_rlimits returned {ret}");
@@ -170,14 +171,14 @@ impl Vm {
         let exec_path = CString::new("/bin/sh").unwrap();
         let flag = CString::new("-c").unwrap();
         let cmd = CString::new(config.command).unwrap();
-        let argv: Vec<*const i8> = vec![flag.as_ptr(), cmd.as_ptr(), std::ptr::null()];
+        let argv: Vec<*const c_char> = vec![flag.as_ptr(), cmd.as_ptr(), std::ptr::null()];
 
         let env_cstrings: Vec<CString> = config
             .env
             .iter()
             .map(|e| CString::new(e.as_str()).unwrap())
             .collect();
-        let mut envp: Vec<*const i8> = env_cstrings.iter().map(|e| e.as_ptr()).collect();
+        let mut envp: Vec<*const c_char> = env_cstrings.iter().map(|e| e.as_ptr()).collect();
         envp.push(std::ptr::null());
 
         let ret =
