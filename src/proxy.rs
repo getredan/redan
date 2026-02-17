@@ -603,6 +603,14 @@ fn tls_connection_thread(
         return Ok(());
     }
 
+    // Reject duplicate Content-Length headers (request smuggling vector)
+    if has_duplicate_content_length(&request) {
+        log::warn!("rejected request with conflicting Content-Length headers");
+        let resp = b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+        tls.write_all(resp)?;
+        return Ok(());
+    }
+
     // Reject chunked Transfer-Encoding. We read until Content-Length
     // is satisfied or headers are complete (for bodyless requests).
     // Chunked bodies have no Content-Length, so the body would be
@@ -861,6 +869,28 @@ fn http_request_complete(data: &[u8]) -> bool {
     }
 
     true
+}
+
+/// Reject requests with multiple Content-Length headers whose values disagree.
+/// Per RFC 7230 3.3.3, a recipient MUST reject such messages.
+fn has_duplicate_content_length(data: &[u8]) -> bool {
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_err() {
+        return false;
+    }
+    let mut seen: Option<&[u8]> = None;
+    for header in req.headers.iter() {
+        if header.name.eq_ignore_ascii_case("content-length") {
+            let val = header.value;
+            match seen {
+                None => seen = Some(val),
+                Some(prev) if prev == val => {} // identical, OK
+                Some(_) => return true,         // conflicting
+            }
+        }
+    }
+    false
 }
 
 fn request_has_chunked_te(data: &[u8]) -> bool {
@@ -1125,5 +1155,23 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(!text.contains("ALPHA"), "first secret must be scrubbed");
         assert!(!text.contains("BETA"), "second secret must be scrubbed");
+    }
+
+    #[test]
+    fn duplicate_content_length_detected() {
+        let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\nhello";
+        assert!(has_duplicate_content_length(req));
+    }
+
+    #[test]
+    fn identical_content_length_ok() {
+        let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(!has_duplicate_content_length(req));
+    }
+
+    #[test]
+    fn single_content_length_ok() {
+        let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(!has_duplicate_content_length(req));
     }
 }

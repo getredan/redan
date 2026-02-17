@@ -450,6 +450,10 @@ fn main() {
                 }
             }
             Some(SessionAction::Show { id }) => {
+                if !session::valid_session_id(&id) {
+                    eprintln!("invalid session ID: {id}");
+                    std::process::exit(1);
+                }
                 let dir = session::session_dir(&id);
                 let meta_path = dir.join("meta.json");
                 match std::fs::read_to_string(&meta_path) {
@@ -485,6 +489,10 @@ fn main() {
             }
             Some(SessionAction::Remove { id }) => {
                 if let Some(id) = id {
+                    if !session::valid_session_id(&id) {
+                        eprintln!("invalid session ID: {id}");
+                        std::process::exit(1);
+                    }
                     let dir = session::session_dir(&id);
                     if dir.exists() {
                         std::fs::remove_dir_all(&dir).unwrap_or_else(|e| {
@@ -1272,7 +1280,15 @@ fn exec(
                 secrets.push(binding);
             }
             Err(e) => {
-                eprintln!("invalid --secret spec '{spec}': {e}");
+                // Redact the value -- only show ENV_NAME=<redacted>:hosts
+                let redacted = match spec.split_once('=') {
+                    Some((name, rest)) => match rest.rfind(':') {
+                        Some(i) => format!("{name}=<redacted>:{}", &rest[i + 1..]),
+                        None => format!("{name}=<redacted>"),
+                    },
+                    None => "<malformed>".into(),
+                };
+                eprintln!("invalid --secret spec '{redacted}': {e}");
                 std::process::exit(1);
             }
         }

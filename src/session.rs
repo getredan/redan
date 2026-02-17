@@ -45,6 +45,11 @@ pub fn sessions_dir() -> PathBuf {
         .join("redan/sessions")
 }
 
+/// Validate session ID format (hex characters only, max 32).
+pub fn valid_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Directory for a specific session.
 pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
@@ -162,5 +167,21 @@ mod tests {
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "test123");
         assert_eq!(parsed.image.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn valid_session_id_accepts_hex() {
+        assert!(valid_session_id("abcd1234"));
+        assert!(valid_session_id("AABB0099"));
+        assert!(valid_session_id("0"));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_traversal() {
+        assert!(!valid_session_id("../../etc"));
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id("abcd/1234"));
+        assert!(!valid_session_id("abc xyz"));
+        assert!(!valid_session_id("a".repeat(33).as_str()));
     }
 }
