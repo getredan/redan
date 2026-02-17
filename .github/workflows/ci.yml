@@ -36,6 +36,24 @@ jobs:
       - name: Test
         run: cargo test
 
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install libkrun stub
+        run: |
+          gcc -shared -o /tmp/libkrun.so ci/libkrun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
+
+      - name: Build (release)
+        run: cargo build --release
+
   security:
     runs-on: ubuntu-latest
     steps:
