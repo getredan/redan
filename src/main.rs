@@ -328,7 +328,8 @@ fn main() {
                 if interactive {
                     "/bin/sh".to_string()
                 } else {
-                    "echo 'no command specified; use: redan exec --image <name> -- <command>'".to_string()
+                    "echo 'no command specified; use: redan exec --image <name> -- <command>'"
+                        .to_string()
                 }
             });
             cmd::exec::run(&cmd::exec::ExecConfig {
