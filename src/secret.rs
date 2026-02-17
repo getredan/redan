@@ -62,28 +62,19 @@ impl SecretBinding {
         real_value: String,
         allowed_hosts: Vec<String>,
     ) -> Result<Self, crate::error::Error> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use std::time::SystemTime;
-
         if real_value.contains('\r') || real_value.contains('\n') {
             return Err(
                 format!("secret for {env_name} contains CR/LF (header injection risk)").into(),
             );
         }
 
-        // Not cryptographically random, intentionally. The placeholder
-        // is visible to the guest as an env var -- it's not a secret.
-        // It just needs to be unique enough to avoid collisions within
-        // a session. DefaultHasher + time + PID is sufficient.
-        let mut h = DefaultHasher::new();
-        env_name.hash(&mut h);
-        SystemTime::now().hash(&mut h);
-        std::process::id().hash(&mut h);
-        let suffix = h.finish();
+        let mut buf = [0u8; 16];
+        getrandom::getrandom(&mut buf)
+            .map_err(|e| format!("failed to generate placeholder: {e}"))?;
+        let suffix = buf.map(|b| format!("{b:02x}")).join("");
 
         Ok(Self {
-            placeholder: format!("redan_ph_{}_{:016x}", env_name.to_lowercase(), suffix),
+            placeholder: format!("redan_ph_{}_{suffix}", env_name.to_lowercase()),
             real_value: Zeroizing::new(real_value),
             allowed_hosts,
         })
