@@ -677,9 +677,7 @@ fn tls_connection_thread(
         // Strip port if present (Host: example.com:443)
         let host_name = host.split(':').next().unwrap_or(&host);
         if !host_name.eq_ignore_ascii_case(&sni) {
-            log::warn!(
-                "rejected domain fronting: SNI={sni}, Host={host_name}"
-            );
+            log::warn!("rejected domain fronting: SNI={sni}, Host={host_name}");
             audit(
                 audit_log,
                 "reject",
@@ -1076,7 +1074,11 @@ fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cloned_ref_to_slice_refs)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::cloned_ref_to_slice_refs
+)]
 mod tests {
     use super::*;
 

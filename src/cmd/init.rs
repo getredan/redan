@@ -21,11 +21,7 @@ pub(crate) fn run(claude: bool) {
 
     // Detect project type and suggest defaults
     let detections = detect_project();
-    let mut packages: Vec<String> = vec![
-        "curl".into(),
-        "ca-certificates".into(),
-        "git".into(),
-    ];
+    let mut packages: Vec<String> = vec!["curl".into(), "ca-certificates".into(), "git".into()];
 
     if detections.is_empty() {
         eprintln!("no project type detected. Generating minimal config.");
@@ -57,7 +53,8 @@ pub(crate) fn run(claude: bool) {
         cfg.interactive = Some(true);
 
         // Point Claude Code's config to workspace so sessions persist
-        cfg.env.insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
+        cfg.env
+            .insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
 
         // Claude Code API hosts
         let claude_hosts = [
@@ -102,8 +99,6 @@ pub(crate) fn run(claude: bool) {
     if claude {
         eprintln!("  1. Build the image:");
         eprintln!("     redan image import {img} --devcontainer .devcontainer/redan");
-        eprintln!("  2. Run:");
-        eprintln!("     redan exec");
     } else {
         let devcontainer_path = detections.iter().find_map(|d| d.devcontainer.as_deref());
         let dockerfile = ["Dockerfile", "dockerfile", "Containerfile"]
@@ -115,8 +110,7 @@ pub(crate) fn run(claude: bool) {
             let dc_dir = Path::new(dc)
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".into());
+                .map_or_else(|| ".".into(), |p| p.to_string_lossy().into_owned());
             eprintln!("  1. Build the image from your devcontainer:");
             eprintln!("     redan image import {img} --devcontainer {dc_dir}");
         } else if let Some(df) = dockerfile {
@@ -131,9 +125,8 @@ pub(crate) fn run(claude: bool) {
         eprintln!("     [secrets.API_KEY]");
         eprintln!("     value = \"your-key\"");
         eprintln!("     hosts = [\"api.example.com\"]");
-        eprintln!("  3. Run:");
-        eprintln!("     redan exec");
     }
+    eprintln!("  Run: redan exec");
 }
 
 fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String]) {
@@ -164,28 +157,38 @@ fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String
     };
 
     let mut apt_packages: Vec<&str> = vec![
-        "build-essential", "ca-certificates", "curl", "git", "iproute2", "make",
+        "build-essential",
+        "ca-certificates",
+        "curl",
+        "git",
+        "iproute2",
+        "make",
     ];
     for pkg in packages {
         match pkg.as_str() {
-            "nodejs" | "npm" | "python3" | "py3-pip" | "cargo" | "rust"
-            | "go" | "ruby" | "php" | "composer" => {}
+            "nodejs" | "npm" | "python3" | "py3-pip" | "cargo" | "rust" | "go" | "ruby" | "php"
+            | "composer" => {}
             other if !apt_packages.contains(&other) => apt_packages.push(other),
             _ => {}
         }
     }
-    apt_packages.sort();
+    apt_packages.sort_unstable();
     apt_packages.dedup();
 
     let needs_node = !base_image.starts_with("node:");
     let has_python = has("Python");
-    let dockerfile = templates::claude_dockerfile(base_image, &apt_packages, needs_node, has_python);
+    let dockerfile =
+        templates::claude_dockerfile(base_image, &apt_packages, needs_node, has_python);
 
     std::fs::write(dir.join("Dockerfile"), &dockerfile).unwrap_or_else(|e| {
         eprintln!("cannot write Dockerfile: {e}");
         std::process::exit(1);
     });
-    std::fs::write(dir.join("devcontainer.json"), templates::devcontainer_json()).unwrap_or_else(|e| {
+    std::fs::write(
+        dir.join("devcontainer.json"),
+        templates::devcontainer_json(),
+    )
+    .unwrap_or_else(|e| {
         eprintln!("cannot write devcontainer.json: {e}");
         std::process::exit(1);
     });
@@ -198,23 +201,63 @@ pub(crate) fn detect_project() -> Vec<ProjectDetection> {
     let mut detections = Vec::new();
 
     let rules: &[(&str, &str, &[&str], &[&str])] = &[
-        ("package.json", "Node.js (package.json)", &["registry.npmjs.org"], &["nodejs", "npm"]),
-        ("yarn.lock", "Yarn (yarn.lock)", &["registry.yarnpkg.com", "registry.npmjs.org"], &["nodejs", "npm"]),
-        ("pnpm-lock.yaml", "pnpm (pnpm-lock.yaml)", &["registry.npmjs.org"], &["nodejs", "npm"]),
-        ("requirements.txt", "Python (requirements.txt)", &["pypi.org", "files.pythonhosted.org"], &["python3", "py3-pip"]),
-        ("pyproject.toml", "Python (pyproject.toml)", &["pypi.org", "files.pythonhosted.org"], &["python3", "py3-pip"]),
-        ("Cargo.toml", "Rust (Cargo.toml)", &["crates.io", "static.crates.io"], &["cargo", "rust"]),
-        ("go.mod", "Go (go.mod)", &["proxy.golang.org", "sum.golang.org"], &["go"]),
+        (
+            "package.json",
+            "Node.js (package.json)",
+            &["registry.npmjs.org"],
+            &["nodejs", "npm"],
+        ),
+        (
+            "yarn.lock",
+            "Yarn (yarn.lock)",
+            &["registry.yarnpkg.com", "registry.npmjs.org"],
+            &["nodejs", "npm"],
+        ),
+        (
+            "pnpm-lock.yaml",
+            "pnpm (pnpm-lock.yaml)",
+            &["registry.npmjs.org"],
+            &["nodejs", "npm"],
+        ),
+        (
+            "requirements.txt",
+            "Python (requirements.txt)",
+            &["pypi.org", "files.pythonhosted.org"],
+            &["python3", "py3-pip"],
+        ),
+        (
+            "pyproject.toml",
+            "Python (pyproject.toml)",
+            &["pypi.org", "files.pythonhosted.org"],
+            &["python3", "py3-pip"],
+        ),
+        (
+            "Cargo.toml",
+            "Rust (Cargo.toml)",
+            &["crates.io", "static.crates.io"],
+            &["cargo", "rust"],
+        ),
+        (
+            "go.mod",
+            "Go (go.mod)",
+            &["proxy.golang.org", "sum.golang.org"],
+            &["go"],
+        ),
         ("Gemfile", "Ruby (Gemfile)", &["rubygems.org"], &["ruby"]),
-        ("composer.json", "PHP (composer.json)", &["repo.packagist.org"], &["php", "composer"]),
+        (
+            "composer.json",
+            "PHP (composer.json)",
+            &["repo.packagist.org"],
+            &["php", "composer"],
+        ),
     ];
 
-    for (file, desc, hosts, pkgs) in rules {
+    for &(file, desc, hosts, pkgs) in rules {
         if Path::new(file).exists() {
             detections.push(ProjectDetection {
                 description: desc.to_string(),
-                hosts: hosts.iter().map(|h| h.to_string()).collect(),
-                packages: pkgs.iter().map(|p| p.to_string()).collect(),
+                hosts: hosts.iter().copied().map(String::from).collect(),
+                packages: pkgs.iter().copied().map(String::from).collect(),
                 devcontainer: None,
             });
         }
@@ -294,9 +337,12 @@ pub(crate) fn parse_dockerfile_packages(line: &str) -> Vec<String> {
         let start = words.iter().position(|&w| w == "install" || w == "add");
         if let Some(idx) = start {
             for &word in &words[idx + 1..] {
-                if word.starts_with('-') || word.starts_with('\\')
-                    || word == "&&" || word.contains('=')
-                    || word.contains('/') || word.contains('>')
+                if word.starts_with('-')
+                    || word.starts_with('\\')
+                    || word == "&&"
+                    || word.contains('=')
+                    || word.contains('/')
+                    || word.contains('>')
                 {
                     continue;
                 }

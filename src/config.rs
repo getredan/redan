@@ -167,8 +167,8 @@ fn dirs_path() -> Option<PathBuf> {
 }
 
 fn load(path: &Path) -> Result<Config, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     toml::from_str(&content).map_err(|e| format!("{e}"))
 }
 

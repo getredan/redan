@@ -9,13 +9,12 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     // KVM
     let kvm_path = Path::new("/dev/kvm");
     if kvm_path.exists() {
-        match std::fs::File::open(kvm_path) {
-            Ok(_) => println!("[ok]   kvm: /dev/kvm accessible"),
-            Err(e) => {
-                println!("[err]  kvm: exists but not accessible: {e}");
-                println!("       add your user to the kvm group: sudo usermod -aG kvm $USER");
-                ok = false;
-            }
+        if let Err(e) = std::fs::File::open(kvm_path) {
+            println!("[err]  kvm: exists but not accessible: {e}");
+            println!("       add your user to the kvm group: sudo usermod -aG kvm $USER");
+            ok = false;
+        } else {
+            println!("[ok]   kvm: /dev/kvm accessible");
         }
     } else {
         println!("[err]  kvm: not found");
@@ -39,22 +38,20 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
             .copied()
     };
 
-    match find_lib("libkrun.so") {
-        Some(dir) => println!("[ok]   libkrun: {dir}/libkrun.so"),
-        None => {
-            println!("[err]  libkrun: not found");
-            println!("       install libkrun from your distro packages");
-            ok = false;
-        }
+    if let Some(dir) = find_lib("libkrun.so") {
+        println!("[ok]   libkrun: {dir}/libkrun.so");
+    } else {
+        println!("[err]  libkrun: not found");
+        println!("       install libkrun from your distro packages");
+        ok = false;
     }
 
-    match find_lib("libkrunfw.so") {
-        Some(dir) => println!("[ok]   libkrunfw: {dir}/libkrunfw.so"),
-        None => {
-            println!("[err]  libkrunfw: not found");
-            println!("       install libkrunfw from your distro packages");
-            ok = false;
-        }
+    if let Some(dir) = find_lib("libkrunfw.so") {
+        println!("[ok]   libkrunfw: {dir}/libkrunfw.so");
+    } else {
+        println!("[err]  libkrunfw: not found");
+        println!("       install libkrunfw from your distro packages");
+        ok = false;
     }
 
     // Images
@@ -85,10 +82,7 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
 
     // Validate secrets (never print values)
     for spec in secret_specs {
-        let env_label = spec
-            .split_once('=')
-            .map(|(name, _)| name)
-            .unwrap_or("(invalid)");
+        let env_label = spec.split_once('=').map_or("(invalid)", |(name, _)| name);
 
         match parse_secret(spec) {
             Ok((env_name, binding)) => {
@@ -119,19 +113,17 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     }
 }
 
-pub(crate) fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
-    let mut total = 0;
-    for entry in walkdir::WalkDir::new(path)
+pub(crate) fn dir_size(path: &std::path::Path) -> u64 {
+    walkdir::WalkDir::new(path)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
-        }
-    }
-    Ok(total)
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
+#[allow(clippy::cast_precision_loss)] // Display-only formatting
 pub(crate) fn humanize_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;

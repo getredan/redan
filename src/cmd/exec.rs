@@ -9,22 +9,24 @@ use redan::session;
 use redan::templates;
 use redan::vm;
 
-pub(crate) fn run(
-    rootfs: &str,
-    command: &str,
-    interactive: bool,
-    timeout_secs: u64,
-    secret_specs: &[String],
-    allow_host_specs: &[String],
-    mount_specs: &[String],
-    audit_log_path: Option<&str>,
-    image_name: Option<&str>,
-    guest_env: &BTreeMap<String, String>,
-    discover: bool,
-) {
+pub(crate) struct ExecConfig<'a> {
+    pub rootfs: &'a str,
+    pub command: &'a str,
+    pub interactive: bool,
+    pub timeout_secs: u64,
+    pub secret_specs: &'a [String],
+    pub allow_host_specs: &'a [String],
+    pub mount_specs: &'a [String],
+    pub audit_log_path: Option<&'a str>,
+    pub image_name: Option<&'a str>,
+    pub guest_env: &'a BTreeMap<String, String>,
+    pub discover: bool,
+}
+
+pub(crate) fn run(cfg: &ExecConfig<'_>) {
     // Create session
     let session_id = session::new_id();
-    let mut meta = session::SessionMeta::new(&session_id, image_name, Some(command));
+    let mut meta = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
     if let Err(e) = meta.save() {
         log::warn!("cannot save session metadata: {e}");
     }
@@ -32,7 +34,7 @@ pub(crate) fn run(
 
     // In interactive mode, redirect logs to a file so they don't
     // interleave with the guest TUI.
-    if interactive {
+    if cfg.interactive {
         let log_path = session::session_dir(&session_id).join("redan.log");
         eprintln!("session: {session_id} (logs: {})", log_path.display());
         crate::redirect_logs_to_file(&log_path);
@@ -40,16 +42,17 @@ pub(crate) fn run(
 
     // Use session audit log if no explicit --audit-log
     let session_audit = session::audit_log_path(&session_id);
-    let audit_log_path = audit_log_path
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| session_audit.to_string_lossy().into_owned());
+    let audit_log_path = cfg.audit_log_path.map_or_else(
+        || session_audit.to_string_lossy().into_owned(),
+        str::to_string,
+    );
     let audit_log_path = Some(audit_log_path.as_str());
 
     let ca = MitmCa::generate();
     log::info!("MITM CA generated");
 
     // Install CA cert in guest rootfs
-    if let Err(e) = vm::install_ca_cert(Path::new(rootfs), ca.ca_cert_pem()) {
+    if let Err(e) = vm::install_ca_cert(Path::new(cfg.rootfs), ca.ca_cert_pem()) {
         eprintln!("failed to install CA cert in rootfs: {e}");
         std::process::exit(1);
     }
@@ -58,7 +61,7 @@ pub(crate) fn run(
     // Parse secrets: generate placeholders, collect bindings
     let mut secrets: Vec<SecretBinding> = Vec::new();
     let mut secret_env: Vec<(String, String)> = Vec::new();
-    for spec in secret_specs {
+    for spec in cfg.secret_specs {
         match parse_secret(spec) {
             Ok((env_name, binding)) => {
                 log::info!(
@@ -70,14 +73,7 @@ pub(crate) fn run(
                 secrets.push(binding);
             }
             Err(e) => {
-                // Redact the value -- only show ENV_NAME=<redacted>:hosts
-                let redacted = match spec.split_once('=') {
-                    Some((name, rest)) => match rest.rfind(':') {
-                        Some(i) => format!("{name}=<redacted>:{}", &rest[i + 1..]),
-                        None => format!("{name}=<redacted>"),
-                    },
-                    None => "<malformed>".into(),
-                };
+                let redacted = redact_secret_spec(spec);
                 eprintln!("invalid --secret spec '{redacted}': {e}");
                 std::process::exit(1);
             }
@@ -85,7 +81,7 @@ pub(crate) fn run(
     }
 
     // Validate --allow-host values
-    for host in allow_host_specs {
+    for host in cfg.allow_host_specs {
         if host == "*" {
             continue;
         }
@@ -96,10 +92,11 @@ pub(crate) fn run(
     }
 
     // Default-deny: all outbound HTTPS blocked unless explicitly allowed.
-    let allowed_hosts: Option<Vec<String>> = if allow_host_specs.iter().any(|h| h == "*") {
+    let allowed_hosts: Option<Vec<String>> = if cfg.allow_host_specs.iter().any(|h| h == "*") {
         None
     } else {
-        let mut hosts: Vec<String> = allow_host_specs
+        let mut hosts: Vec<String> = cfg
+            .allow_host_specs
             .iter()
             .map(|h| h.to_ascii_lowercase())
             .collect();
@@ -123,7 +120,7 @@ pub(crate) fn run(
     // Parse mounts
     let mut virtiofs_mounts: Vec<(String, String)> = Vec::new();
     let mut mount_commands: Vec<String> = Vec::new();
-    for (i, spec) in mount_specs.iter().enumerate() {
+    for (i, spec) in cfg.mount_specs.iter().enumerate() {
         let (host_path, guest_path) = parse_mount(spec);
         if !Path::new(&host_path).exists() {
             eprintln!("mount source does not exist: {host_path}");
@@ -132,7 +129,7 @@ pub(crate) fn run(
         let tag = format!("fs{i}");
         log::info!("mount: {host_path} -> {guest_path} (tag={tag})");
 
-        let mp = Path::new(rootfs).join(guest_path.trim_start_matches('/'));
+        let mp = Path::new(cfg.rootfs).join(guest_path.trim_start_matches('/'));
         std::fs::create_dir_all(&mp).ok();
 
         virtiofs_mounts.push((tag.clone(), host_path));
@@ -144,9 +141,9 @@ pub(crate) fn run(
     let ca_update = vm::ca_update_commands();
     let mount_setup = mount_commands.join("; ");
     let full_command = if mount_setup.is_empty() {
-        format!("{net_setup}; {ca_update}; {command}")
+        format!("{net_setup}; {ca_update}; {}", cfg.command)
     } else {
-        format!("{net_setup}; {ca_update}; {mount_setup}; {command}")
+        format!("{net_setup}; {ca_update}; {mount_setup}; {}", cfg.command)
     };
 
     let mut env: Vec<String> = vec![
@@ -173,7 +170,7 @@ pub(crate) fn run(
     }
 
     // Write /etc/redan/policy in the guest rootfs
-    write_guest_policy(Path::new(rootfs), &allowed_hosts);
+    write_guest_policy(Path::new(cfg.rootfs), allowed_hosts.as_ref());
 
     // Add secret placeholders as env vars
     for (name, placeholder) in &secret_env {
@@ -181,43 +178,48 @@ pub(crate) fn run(
     }
 
     // Add user-defined env vars from config
-    for (name, value) in guest_env {
+    for (name, value) in cfg.guest_env {
         env.push(format!("{name}={value}"));
     }
 
-    let config = vm::VmConfig {
-        rootfs: rootfs.into(),
+    let vm_config = vm::VmConfig {
+        rootfs: cfg.rootfs.into(),
         vcpus: 1,
         ram_mib: 256,
         command: full_command,
         env,
         virtiofs_mounts,
-        interactive,
+        interactive: cfg.interactive,
     };
 
     // In interactive mode, set the host terminal to raw mode
-    let _raw_guard = if interactive {
+    let _raw_guard = if cfg.interactive {
         Some(RawTerminalGuard::enter())
     } else {
         None
     };
 
-    let vm = vm::Vm::boot(config);
+    let vm_handle = vm::Vm::boot(vm_config);
+
+    let net_sock = match vm_handle.net_sock.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("failed to clone VM network socket: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let discovered = proxy::run(proxy::ProxyConfig {
-        host_sock: vm
-            .net_sock
-            .try_clone()
-            .expect("failed to clone VM network socket"),
+        host_sock: net_sock,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
         secrets: &secrets,
-        timeout: Duration::from_secs(timeout_secs),
+        timeout: Duration::from_secs(cfg.timeout_secs),
         allowed_hosts,
         audit_log_path,
-        discover,
+        discover: cfg.discover,
     });
 
-    if discover && !discovered.is_empty() {
+    if cfg.discover && !discovered.is_empty() {
         eprintln!("\n--- discovered hosts ---");
         eprintln!("The agent connected to these hosts:\n");
         for host in &discovered {
@@ -236,13 +238,25 @@ pub(crate) fn run(
     log::info!("session {session_id} finished");
 }
 
-/// Parse secret spec: `ENV_VAR=real_value:host1,host2`
-pub(crate) fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
-    let colon_pos = spec.rfind(':').ok_or("expected ENV_VAR=value:hosts")?;
-    let (name_value, hosts) = (&spec[..colon_pos], &spec[colon_pos + 1..]);
+/// Redact a secret spec for error messages. Shows `ENV_VAR=<redacted>:hosts`.
+fn redact_secret_spec(spec: &str) -> String {
+    let Some((name, rest)) = spec.split_once('=') else {
+        return "<malformed>".into();
+    };
+    rest.rsplit_once(':').map_or_else(
+        || format!("{name}=<redacted>"),
+        |(_, hosts)| format!("{name}=<redacted>:{hosts}"),
+    )
+}
 
-    let eq_pos = name_value.find('=').ok_or("expected ENV_VAR=value")?;
-    let (env_name, value_ref) = (&name_value[..eq_pos], &name_value[eq_pos + 1..]);
+/// Parse secret spec: `ENV_VAR=real_value:host1,host2`
+///
+/// The last `:` separates value from hosts (values may contain colons).
+pub(crate) fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String> {
+    let (name_value, hosts) = spec
+        .rsplit_once(':')
+        .ok_or("expected ENV_VAR=value:hosts")?;
+    let (env_name, value_ref) = name_value.split_once('=').ok_or("expected ENV_VAR=value")?;
 
     if env_name.is_empty() || value_ref.is_empty() || hosts.is_empty() {
         return Err("empty env name, value, or hosts".into());
@@ -296,14 +310,17 @@ pub(crate) fn read_secret_file(path: &str) -> Result<Vec<String>, String> {
 
     Ok(content
         .lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.to_string())
+        .map(String::from)
         .collect())
 }
 
-/// Merge --secret and --secret-file into a single list.
-pub(crate) fn collect_secret_specs(cli_secrets: &[String], secret_file: Option<&str>) -> Vec<String> {
+/// Merge `--secret` and `--secret-file` into a single list.
+pub(crate) fn collect_secret_specs(
+    cli_secrets: &[String],
+    secret_file: Option<&str>,
+) -> Vec<String> {
     let mut specs: Vec<String> = cli_secrets.to_vec();
     if let Some(path) = secret_file {
         match read_secret_file(path) {
@@ -317,24 +334,20 @@ pub(crate) fn collect_secret_specs(cli_secrets: &[String], secret_file: Option<&
     specs
 }
 
-/// Parse mount spec: `/host/path:/guest/path` or `/host/path` (defaults to /workspace)
+/// Parse mount spec: `/host/path:/guest/path` or `/host/path` (defaults to `/workspace`)
 pub(crate) fn parse_mount(spec: &str) -> (String, String) {
-    if let Some((host, guest)) = spec.split_once(':') {
-        (host.to_string(), guest.to_string())
-    } else {
-        (spec.to_string(), "/workspace".to_string())
-    }
+    spec.split_once(':').map_or_else(
+        || (spec.to_string(), "/workspace".to_string()),
+        |(host, guest)| (host.to_string(), guest.to_string()),
+    )
 }
 
-fn write_guest_policy(rootfs: &Path, allowed_hosts: &Option<Vec<String>>) {
+fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
     let dir = rootfs.join("etc/redan");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::write(
-        dir.join("policy"),
-        templates::guest_policy(allowed_hosts.as_ref()),
-    );
+    let _ = std::fs::write(dir.join("policy"), templates::guest_policy(allowed_hosts));
 }
 
 /// RAII guard: raw terminal mode on creation, restore on drop.
@@ -346,10 +359,10 @@ impl RawTerminalGuard {
     fn enter() -> Self {
         unsafe {
             let mut original: libc::termios = std::mem::zeroed();
-            libc::tcgetattr(libc::STDIN_FILENO, &mut original);
+            libc::tcgetattr(libc::STDIN_FILENO, std::ptr::from_mut(&mut original));
             let mut raw = original;
-            libc::cfmakeraw(&mut raw);
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+            libc::cfmakeraw(std::ptr::from_mut(&mut raw));
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, std::ptr::from_ref(&raw));
             Self { original }
         }
     }
@@ -358,12 +371,17 @@ impl RawTerminalGuard {
 impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
         unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+            libc::tcsetattr(
+                libc::STDIN_FILENO,
+                libc::TCSANOW,
+                std::ptr::from_ref(&self.original),
+            );
         }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

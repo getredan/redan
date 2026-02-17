@@ -32,8 +32,8 @@ pub fn image_dir() -> PathBuf {
 
 /// Where downloaded base images are cached.
 fn cache_dir() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map_or_else(|_| home_dir().join(".cache"), PathBuf::from);
+    let base =
+        std::env::var("XDG_CACHE_HOME").map_or_else(|_| home_dir().join(".cache"), PathBuf::from);
     base.join("redan")
 }
 
@@ -232,9 +232,9 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     let _ = proxy::run(proxy::ProxyConfig {
         host_sock: vm_handle.net_sock.try_clone()?,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
-        secrets: &[],              // no secrets during build
+        secrets: &[],                      // no secrets during build
         timeout: Duration::from_secs(600), // 10 min for builds
-        allowed_hosts: None,       // unrestricted during build
+        allowed_hosts: None,               // unrestricted during build
         audit_log_path: None,
         discover: false,
     });
@@ -397,10 +397,7 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
     if let Some(build) = config.get("build")
         && let Some(dockerfile) = build.get("dockerfile").and_then(|v| v.as_str())
     {
-        let context = build
-            .get("context")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let context = build.get("context").and_then(|v| v.as_str()).unwrap_or(".");
         let df_path = config_dir.join(dockerfile);
         let ctx_path = config_dir.join(context);
 
@@ -459,8 +456,8 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
             .arg(&compose_path)
             .args(["config", "--format", "json"])
             .output()?;
-        let config_json: serde_json::Value =
-            serde_json::from_slice(&config_output.stdout).map_err(|e| {
+        let config_json: serde_json::Value = serde_json::from_slice(&config_output.stdout)
+            .map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("cannot parse compose config: {e}"),

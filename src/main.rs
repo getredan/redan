@@ -14,18 +14,20 @@ use redan::session;
 
 mod cmd;
 
-fn redan_banner() -> &'static str {
-    r#"
+const fn redan_banner() -> &'static str {
+    r"
  ____  _____ ____    _    _   _
 |  _ \| ____|  _ \  / \  | \ | |
 | |_) |  _| | | | |/ _ \ |  \| |
 |  _ <| |___| |_| / ___ \| |\  |
 |_| \_\_____|____/_/   \_\_| \_|
 
-Secure AI agent sandbox with network-layer secret injection"#
+Secure AI agent sandbox with network-layer secret injection"
 }
 
 fn init_logging(log_file: Option<&str>) {
+    use std::os::unix::io::AsRawFd;
+
     let env = Env::default().default_filter_or("info");
     let mut builder = env_logger::Builder::from_env(env);
     if let Some(path) = log_file {
@@ -37,7 +39,6 @@ fn init_logging(log_file: Option<&str>) {
                 eprintln!("cannot open log file {path}: {e}");
                 std::process::exit(1);
             });
-        use std::os::unix::io::AsRawFd;
         unsafe {
             libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
         }
@@ -109,7 +110,7 @@ enum Cli {
         #[arg(long)]
         timeout: Option<u64>,
 
-        /// Inject a secret: ENV_VAR=real_value:host1,host2
+        /// Inject a secret: `ENV_VAR=real_value:host1,host2`
         ///
         /// Multiple hosts: separate with commas (not colons).
         /// Values may contain colons (last colon separates value from hosts).
@@ -222,6 +223,7 @@ enum ImageAction {
     },
 }
 
+#[allow(clippy::expect_used)] // Crypto provider init is unrecoverable
 fn main() {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -241,8 +243,7 @@ fn main() {
             secret_file,
             image,
         } => {
-            let all_secrets =
-                cmd::exec::collect_secret_specs(&secrets, secret_file.as_deref());
+            let all_secrets = cmd::exec::collect_secret_specs(&secrets, secret_file.as_deref());
             cmd::doctor::run(&all_secrets, image.as_deref());
         }
         Cli::Exec {
@@ -265,17 +266,16 @@ fn main() {
             }
             let cfg = cfg.map(|(_, c)| c).unwrap_or_default();
 
-            let mut all_secrets =
-                cmd::exec::collect_secret_specs(&secrets, secret_file.as_deref());
+            let mut all_secrets = cmd::exec::collect_secret_specs(&secrets, secret_file.as_deref());
             all_secrets.extend(cfg.secret_specs());
             let secrets = all_secrets;
 
-            let image_name = image_name.or(cfg.image.clone());
-            let rootfs = rootfs.or(cfg.rootfs.clone());
-            let command = command.or(cfg.command.clone());
+            let image_name = image_name.or_else(|| cfg.image.clone());
+            let rootfs = rootfs.or_else(|| cfg.rootfs.clone());
+            let command = command.or_else(|| cfg.command.clone());
             let timeout = timeout.or(cfg.timeout).unwrap_or(3600);
             let interactive = interactive || cfg.interactive.unwrap_or(false);
-            let audit_log = audit_log.or(cfg.audit_log.clone());
+            let audit_log = audit_log.or_else(|| cfg.audit_log.clone());
 
             let mut allow_hosts = allow_hosts;
             allow_hosts.extend(cfg.network.allow.clone());
@@ -325,19 +325,19 @@ fn main() {
                     "echo 'no --command specified'".to_string()
                 }
             });
-            cmd::exec::run(
-                &rootfs_path,
-                &command,
+            cmd::exec::run(&cmd::exec::ExecConfig {
+                rootfs: &rootfs_path,
+                command: &command,
                 interactive,
-                timeout,
-                &secrets,
-                &allow_hosts,
-                &mounts,
-                audit_log.as_deref(),
-                image_name.as_deref(),
-                &cfg.env,
+                timeout_secs: timeout,
+                secret_specs: &secrets,
+                allow_host_specs: &allow_hosts,
+                mount_specs: &mounts,
+                audit_log_path: audit_log.as_deref(),
+                image_name: image_name.as_deref(),
+                guest_env: &cfg.env,
                 discover,
-            );
+            });
         }
 
         Cli::Image { action } => match action {
@@ -347,7 +347,9 @@ fn main() {
                 run_commands,
             } => {
                 if packages.is_empty() && run_commands.is_empty() {
-                    eprintln!("warning: creating image with no packages or commands. Use --packages or --run.");
+                    eprintln!(
+                        "warning: creating image with no packages or commands. Use --packages or --run."
+                    );
                 }
                 match image::create(&name, &packages, &run_commands) {
                     Ok(_) => {}
@@ -365,9 +367,10 @@ fn main() {
                     );
                 } else {
                     for name in images {
-                        let path =
-                            image::image_path(&name).expect("listed image has invalid name");
-                        let size = cmd::doctor::dir_size(&path).unwrap_or(0);
+                        let Ok(path) = image::image_path(&name) else {
+                            continue;
+                        };
+                        let size = cmd::doctor::dir_size(&path);
                         println!("{name:20} {}", cmd::doctor::humanize_bytes(size));
                     }
                 }
@@ -385,25 +388,10 @@ fn main() {
                 dockerfile,
                 devcontainer,
             } => {
-                let result = if let Some(docker_image) = from {
-                    image::import_docker(&name, &docker_image)
-                } else if let Some(path) = dockerfile {
-                    image::import_dockerfile(&name, &path)
-                } else if let Some(path) = devcontainer {
-                    let config_path = cmd::init::resolve_devcontainer_path(&path);
-                    image::import_devcontainer(&name, &config_path)
-                } else {
-                    eprintln!(
-                        "specify --from <image>, --dockerfile <path>, or --devcontainer <path>"
-                    );
+                let result = import_image(&name, from, dockerfile, devcontainer);
+                if let Err(e) = result {
+                    eprintln!("import failed: {e}");
                     std::process::exit(1);
-                };
-                match result {
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!("import failed: {e}");
-                        std::process::exit(1);
-                    }
                 }
             }
         },
@@ -434,39 +422,31 @@ fn main() {
                 }
                 let dir = session::session_dir(&id);
                 let meta_path = dir.join("meta.json");
-                match std::fs::read_to_string(&meta_path) {
-                    Ok(content) => {
-                        let meta: session::SessionMeta =
-                            serde_json::from_str(&content).unwrap_or_else(|e| {
-                                eprintln!("corrupt session metadata: {e}");
-                                std::process::exit(1);
-                            });
-                        println!("session:  {}", meta.id);
-                        println!("status:   {}", session_status_label(&meta));
-                        println!("image:    {}", meta.image.as_deref().unwrap_or("-"));
-                        println!("command:  {}", meta.command.as_deref().unwrap_or("-"));
-                        println!("started:  {}", meta.started_at);
-                        if let Some(pid) = meta.pid {
-                            println!("pid:      {pid}");
-                        }
-                        println!("files:");
-                        if let Ok(entries) = std::fs::read_dir(&dir) {
-                            for entry in entries.flatten() {
-                                let name = entry.file_name();
-                                let size =
-                                    entry.metadata().map(|m| m.len()).unwrap_or(0);
-                                println!(
-                                    "  {} ({} bytes)",
-                                    name.to_string_lossy(),
-                                    size
-                                );
-                            }
+                if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                    let meta: session::SessionMeta =
+                        serde_json::from_str(&content).unwrap_or_else(|e| {
+                            eprintln!("corrupt session metadata: {e}");
+                            std::process::exit(1);
+                        });
+                    println!("session:  {}", meta.id);
+                    println!("status:   {}", session_status_label(&meta));
+                    println!("image:    {}", meta.image.as_deref().unwrap_or("-"));
+                    println!("command:  {}", meta.command.as_deref().unwrap_or("-"));
+                    println!("started:  {}", meta.started_at);
+                    if let Some(pid) = meta.pid {
+                        println!("pid:      {pid}");
+                    }
+                    println!("files:");
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            let size = entry.metadata().map_or(0, |m| m.len());
+                            println!("  {} ({size} bytes)", name.to_string_lossy());
                         }
                     }
-                    Err(_) => {
-                        eprintln!("session {id} not found");
-                        std::process::exit(1);
-                    }
+                } else {
+                    eprintln!("session {id} not found");
+                    std::process::exit(1);
                 }
             }
             Some(SessionAction::Remove { id }) => {
@@ -492,8 +472,7 @@ fn main() {
                     for s in &sessions {
                         let is_dead = matches!(
                             s.status,
-                            session::SessionStatus::Finished
-                                | session::SessionStatus::Failed
+                            session::SessionStatus::Finished | session::SessionStatus::Failed
                         ) || (matches!(s.status, session::SessionStatus::Running)
                             && !s.is_alive());
                         if is_dead {
@@ -510,6 +489,29 @@ fn main() {
     }
 }
 
+fn import_image(
+    name: &str,
+    from: Option<String>,
+    dockerfile: Option<String>,
+    devcontainer: Option<String>,
+) -> std::io::Result<()> {
+    if let Some(docker_image) = from {
+        image::import_docker(name, &docker_image)?;
+        return Ok(());
+    }
+    if let Some(path) = dockerfile {
+        image::import_dockerfile(name, &path)?;
+        return Ok(());
+    }
+    if let Some(path) = devcontainer {
+        let config_path = cmd::init::resolve_devcontainer_path(&path);
+        image::import_devcontainer(name, &config_path)?;
+        return Ok(());
+    }
+    eprintln!("specify --from <image>, --dockerfile <path>, or --devcontainer <path>");
+    std::process::exit(1);
+}
+
 fn session_status_label(s: &session::SessionMeta) -> &'static str {
     match &s.status {
         session::SessionStatus::Running if s.is_alive() => "running",
@@ -520,18 +522,19 @@ fn session_status_label(s: &session::SessionMeta) -> &'static str {
 }
 
 fn logs(session_id: Option<&str>, follow: bool) {
-    let id = if let Some(id) = session_id {
-        id.to_string()
-    } else {
-        let sessions = session::list_sessions();
-        match sessions.first() {
-            Some(s) => s.id.clone(),
-            None => {
-                eprintln!("no sessions found");
-                std::process::exit(1);
-            }
-        }
-    };
+    let id = session_id.map_or_else(
+        || {
+            let sessions = session::list_sessions();
+            sessions.first().map_or_else(
+                || {
+                    eprintln!("no sessions found");
+                    std::process::exit(1);
+                },
+                |s| s.id.clone(),
+            )
+        },
+        String::from,
+    );
 
     let log_path = session::session_dir(&id).join("redan.log");
     if !log_path.exists() {

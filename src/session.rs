@@ -45,17 +45,18 @@ mod hex {
 /// Base directory for session state.
 #[allow(clippy::unwrap_used)] // process::exit on missing $HOME is intentional
 pub fn sessions_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").unwrap_or_else(|| {
-                eprintln!("$HOME not set -- cannot determine state directory");
-                std::process::exit(1);
-            });
-            PathBuf::from(home).join(".local/state")
-        },
-        PathBuf::from,
-    )
-    .join("redan/sessions")
+    std::env::var_os("XDG_STATE_HOME")
+        .map_or_else(
+            || {
+                let home = std::env::var_os("HOME").unwrap_or_else(|| {
+                    eprintln!("$HOME not set -- cannot determine state directory");
+                    std::process::exit(1);
+                });
+                PathBuf::from(home).join(".local/state")
+            },
+            PathBuf::from,
+        )
+        .join("redan/sessions")
 }
 
 /// Validate session ID format (hex characters only, max 32).

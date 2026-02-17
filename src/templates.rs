@@ -10,7 +10,7 @@
 
 use std::sync::LazyLock;
 
-use minijinja::{context, Environment};
+use minijinja::{Environment, context};
 
 use crate::config::Config;
 
@@ -28,11 +28,8 @@ static ENV: LazyLock<Environment<'static>> = LazyLock::new(|| {
         include_str!("../templates/devcontainer.json.j2"),
     )
     .unwrap();
-    env.add_template(
-        "guest-policy",
-        include_str!("../templates/guest-policy.j2"),
-    )
-    .unwrap();
+    env.add_template("guest-policy", include_str!("../templates/guest-policy.j2"))
+        .unwrap();
     env
 });
 
@@ -41,8 +38,7 @@ pub fn redan_toml(cfg: &Config, claude: bool) -> String {
     let mounts: Vec<(&String, &crate::config::MountConfig)> = cfg.mount.iter().collect();
     let env_vars: Vec<(&String, &String)> = cfg.env.iter().collect();
 
-    ENV
-        .get_template("redan.toml")
+    ENV.get_template("redan.toml")
         .unwrap()
         .render(context! {
             image => cfg.image,
@@ -64,8 +60,7 @@ pub fn claude_dockerfile(
     needs_node: bool,
     has_python: bool,
 ) -> String {
-    ENV
-        .get_template("claude.dockerfile")
+    ENV.get_template("claude.dockerfile")
         .unwrap()
         .render(context! {
             base_image,
@@ -78,8 +73,7 @@ pub fn claude_dockerfile(
 
 /// Render devcontainer.json (static for now, but templated for future fields).
 pub fn devcontainer_json() -> String {
-    ENV
-        .get_template("devcontainer.json")
+    ENV.get_template("devcontainer.json")
         .unwrap()
         .render(context! {})
         .unwrap()
@@ -93,8 +87,7 @@ pub fn guest_policy(allowed_hosts: Option<&Vec<String>>) -> String {
         Some(h) => ("restrict", h.iter().map(String::as_str).collect()),
     };
 
-    ENV
-        .get_template("guest-policy")
+    ENV.get_template("guest-policy")
         .unwrap()
         .render(context! { mode, hosts })
         .unwrap()
