@@ -13,47 +13,113 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: aarch64
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      # Stub libkrun for linking. The binary requires real libkrun
-      # at runtime, but we can build against stubs.
+      - name: Install cross-compilation tools
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # Stub libkrun for linking. The binary requires real libkrun at
+      # runtime, but we can build against a stub that exports the
+      # symbols.
       - name: Create libkrun stub
         run: |
           cat > /tmp/libkrun_stub.c << 'EOF'
-          int krun_init_log(void) { return 0; }
-          int krun_create_ctx(void) { return 0; }
-          int krun_set_vm_config(void) { return 0; }
-          int krun_set_root(void) { return 0; }
-          int krun_set_workdir(void) { return 0; }
-          int krun_set_exec(void) { return 0; }
-          int krun_start_enter(void) { return 0; }
-          int krun_add_net_unixstream(void) { return 0; }
-          int krun_add_virtiofs(void) { return 0; }
-          int krun_set_console_output(void) { return 0; }
+          int krun_init_log() { return 0; }
+          int krun_create_ctx() { return 0; }
+          int krun_set_vm_config() { return 0; }
+          int krun_set_root() { return 0; }
+          int krun_set_workdir() { return 0; }
+          int krun_set_exec() { return 0; }
+          int krun_start_enter() { return 0; }
+          int krun_add_net_unixstream() { return 0; }
+          int krun_add_virtiofs() { return 0; }
+          int krun_set_console_output() { return 0; }
+          int krun_set_rlimits() { return 0; }
           EOF
-          gcc -shared -o /tmp/libkrun.so /tmp/libkrun_stub.c
-          sudo cp /tmp/libkrun.so /usr/lib/
-          sudo ldconfig
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            aarch64-linux-gnu-gcc -shared -o /tmp/libkrun.so /tmp/libkrun_stub.c
+            sudo mkdir -p /usr/aarch64-linux-gnu/lib
+            sudo cp /tmp/libkrun.so /usr/aarch64-linux-gnu/lib/
+          else
+            gcc -shared -o /tmp/libkrun.so /tmp/libkrun_stub.c
+            sudo cp /tmp/libkrun.so /usr/lib/
+            sudo ldconfig
+          fi
 
       - name: Build release
-        run: cargo build --release
+        run: |
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            export RUSTFLAGS="-L /usr/aarch64-linux-gnu/lib"
+          fi
+          cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         run: |
-          cd target/release
-          tar czf redan-${GITHUB_REF_NAME}-linux-x86_64.tar.gz redan
-          sha256sum redan-${GITHUB_REF_NAME}-linux-x86_64.tar.gz > redan-${GITHUB_REF_NAME}-linux-x86_64.tar.gz.sha256
+          cd target/${{ matrix.target }}/release
+          tar czf redan-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz redan
+          sha256sum redan-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz \
+            > redan-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redan-${{ matrix.arch }}
+          path: |
+            target/${{ matrix.target }}/release/redan-*.tar.gz
+            target/${{ matrix.target }}/release/redan-*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/redan-*.tar.gz
-            target/release/redan-*.sha256
+            redan-*.tar.gz
+            redan-*.sha256
+          body: |
+            ## Install
+
+            ```bash
+            # x86_64
+            curl -L https://github.com/getredan/redan/releases/download/${{ github.ref_name }}/redan-${{ github.ref_name }}-linux-x86_64.tar.gz | tar xz
+            sudo mv redan /usr/local/bin/
+
+            # aarch64
+            curl -L https://github.com/getredan/redan/releases/download/${{ github.ref_name }}/redan-${{ github.ref_name }}-linux-aarch64.tar.gz | tar xz
+            sudo mv redan /usr/local/bin/
+            ```
+
+            Requires libkrun and KVM at runtime. See README for details.
           generate_release_notes: true
