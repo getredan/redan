@@ -22,6 +22,10 @@ and are injected into HTTP requests at the network layer.
   contents) in DNS labels of hostnames it connects to. The upstream
   connection will fail (no server), but the DNS query reaches the
   attacker's authoritative nameserver.
+- **Unauthorized outbound connections**: default-deny networking blocks
+  connections to hosts not in the allowlist. The guest can only reach
+  hosts explicitly permitted via `--allow-host` or `[network] allow`
+  in `redan.toml`. Secret hosts are auto-included.
 - **Secret exposure in logs**: `Debug` formatting on `SecretBinding`
   prints `[REDACTED]`. Secrets are wrapped in `Zeroizing<String>`
   and overwritten on drop.
