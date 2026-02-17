@@ -1,6 +1,16 @@
 language: en
 early_access: true
+chat:
+  auto_reply: false
 reviews:
+  auto_review:
+    enabled: true
+  collapse_walkthrough: true
+  changed_files_summary: false
+  poem: false
+  high_level_summary: false
+  sequence_diagrams: false
+  abort_on_close: true
   profile: chill
   path_instructions:
     - path: "tests/**/*.rs"
