@@ -136,8 +136,8 @@ pub fn find_and_load() -> Option<(PathBuf, Config)> {
             match load(&path) {
                 Ok(config) => return Some((path, config)),
                 Err(e) => {
-                    eprintln!("warning: failed to parse {}: {e}", path.display());
-                    return None;
+                    eprintln!("error: failed to parse {}: {e}", path.display());
+                    std::process::exit(1);
                 }
             }
         }

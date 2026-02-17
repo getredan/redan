@@ -1,0 +1,346 @@
+name: CodeRabbit Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      analysis_type:
+        description: 'Type of analysis to run'
+        required: true
+        default: 'recent_changes'
+        type: choice
+        options:
+          - recent_changes
+          - full_codebase
+          - security_audit
+          - pr_style_review
+      commit_range:
+        description: 'Commit range to analyze (e.g., HEAD~20..HEAD). Ignored for full_codebase.'
+        required: false
+        default: 'HEAD~30..HEAD'
+      focus_areas:
+        description: 'Comma-separated focus areas (security,performance,api,safety)'
+        required: false
+        default: 'security,safety'
+
+jobs:
+  prepare-analysis:
+    runs-on: ubuntu-latest
+    outputs:
+      commits: ${{ steps.commits.outputs.commits }}
+      files: ${{ steps.files.outputs.files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get commits in range
+        id: commits
+        run: |
+          if [ "${{ github.event.inputs.analysis_type }}" = "full_codebase" ]; then
+            echo "commits=all" >> $GITHUB_OUTPUT
+          else
+            RANGE="${{ github.event.inputs.commit_range }}"
+            COMMITS=$(git log --format='%H' "$RANGE" | jq -R . | jq -s .)
+            echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get changed files
+        id: files
+        run: |
+          if [ "${{ github.event.inputs.analysis_type }}" = "full_codebase" ]; then
+            FILES=$(find src tests -name "*.rs" | jq -R . | jq -s .)
+          else
+            RANGE="${{ github.event.inputs.commit_range }}"
+            FILES=$(git diff --name-only "$RANGE" | grep '\.rs$' | jq -R . | jq -s .)
+          fi
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+
+      - name: Generate analysis context
+        run: |
+          cat > analysis-context.md << 'EOF'
+          # CodeRabbit Analysis Context for redan
+
+          ## Project Overview
+          Redan is a security-critical, local-first AI agent execution environment.
+          Uses Rust + libkrun microVMs + network-layer secret injection.
+
+          ## Security Model
+          - Zero-trust guest execution
+          - Ephemeral MITM CA for TLS inspection
+          - Default-deny networking with host allowlist
+          - Secret scrubbing on all response paths
+          - Memory-safe Rust throughout
+
+          ## Recent Development Focus (Past 4 Weeks)
+          - Session management and lifecycle
+          - Devcontainer support (Claude Code integration)
+          - Template-based code generation (minijinja)
+          - Config file support (redan.toml)
+          - Security hardening (Oracle review rounds 4-9)
+          - Audit logging and structured events
+
+          ## Critical Modules
+          - `src/proxy.rs` - TLS MITM, secret injection, host filtering
+          - `src/secret.rs` - Secret handling and scrubbing
+          - `src/ca.rs` - Ephemeral certificate authority
+          - `src/vm.rs` - libkrun VM lifecycle
+          - `src/config.rs` - Configuration parsing
+
+          ## Testing Requirements
+          - Unit tests for pure logic
+          - Integration tests (marked #[ignore], need KVM)
+          - Adversarial tests for security boundaries
+          - No mocking of security-critical components
+          EOF
+
+          cat analysis-context.md
+
+  # This job creates a PR-like environment for CodeRabbit to analyze
+  trigger-coderabbit:
+    runs-on: ubuntu-latest
+    needs: prepare-analysis
+    if: github.event.inputs.analysis_type == 'pr_style_review'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create analysis branch
+        run: |
+          git config user.name "CodeRabbit Analysis"
+          git config user.email "analysis@coderabbit.ai"
+          git checkout -b analysis/${{ github.run_id }}
+
+      - name: Prepare files for analysis
+        run: |
+          # Create a summary file of recent changes for analysis
+          cat > .coderabbit-recent-changes.md << EOF
+          # Recent Changes for Systematic Analysis
+
+          ## Analysis Parameters
+          - Type: ${{ github.event.inputs.analysis_type }}
+          - Commit Range: ${{ github.event.inputs.commit_range }}
+          - Focus Areas: ${{ github.event.inputs.focus_areas }}
+
+          ## Commits to Analyze
+          EOF
+
+          git log --oneline --format='- %h: %s' "${{ github.event.inputs.commit_range }}" >> .coderabbit-recent-changes.md
+
+          cat >> .coderabbit-recent-changes.md << EOF
+
+          ## Files Changed
+          EOF
+
+          git diff --stat "${{ github.event.inputs.commit_range }}" >> .coderabbit-recent-changes.md
+
+          cat >> .coderabbit-recent-changes.md << EOF
+
+          ## Analysis Checklist
+
+          ### Security
+          - [ ] No secrets in logs/errors
+          - [ ] Input validation on all external data
+          - [ ] Proper error handling (no unwrap in prod)
+          - [ ] TLS/CA implementation correctness
+          - [ ] Host allowlist enforcement
+
+          ### Safety
+          - [ ] No unsafe blocks without justification
+          - [ ] Proper Arc/Mutex usage
+          - [ ] Resource limits enforced
+          - [ ] No panic paths in request handling
+
+          ### API Design
+          - [ ] CLI interface consistency
+          - [ ] Config file format stability
+          - [ ] Error messages are helpful
+          - [ ] Documentation matches code
+
+          ### Performance
+          - [ ] No unnecessary allocations in hot paths
+          - [ ] Efficient string handling
+          - [ ] Proper buffer sizing
+          EOF
+
+          git add .coderabbit-recent-changes.md
+          git commit -m "chore: Prepare files for CodeRabbit analysis [skip ci]"
+          git push origin analysis/${{ github.run_id }}
+
+      - name: Create PR for CodeRabbit analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "[CodeRabbit Analysis] ${{ github.event.inputs.analysis_type }}" \
+            --body "This PR was created to trigger CodeRabbit analysis for recent changes.
+
+          ## Analysis Type
+          ${{ github.event.inputs.analysis_type }}
+
+          ## Commit Range
+          \`\`\`
+          ${{ github.event.inputs.commit_range }}
+          \`\`\`
+
+          ## Focus Areas
+          ${{ github.event.inputs.focus_areas }}
+
+          ## Purpose
+          This PR exists solely to provide CodeRabbit with the context needed to perform a comprehensive analysis.
+          Do not merge - close after analysis is complete.
+
+          ## How to Use
+          1. Wait for CodeRabbit to complete its review
+          2. Review the findings
+          3. Close this PR without merging
+          4. Apply findings to the actual codebase separately" \
+            --base main \
+            --head analysis/${{ github.run_id }}
+
+  summarize-for-manual-review:
+    runs-on: ubuntu-latest
+    needs: prepare-analysis
+    if: github.event.inputs.analysis_type != 'pr_style_review'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate comprehensive change summary
+        run: |
+          cat > coderabbit-analysis-prompt.md << 'EOF'
+          # CodeRabbit Analysis Request: ${{ github.event.inputs.analysis_type }}
+
+          ## Project: redan
+          Repository: https://github.com/${{ github.repository }}
+          Analysis Date: ${{ github.event.head_commit.timestamp }}
+
+          ## Analysis Scope
+          Type: ${{ github.event.inputs.analysis_type }}
+          Commit Range: ${{ github.event.inputs.commit_range }}
+          Focus Areas: ${{ github.event.inputs.focus_areas }}
+
+          ## Recent Commit Summary
+          EOF
+
+          echo "" >> coderabbit-analysis-prompt.md
+          echo "\`\`\`" >> coderabbit-analysis-prompt.md
+          git log --oneline "${{ github.event.inputs.commit_range }}" >> coderabbit-analysis-prompt.md
+          echo "\`\`\`" >> coderabbit-analysis-prompt.md
+
+          cat >> coderabbit-analysis-prompt.md << 'EOF'
+
+          ## Module-Specific Questions
+
+          ### src/proxy.rs (TLS MITM Proxy)
+          EOF
+
+          git log --oneline --format='- %s' "${{ github.event.inputs.commit_range }}" -- src/proxy.rs >> coderabbit-analysis-prompt.md 2>/dev/null || echo "- No changes in this period" >> coderabbit-analysis-prompt.md
+
+          cat >> coderabbit-analysis-prompt.md << 'EOF'
+
+          Questions:
+          1. Is the connection state machine free from race conditions?
+          2. Are all error paths safe (no partial writes, no state corruption)?
+          3. Is the TLS MITM implementation cryptographically sound?
+          4. Does host allowlist enforcement happen before any data transmission?
+          5. Are secrets properly scrubbed from all response paths?
+
+          ### src/secret.rs (Secret Handling)
+          EOF
+
+          git log --oneline --format='- %s' "${{ github.event.inputs.commit_range }}" -- src/secret.rs >> coderabbit-analysis-prompt.md 2>/dev/null || echo "- No changes in this period" >> coderabbit-analysis-prompt.md
+
+          cat >> coderabbit-analysis-prompt.md << 'EOF'
+
+          Questions:
+          1. Are secrets ever exposed in error messages or logs?
+          2. Is the scrubbing regex safe from ReDoS?
+          3. Are binary secrets handled correctly (no UTF-8 assumptions)?
+          4. Is the secret provider interface sound?
+
+          ### src/ca.rs (Certificate Authority)
+          EOF
+
+          git log --oneline --format='- %s' "${{ github.event.inputs.commit_range }}" -- src/ca.rs >> coderabbit-analysis-prompt.md 2>/dev/null || echo "- No changes in this period" >> coderabbit-analysis-prompt.md
+
+          cat >> coderabbit-analysis-prompt.md << 'EOF'
+
+          Questions:
+          1. Is CA private key handling secure (zeroization, no persistence)?
+          2. Are leaf certificates properly constrained?
+          3. Is certificate validation complete?
+
+          ### src/vm.rs (VM Lifecycle)
+          EOF
+
+          git log --oneline --format='- %s' "${{ github.event.inputs.commit_range }}" -- src/vm.rs >> coderabbit-analysis-prompt.md 2>/dev/null || echo "- No changes in this period" >> coderabbit-analysis-prompt.md
+
+          cat >> coderabbit-analysis-prompt.md << 'EOF'
+
+          Questions:
+          1. Are resource limits (rlimits) properly enforced?
+          2. Is the virtio-net socket handling safe?
+          3. Is guest isolation guaranteed?
+
+          ### src/session.rs (Session Management)
+          EOF
+
+          git log --oneline --format='- %s' "${{ github.event.inputs.commit_range }}" -- src/session.rs >> coderabbit-analysis-prompt.md 2>/dev/null || echo "- No changes in this period" >> coderabbit-analysis-prompt.md
+
+          cat >> coderabbit-analysis-prompt.md << 'EOF'
+
+          Questions:
+          1. Is session path handling safe from directory traversal?
+          2. Are session metadata files properly validated?
+          3. Is session cleanup complete?
+
+          ## General Analysis Questions
+
+          ### Security
+          - Are there any new `unsafe` blocks? If so, are they justified?
+          - Are all `unwrap()` and `expect()` calls in non-test code justified?
+          - Is input validation present on all external entry points?
+          - Are error messages information-leak-free?
+
+          ### Correctness
+          - Are async/sync boundaries handled correctly?
+          - Is lock ordering consistent to prevent deadlocks?
+          - Are there any resource leaks (files, sockets, memory)?
+
+ ### Testing
+          - Are security boundaries tested with adversarial inputs?
+          - Is error handling tested (not just happy paths)?
+          - Do integration tests properly clean up resources?
+
+          ### API/UX
+          - Are CLI changes backward compatible?
+          - Is configuration handling robust?
+          - Are error messages actionable?
+
+          ## Please Provide
+          1. A high-level summary of the changes and their security implications
+          2. Specific findings for each module that changed
+          3. Any patterns that should be applied to future changes
+          4. Risk assessment for the overall change set
+          EOF
+
+          cat coderabbit-analysis-prompt.md
+
+      - name: Upload analysis prompt
+        uses: actions/upload-artifact@v4
+        with:
+          name: coderabbit-analysis-prompt
+          path: coderabbit-analysis-prompt.md
+
+      - name: Summary
+        run: |
+          echo "## CodeRabbit Analysis Prepared" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Analysis prompt has been generated and uploaded as an artifact." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the artifact \`coderabbit-analysis-prompt.md\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Use it as context when interacting with CodeRabbit" >> $GITHUB_STEP_SUMMARY
+          echo "3. Or create a PR using the 'pr_style_review' analysis type to trigger automatic review" >> $GITHUB_STEP_SUMMARY

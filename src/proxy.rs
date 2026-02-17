@@ -95,7 +95,10 @@ pub fn run(
             .create(true)
             .append(true)
             .open(path)
-            .unwrap_or_else(|e| panic!("cannot open audit log {path}: {e}"));
+            .unwrap_or_else(|e| {
+                eprintln!("cannot open audit log {path}: {e}");
+                std::process::exit(1);
+            });
         Arc::new(Mutex::new(BufWriter::new(file)))
     });
 

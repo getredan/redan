@@ -1,0 +1,124 @@
+# CodeRabbit configuration for redan - Security-critical AI agent execution environment
+# https://coderabbit.ai/docs/configure-coderabbit
+
+language: en-US
+
+early_access: false
+
+reviews:
+  # Request changes when issues found (not just comments)
+  request_changes_workflow: true
+
+  # High-level review settings
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  path_filters: []
+
+  # Path-based instructions for different modules
+  path_instructions:
+    - path: "src/*.rs"
+      instructions: |
+        This is a security-critical Rust project (redan - secure AI agent execution).
+        Review for:
+        1. Memory safety - no unsafe blocks without justification
+        2. Error handling - proper Result propagation, no unwrap/expect in production paths
+        3. Cryptographic correctness - CA/cert handling, TLS implementation
+        4. Input validation - all external input sanitized
+        5. Secret handling - no logging of secrets, proper scrubbing
+        6. Concurrency - proper Arc/Mutex usage, no race conditions
+        7. Resource exhaustion - fd limits, buffer sizes, timeouts
+
+    - path: "src/proxy.rs"
+      instructions: |
+        The proxy module is the core security boundary. Pay special attention to:
+        1. TLS MITM implementation correctness
+        2. Host allowlist enforcement
+        3. Secret injection and scrubbing logic
+        4. Connection state machine correctness
+        5. No request smuggling vulnerabilities
+
+    - path: "src/secret.rs"
+      instructions: |
+        Secret handling module. Verify:
+        1. Secrets are never logged or exposed in errors
+        2. Scrubbing covers all output paths (headers, body, errors)
+        3. Binary data handling is correct
+        4. Regex patterns are safe from ReDoS
+
+    - path: "src/ca.rs"
+      instructions: |
+        Certificate authority for ephemeral MITM certs. Review:
+        1. CA key generation and storage
+        2. Leaf cert generation with proper constraints
+        3. No private key material exposure
+        4. Certificate validation logic
+
+    - path: "src/vm.rs"
+      instructions: |
+        VM lifecycle management using libkrun. Check:
+        1. Resource limits (rlimits) are properly set
+        2. KVM/file descriptor handling is safe
+        3. virtio-net socket handling
+        4. Guest isolation guarantees
+
+    - path: "tests/**/*.rs"
+      instructions: |
+        Test review - verify:
+        1. Tests validate real behavior, not mocks
+        2. Security boundaries are actually tested
+        3. Adversarial tests cover edge cases
+        4. Integration tests have proper cleanup
+
+    - path: "templates/*.j2"
+      instructions: |
+        Minijinja templates. Ensure:
+        1. No injection vulnerabilities in template rendering
+        2. Context variables are properly escaped
+
+  # Auto-review settings
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: ["main", "master"]
+
+  # Specific review tools
+  tools:
+    # Rust-specific analysis
+    clippy:
+      enabled: true
+    rustfmt:
+      enabled: true
+
+    # General code quality
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true  # Critical for this project - secret detection
+
+    # Security-specific
+    bandit:
+      enabled: false  # Python only
+    semgrep:
+      enabled: true
+    ruff:
+      enabled: false  # Python only
+
+    # Dependency checking
+    github-checks:
+      enabled: true
+    languagetool:
+      enabled: true
+
+# Chat settings
+chat:
+  auto_reply: true
+
+# Knowledge base for context
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: "local"  # Learn from this repo's patterns

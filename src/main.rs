@@ -46,7 +46,10 @@ fn init_logging(log_file: Option<&str>) {
             .create(true)
             .append(true)
             .open(path)
-            .unwrap_or_else(|e| panic!("cannot open log file {path}: {e}"));
+            .unwrap_or_else(|e| {
+                eprintln!("cannot open log file {path}: {e}");
+                std::process::exit(1);
+            });
         // Redirect stderr to the log file. libkrun writes directly
         // to stderr (bypassing the Rust log crate), so Target::Pipe
         // alone isn't enough.
@@ -83,6 +86,7 @@ fn redirect_logs_to_file(path: &std::path::Path) {
 #[derive(Parser)]
 #[command(
     name = "redan",
+    version,
     about = redan_banner(),
     long_about = redan_banner(),
 )]

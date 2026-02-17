@@ -14,9 +14,13 @@ const ALPINE_VERSION: &str = "3.21.3";
 const ALPINE_MINOR: &str = "3.21";
 
 fn home_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("HOME").expect("$HOME not set -- cannot determine config directories"),
-    )
+    match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => {
+            eprintln!("$HOME not set -- cannot determine config directories");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Where images are stored.

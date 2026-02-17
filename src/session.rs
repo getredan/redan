@@ -39,7 +39,10 @@ pub fn sessions_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME not set");
+            let home = std::env::var_os("HOME").unwrap_or_else(|| {
+                eprintln!("$HOME not set -- cannot determine state directory");
+                std::process::exit(1);
+            });
             PathBuf::from(home).join(".local/state")
         })
         .join("redan/sessions")
