@@ -61,6 +61,10 @@ pub struct Config {
     /// Mount definitions, keyed by tag name
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mount: BTreeMap<String, MountConfig>,
+
+    /// Extra environment variables for the guest
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

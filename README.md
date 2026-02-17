@@ -200,6 +200,16 @@ Agents that check `$REDAN` can adapt their behavior: skip web searches,
 avoid fetching URLs outside the allowlist, and give users clear error
 messages instead of "connection failed".
 
+**Planned: Agent config integration.** redan will read agent-native
+sandbox configs (e.g. `.claude/settings.json` `sandbox.allowedDomains`)
+and enforce them at the network layer. This means teams define network
+policy once in their agent config, and redan enforces it in the VM where
+it can't be bypassed. redan can also generate agent configs that tell the
+agent it's running in a trusted sandbox (e.g. Claude Code's
+`--dangerously-skip-permissions`), reducing permission prompts while
+maintaining real isolation. The goal: agent-native configs as the
+single source of truth, redan as the enforcement layer.
+
 ## Setup with Claude Code
 
 ```bash

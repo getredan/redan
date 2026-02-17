@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -364,6 +365,7 @@ fn main() {
                 &mounts,
                 audit_log.as_deref(),
                 image_name.as_deref(),
+                &cfg.env,
             );
         }
 
@@ -609,8 +611,11 @@ fn init(claude: bool) {
 
     // --claude: generate devcontainer with Claude Code, wire up config
     if claude {
-        cfg.command = Some("claude".into());
+        cfg.command = Some("claude --dangerously-skip-permissions".into());
         cfg.interactive = Some(true);
+
+        // Point Claude Code's config to workspace so sessions persist
+        cfg.env.insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
 
         // Claude Code API hosts
         let claude_hosts = [
@@ -1299,6 +1304,7 @@ fn exec(
     mount_specs: &[String],
     audit_log_path: Option<&str>,
     image_name: Option<&str>,
+    guest_env: &BTreeMap<String, String>,
 ) {
     // Create session
     let session_id = session::new_id();
@@ -1446,6 +1452,11 @@ fn exec(
     // Add secret placeholders as env vars in the guest
     for (name, placeholder) in &secret_env {
         env.push(format!("{name}={placeholder}"));
+    }
+
+    // Add user-defined env vars from config
+    for (name, value) in guest_env {
+        env.push(format!("{name}={value}"));
     }
 
     let config = vm::VmConfig {
