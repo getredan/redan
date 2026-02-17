@@ -169,9 +169,12 @@ enum Cli {
         action: ImageAction,
     },
 
-    /// Show past execution sessions
+    /// Manage execution sessions
     #[command(name = "sessions")]
-    Sessions,
+    Sessions {
+        #[command(subcommand)]
+        action: Option<SessionAction>,
+    },
 
     /// Show logs from the most recent (or specified) session
     Logs {
@@ -188,6 +191,21 @@ enum Cli {
         /// Include Claude Code in the generated devcontainer
         #[arg(long)]
         claude: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum SessionAction {
+    /// Show details for a session
+    Show {
+        /// Session ID
+        id: String,
+    },
+
+    /// Remove exited sessions (or a specific one)
+    Remove {
+        /// Session ID (omit to remove all exited sessions)
+        id: Option<String>,
     },
 }
 
@@ -410,28 +428,99 @@ fn main() {
         },
         Cli::Logs { session, follow } => logs(session.as_deref(), follow),
         Cli::Init { claude } => init(claude),
-        Cli::Sessions => {
-            let sessions = session::list_sessions();
-            if sessions.is_empty() {
-                eprintln!("no sessions. Run: redan exec --image <name> --command <cmd>");
-            } else {
-                for s in &sessions {
-                    let status = match &s.status {
-                        session::SessionStatus::Running if s.is_alive() => "running",
-                        session::SessionStatus::Running => "exited",
-                        session::SessionStatus::Finished => "finished",
-                        session::SessionStatus::Failed => "failed",
-                    };
-                    println!(
-                        "{}  {:10} {:20} {}",
-                        s.id,
-                        status,
-                        s.image.as_deref().unwrap_or("-"),
-                        s.started_at,
-                    );
+        Cli::Sessions { action } => match action {
+            None => {
+                let sessions = session::list_sessions();
+                if sessions.is_empty() {
+                    eprintln!("no sessions. Run: redan exec --image <name> --command <cmd>");
+                } else {
+                    for s in &sessions {
+                        let status = session_status_label(&s);
+                        println!(
+                            "{}  {:10} {:20} {}",
+                            s.id,
+                            status,
+                            s.image.as_deref().unwrap_or("-"),
+                            s.started_at,
+                        );
+                    }
+                }
+            }
+            Some(SessionAction::Show { id }) => {
+                let dir = session::session_dir(&id);
+                let meta_path = dir.join("meta.json");
+                match std::fs::read_to_string(&meta_path) {
+                    Ok(content) => {
+                        let meta: session::SessionMeta = serde_json::from_str(&content)
+                            .unwrap_or_else(|e| {
+                                eprintln!("corrupt session metadata: {e}");
+                                std::process::exit(1);
+                            });
+                        println!("session:  {}", meta.id);
+                        println!("status:   {}", session_status_label(&meta));
+                        println!("image:    {}", meta.image.as_deref().unwrap_or("-"));
+                        println!("command:  {}", meta.command.as_deref().unwrap_or("-"));
+                        println!("started:  {}", meta.started_at);
+                        if let Some(pid) = meta.pid {
+                            println!("pid:      {pid}");
+                        }
+                        // List files in session dir
+                        println!("files:");
+                        if let Ok(entries) = std::fs::read_dir(&dir) {
+                            for entry in entries.flatten() {
+                                let name = entry.file_name();
+                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                                println!("  {} ({} bytes)", name.to_string_lossy(), size);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("session {id} not found");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(SessionAction::Remove { id }) => {
+                if let Some(id) = id {
+                    let dir = session::session_dir(&id);
+                    if dir.exists() {
+                        std::fs::remove_dir_all(&dir).unwrap_or_else(|e| {
+                            eprintln!("cannot remove session {id}: {e}");
+                            std::process::exit(1);
+                        });
+                        eprintln!("removed session {id}");
+                    } else {
+                        eprintln!("session {id} not found");
+                        std::process::exit(1);
+                    }
+                } else {
+                    // Remove all exited sessions
+                    let sessions = session::list_sessions();
+                    let mut removed = 0;
+                    for s in &sessions {
+                        let is_dead = matches!(s.status,
+                            session::SessionStatus::Finished | session::SessionStatus::Failed
+                        ) || (matches!(s.status, session::SessionStatus::Running) && !s.is_alive());
+                        if is_dead {
+                            let dir = session::session_dir(&s.id);
+                            if std::fs::remove_dir_all(&dir).is_ok() {
+                                removed += 1;
+                            }
+                        }
+                    }
+                    eprintln!("removed {removed} exited session(s)");
                 }
             }
         }
+    }
+}
+
+fn session_status_label(s: &session::SessionMeta) -> &'static str {
+    match &s.status {
+        session::SessionStatus::Running if s.is_alive() => "running",
+        session::SessionStatus::Running => "exited",
+        session::SessionStatus::Finished => "finished",
+        session::SessionStatus::Failed => "failed",
     }
 }
 
