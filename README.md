@@ -354,15 +354,9 @@ Agents that check `$REDAN` can adapt their behavior: skip web searches,
 avoid fetching URLs outside the allowlist, and give users clear error
 messages instead of "connection failed".
 
-**Planned: Agent config integration.** redan will read agent-native
-sandbox configs (e.g. `.claude/settings.json` `sandbox.allowedDomains`)
-and enforce them at the network layer. This means teams define network
-policy once in their agent config, and redan enforces it in the VM where
-it can't be bypassed. redan can also generate agent configs that tell the
-agent it's running in a trusted sandbox (e.g. Claude Code's
-`--dangerously-skip-permissions`), reducing permission prompts while
-maintaining real isolation. The goal: agent-native configs as the
-single source of truth, redan as the enforcement layer.
+Redan reads `sandbox.network.allowedDomains` from Claude Code settings
+and merges them into the allowlist. Define network policy once in your
+agent config, redan enforces it at the VM network layer.
 
 ## Setup with Claude Code
 
@@ -393,8 +387,6 @@ the VM tries to exfiltrate secrets or access unauthorized resources.
 
 **Known limitations:**
 - Scrubbing doesn't catch encoded secrets (base64, URL-encoding, etc.)
-- Domain fronting could route secrets to attacker-controlled backends
-  behind CDNs
 - No HTTP request body inspection (secrets in headers only)
 
 Primary defense is the host allowlist, not scrubbing. Scrubbing reduces
@@ -403,11 +395,57 @@ accidental exposure; it's not a hard security boundary.
 See [docs/security-model.md](docs/security-model.md) for the full
 threat model, side-channel analysis, and known limitations.
 
+## Limitations
+
+Be aware of what redan does and doesn't support before deploying it.
+
+### Supported auth patterns
+
+- `Authorization: Bearer <token>` -- standard API key injection
+- Custom headers (`X-Api-Key`, etc.) -- any header-based auth
+- Multiple secrets to multiple hosts in one session
+
+### Unsupported auth patterns
+
+These patterns require secrets in places redan can't inject:
+
+- **OAuth flows** -- token exchanges happen in request/response bodies
+- **AWS SigV4** -- request signing requires the secret at the call site
+  to compute HMAC over headers and body
+- **Client certificates** -- mTLS requires the cert in the TLS handshake,
+  which redan terminates
+- **Body-embedded tokens** -- GraphQL variables, form fields, JSON bodies
+  carrying auth tokens
+- **Cookie-based auth** -- `Set-Cookie` from login flows, session tokens
+
+If your API requires one of these, redan can still provide VM isolation
+and network restriction, but can't inject or scrub the credential.
+Pass it via environment variable (the guest sees the real value).
+
+### Protocol constraints
+
+- **HTTP/1.1 only.** Redan forces ALPN to `http/1.1`. All major APIs
+  (Anthropic, OpenAI, GitHub, npm) support HTTP/1.1. If a server
+  requires HTTP/2, it won't work through redan.
+- **No WebSocket.** Upgrade requests return 501. Binary framing after
+  the upgrade would bypass scrubbing.
+- **No raw TCP/UDP.** All guest traffic goes through the HTTPS proxy.
+  SSH, database connections, gRPC (over H2) don't work.
+- **HTTPS only.** Plain HTTP on port 80 is rejected.
+
+### Platform
+
+- **Linux only.** Requires KVM (`/dev/kvm`). libkrun supports macOS
+  via Hypervisor.framework but this is untested.
+- **x86_64 and aarch64.** Other architectures are untested.
+- **No Windows.** WSL2 with KVM passthrough may work but is untested.
+
 ## Status
 
 **Alpha.** The full chain works end-to-end: `redan init --claude` through
-interactive Claude Code sessions with network policy enforcement. Not
-yet packaged for binary distribution.
+interactive Claude Code sessions with network policy enforcement.
+Pre-built binaries for Linux x86_64 and aarch64 on
+[GitHub Releases](https://github.com/getredan/redan/releases).
 
 ## Acknowledgments
 
