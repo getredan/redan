@@ -80,13 +80,14 @@ fn end_to_end_secret_injection() {
 
     // Proxy runs until timeout. The guest output (DNS, HTTPS, JSON response)
     // goes to the VM console. The proxy logs show injection + scrubbing.
-    proxy::run(proxy::ProxyConfig {
+    let _ = proxy::run(proxy::ProxyConfig {
         host_sock: net_sock,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
         secrets: &secrets,
         timeout: Duration::from_secs(45),
         allowed_hosts: None,
         audit_log_path: None,
+        discover: false,
     });
 }
 
@@ -131,12 +132,13 @@ fn synthetic_dns_resolution() {
     let vm_handle = vm::Vm::boot(config);
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
-    proxy::run(proxy::ProxyConfig {
+    let _ = proxy::run(proxy::ProxyConfig {
         host_sock: net_sock,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
         secrets: &[],
         timeout: Duration::from_secs(20),
         allowed_hosts: None,
         audit_log_path: None,
+        discover: false,
     });
 }

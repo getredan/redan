@@ -259,6 +259,34 @@ explicitly in the allowlist may resolve to private IPs -- add
 Domain fronting is blocked: requests where the HTTP Host header doesn't
 match the TLS SNI hostname are rejected (HTTP 421).
 
+### Discover mode
+
+Don't know what hosts your agent needs? Run once in discover mode:
+
+```bash
+redan exec --image myimage --discover --command "claude --print 'build this project'"
+```
+
+Redan allows all connections and prints the observed hosts at exit:
+
+```
+--- discovered hosts ---
+The agent connected to these hosts:
+
+  api.anthropic.com
+  registry.npmjs.org
+
+Suggested redan.toml:
+
+[network]
+allow = [
+    "api.anthropic.com",
+    "registry.npmjs.org",
+]
+```
+
+Copy the output into your `redan.toml` and subsequent runs enforce it.
+
 ## Sessions
 
 Each `redan exec` creates a session with a unique ID. Session metadata,

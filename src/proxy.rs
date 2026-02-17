@@ -82,9 +82,15 @@ pub struct ProxyConfig<'a> {
     pub timeout: Duration,
     pub allowed_hosts: Option<Vec<String>>,
     pub audit_log_path: Option<&'a str>,
+    /// Discover mode: allow all connections, collect hostnames.
+    pub discover: bool,
 }
 
-pub fn run(cfg: ProxyConfig<'_>) {
+/// Hosts observed during a discover-mode run.
+type DiscoveredHosts = Arc<Mutex<std::collections::BTreeSet<String>>>;
+
+/// Hosts discovered during a `--discover` run. Returned to the caller.
+pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
     let ProxyConfig {
         host_sock,
         ca,
@@ -92,13 +98,22 @@ pub fn run(cfg: ProxyConfig<'_>) {
         timeout,
         allowed_hosts,
         audit_log_path,
+        discover,
     } = cfg;
     let resolver = Arc::new(MitmCertResolver {
         ca: Arc::clone(&ca),
     });
     let server_config = ca::mitm_server_config(resolver);
     let secrets: Arc<[SecretBinding]> = secrets.into();
-    let allowed_hosts: Option<Arc<[String]>> = allowed_hosts.map(Into::into);
+
+    // In discover mode, allow all connections so we can observe what
+    // the agent tries to reach.
+    let allowed_hosts: Option<Arc<[String]>> = if discover {
+        None
+    } else {
+        allowed_hosts.map(Into::into)
+    };
+    let discovered: DiscoveredHosts = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
 
     let audit_log: AuditLog = audit_log_path.map(|path| {
         let file = std::fs::OpenOptions::new()
@@ -187,6 +202,7 @@ pub fn run(cfg: ProxyConfig<'_>) {
                                 &secrets,
                                 allowed_hosts.as_ref(),
                                 &audit_log,
+                                &discovered,
                             ),
                         );
                         backlog.handles[i] = add_tcp_listener(&mut sockets, backlog.port);
@@ -213,6 +229,12 @@ pub fn run(cfg: ProxyConfig<'_>) {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+
+    // Return discovered hosts (empty if not in discover mode)
+    discovered
+        .lock()
+        .map(|h| h.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 struct ListenBacklog {
@@ -295,6 +317,7 @@ impl ProxyConn {
         secrets: &Arc<[SecretBinding]>,
         allowed_hosts: Option<&Arc<[String]>>,
         audit_log: &AuditLog,
+        discovered: &DiscoveredHosts,
     ) -> Self {
         let mut conn = Self {
             handle,
@@ -321,6 +344,7 @@ impl ProxyConn {
             let secrets = Arc::clone(secrets);
             let allowed = allowed_hosts.cloned();
             let alog = audit_log.clone();
+            let disc = Arc::clone(discovered);
             std::thread::spawn(move || {
                 if let Err(e) = tls_connection_thread(
                     to_rx,
@@ -329,6 +353,7 @@ impl ProxyConn {
                     &secrets,
                     allowed.as_deref(),
                     &alog,
+                    &disc,
                 ) {
                     log::warn!("TLS connection thread error: {e}");
                 }
@@ -544,6 +569,7 @@ fn tls_connection_thread(
     secrets: &[SecretBinding],
     allowed_hosts: Option<&[String]>,
     audit_log: &AuditLog,
+    discovered: &DiscoveredHosts,
 ) -> Result<(), crate::error::Error> {
     let stream = ChannelStream::new(rx, tx);
     let server_conn = rustls::ServerConnection::new(server_config)?;
@@ -674,6 +700,11 @@ fn tls_connection_thread(
     // Connect upstream
     log::info!("upstream connect for {sni}");
     audit(audit_log, "connect", &[("host", &sni)]);
+
+    // Record host for discover mode
+    if let Ok(mut hosts) = discovered.lock() {
+        hosts.insert(sni.to_ascii_lowercase());
+    }
     // Allow private IPs only for hosts explicitly in the allowlist.
     // Blocks DNS rebinding attacks to cloud metadata / internal services,
     // but lets users reach localhost or internal hosts they opted into.

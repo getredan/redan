@@ -137,6 +137,11 @@ enum Cli {
         /// Useful in interactive mode where stderr interleaves with the TUI.
         #[arg(long, value_name = "PATH")]
         log_file: Option<String>,
+
+        /// Discover mode: allow all connections, print observed hosts at exit.
+        /// Run once to find out what hosts the agent needs, then lock down.
+        #[arg(long)]
+        discover: bool,
     },
 
     /// Manage rootfs images
@@ -244,6 +249,7 @@ fn main() {
             mounts,
             audit_log,
             log_file: _,
+            discover,
         } => {
             let cfg = config::find_and_load();
             if let Some((path, _)) = &cfg {
@@ -310,6 +316,7 @@ fn main() {
                 audit_log.as_deref(),
                 image_name.as_deref(),
                 &cfg.env,
+                discover,
             );
         }
 

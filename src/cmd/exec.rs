@@ -20,6 +20,7 @@ pub(crate) fn run(
     audit_log_path: Option<&str>,
     image_name: Option<&str>,
     guest_env: &BTreeMap<String, String>,
+    discover: bool,
 ) {
     // Create session
     let session_id = session::new_id();
@@ -203,7 +204,7 @@ pub(crate) fn run(
 
     let vm = vm::Vm::boot(config);
 
-    proxy::run(proxy::ProxyConfig {
+    let discovered = proxy::run(proxy::ProxyConfig {
         host_sock: vm
             .net_sock
             .try_clone()
@@ -213,7 +214,23 @@ pub(crate) fn run(
         timeout: Duration::from_secs(timeout_secs),
         allowed_hosts,
         audit_log_path,
+        discover,
     });
+
+    if discover && !discovered.is_empty() {
+        eprintln!("\n--- discovered hosts ---");
+        eprintln!("The agent connected to these hosts:\n");
+        for host in &discovered {
+            eprintln!("  {host}");
+        }
+        eprintln!("\nSuggested redan.toml:\n");
+        eprintln!("[network]");
+        eprintln!("allow = [");
+        for host in &discovered {
+            eprintln!("    \"{host}\",");
+        }
+        eprintln!("]");
+    }
 
     meta.finish(true);
     log::info!("session {session_id} finished");
