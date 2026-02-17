@@ -31,7 +31,7 @@ ureq = "3"
 httparse = "1.10.1"
 zeroize = { version = "1.8.2", features = ["derive"] }
 time = { version = "0.3.47", features = ["formatting"] }
-toml = "0.8"
+toml = "1.0"
 minijinja = "2.15.1"
 thiserror = "2.0.18"
 shell-words = "1.1.1"
