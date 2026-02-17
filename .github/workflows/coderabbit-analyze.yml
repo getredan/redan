@@ -40,7 +40,7 @@ jobs:
             echo "commits=all" >> $GITHUB_OUTPUT
           else
             RANGE="${{ github.event.inputs.commit_range }}"
-            COMMITS=$(git log --format='%H' "$RANGE" | jq -R . | jq -s .)
+            COMMITS=$(git log --format='%H' "$RANGE" | tr '\n' ' ')
             echo "commits=$COMMITS" >> $GITHUB_OUTPUT
           fi
 
@@ -48,10 +48,10 @@ jobs:
         id: files
         run: |
           if [ "${{ github.event.inputs.analysis_type }}" = "full_codebase" ]; then
-            FILES=$(find src tests -name "*.rs" | jq -R . | jq -s .)
+            FILES=$(find src tests -name "*.rs" | tr '\n' ' ')
           else
             RANGE="${{ github.event.inputs.commit_range }}"
-            FILES=$(git diff --name-only "$RANGE" | grep '\.rs$' | jq -R . | jq -s .)
+            FILES=$(git diff --name-only "$RANGE" | grep '\.rs$' | tr '\n' ' ')
           fi
           echo "files=$FILES" >> $GITHUB_OUTPUT
 
