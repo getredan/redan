@@ -143,7 +143,12 @@ pub fn find_and_load() -> Option<(PathBuf, Config)> {
     for path in candidates {
         if path.is_file() {
             match load(&path) {
-                Ok(config) => return Some((path, config)),
+                Ok(config) => {
+                    if !config.secrets.is_empty() {
+                        warn_if_world_readable(&path);
+                    }
+                    return Some((path, config));
+                }
                 Err(e) => {
                     eprintln!("error: failed to parse {}: {e}", path.display());
                     std::process::exit(1);
@@ -153,6 +158,26 @@ pub fn find_and_load() -> Option<(PathBuf, Config)> {
     }
     None
 }
+
+/// Warn if a file containing secrets is readable by other users.
+#[cfg(unix)]
+fn warn_if_world_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            eprintln!(
+                "warning: {} contains secrets and is accessible by other users (mode {:o}). \
+                 Consider chmod 600.",
+                path.display(),
+                mode & 0o777
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_world_readable(_path: &Path) {}
 
 fn config_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("redan.toml")];

@@ -46,7 +46,7 @@ const MAX_CONNECTIONS: usize = 128;
 /// Shared audit log writer. None = no audit logging.
 type AuditLog = Option<Arc<Mutex<BufWriter<std::fs::File>>>>;
 
-/// Write a JSON-lines audit event. Silently drops on error.
+/// Write a JSON-lines audit event. Logs a warning on write failure.
 fn audit(log: &AuditLog, event: &str, fields: &[(&str, &str)]) {
     let Some(log) = log else { return };
     let ts = time::OffsetDateTime::now_utc()
@@ -58,9 +58,11 @@ fn audit(log: &AuditLog, event: &str, fields: &[(&str, &str)]) {
     for (k, v) in fields {
         map.insert((*k).into(), serde_json::Value::String((*v).into()));
     }
-    if let Ok(mut w) = log.lock() {
-        let _ = serde_json::to_writer(&mut *w, &serde_json::Value::Object(map));
-        let _ = writeln!(w);
+    if let Ok(mut w) = log.lock()
+        && (serde_json::to_writer(&mut *w, &serde_json::Value::Object(map)).is_err()
+            || writeln!(w).is_err())
+    {
+        log::warn!("failed to write audit event: {event}");
     }
 }
 
@@ -573,6 +575,11 @@ fn tls_connection_thread(
     audit_log: &AuditLog,
     discovered: &DiscoveredHosts,
 ) -> Result<(), crate::error::Error> {
+    // Cap at 8KB: secrets longer than this won't be scrubbed from
+    // response bodies (still injected into request headers). The overlap
+    // buffer between chunks is max_secret_len - 1, so this bounds memory.
+    const MAX_SCRUB_SECRET_LEN: usize = 8192;
+
     let stream = ChannelStream::new(rx, tx);
     let server_conn = rustls::ServerConnection::new(server_config)?;
     let mut tls = rustls::StreamOwned::new(server_conn, stream);
@@ -652,6 +659,16 @@ fn tls_connection_thread(
             .next()
             .unwrap_or("")
     );
+
+    // Reject CONNECT method. Currently non-exploitable (we're post-TLS
+    // termination so CONNECT is nonsensical), but if the architecture
+    // ever supports non-TLS upstream, CONNECT becomes a tunnel bypass.
+    if request_is_connect(&request) {
+        log::warn!("rejected CONNECT request to {sni}");
+        let resp = b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
+        tls.write_all(resp)?;
+        return Ok(());
+    }
 
     // Reject WebSocket upgrades (binary framing bypasses HTTP scrubbing)
     if request_has_upgrade(&request) {
@@ -770,7 +787,8 @@ fn tls_connection_thread(
         .iter()
         .map(|s| s.real_value().len())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(MAX_SCRUB_SECRET_LEN);
     // Not wrapped in Zeroizing: upstream response buffers (header_buf,
     // upstream_buf, etc.) aren't zeroized either. Scrubbing is a safety
     // net; primary defense is host allowlisting.
@@ -822,6 +840,22 @@ fn tls_connection_thread(
                                     .next()
                                     .unwrap_or("")
                             );
+
+                            // Warn if upstream sent compressed despite
+                            // Accept-Encoding being stripped. Some CDNs
+                            // compress unconditionally.
+                            if has_content_encoding(&headers) {
+                                log::warn!(
+                                    "upstream {sni} sent Content-Encoding despite \
+                                     Accept-Encoding removal; scrubbing may miss \
+                                     secrets in compressed body"
+                                );
+                                audit(
+                                    audit_log,
+                                    "warn",
+                                    &[("host", &sni), ("reason", "compressed_response")],
+                                );
+                            }
 
                             let (scrubbed, scrub_count) = crate::secret::scrub(&headers, secrets);
                             if scrub_count > 0 {
@@ -995,6 +1029,33 @@ fn request_has_chunked_te(data: &[u8]) -> bool {
                 .to_ascii_lowercase()
                 .contains("chunked")
     })
+}
+
+/// Returns true if the response has a Content-Encoding header other
+/// than "identity". Indicates scrubbing may not catch secrets in the body.
+fn has_content_encoding(data: &[u8]) -> bool {
+    let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
+    let mut resp = httparse::Response::new(&mut parsed_headers);
+    if resp.parse(data).is_err() {
+        return false;
+    }
+    resp.headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("content-encoding")
+            && !std::str::from_utf8(h.value)
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("identity")
+    })
+}
+
+fn request_is_connect(data: &[u8]) -> bool {
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_err() {
+        return false;
+    }
+    req.method
+        .is_some_and(|m| m.eq_ignore_ascii_case("CONNECT"))
 }
 
 fn request_has_upgrade(data: &[u8]) -> bool {
@@ -1334,6 +1395,42 @@ mod tests {
             extract_host_header(req).as_deref(),
             Some("api.example.com:443")
         );
+    }
+
+    #[test]
+    fn connect_method_detected() {
+        let req = b"CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
+        assert!(request_is_connect(req));
+    }
+
+    #[test]
+    fn connect_method_case_insensitive() {
+        let req = b"connect api.example.com:443 HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
+        assert!(request_is_connect(req));
+    }
+
+    #[test]
+    fn get_is_not_connect() {
+        let req = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(!request_is_connect(req));
+    }
+
+    #[test]
+    fn content_encoding_gzip_detected() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n";
+        assert!(has_content_encoding(resp));
+    }
+
+    #[test]
+    fn content_encoding_identity_ignored() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\n\r\n";
+        assert!(!has_content_encoding(resp));
+    }
+
+    #[test]
+    fn no_content_encoding_ok() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+        assert!(!has_content_encoding(resp));
     }
 
     #[test]

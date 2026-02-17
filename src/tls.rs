@@ -37,6 +37,10 @@ pub fn connect_upstream(
     // host was explicitly in the allowlist. Prevents SSRF to cloud
     // metadata (169.254.169.254) and internal networks via DNS rebinding.
     // Hosts in the allowlist are trusted -- the user explicitly chose them.
+    //
+    // IPv4-only today: the .find(is_ipv4) above filters out AAAA records.
+    // If IPv6 support is added, is_private_ipv6() must also be checked
+    // to cover ::1, fe80::/10, fd00::/8, and ::ffff:169.254.169.254.
     if !allow_private
         && let std::net::SocketAddr::V4(v4) = &addr
         && is_private_ip(*v4.ip())

@@ -72,6 +72,10 @@ impl SecretBinding {
             );
         }
 
+        // Not cryptographically random, intentionally. The placeholder
+        // is visible to the guest as an env var -- it's not a secret.
+        // It just needs to be unique enough to avoid collisions within
+        // a session. DefaultHasher + time + PID is sufficient.
         let mut h = DefaultHasher::new();
         env_name.hash(&mut h);
         SystemTime::now().hash(&mut h);
@@ -96,12 +100,12 @@ impl std::fmt::Debug for SecretBinding {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl SecretBinding {
     /// Construct with explicit fields, bypassing CRLF validation.
     ///
-    /// Intended for tests that need malformed inputs. Production code
-    /// should use `new()` which validates.
-    #[doc(hidden)]
+    /// Available only under `#[cfg(test)]` or the `test-support` feature.
+    /// Production code should use `new()` which validates.
     pub fn new_unchecked(
         placeholder: String,
         real_value: String,

@@ -36,7 +36,11 @@ minijinja = "2.15.1"
 thiserror = "2.0.18"
 shell-words = "1.1.1"
 
+[features]
+test-support = []
+
 [dev-dependencies]
 base64 = "0.22.1"
 flate2 = "1.1.9"
 tempfile = "3"
+redan = { path = ".", features = ["test-support"] }
