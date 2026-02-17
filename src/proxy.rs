@@ -9,7 +9,7 @@
 ///
 /// The smoltcp poll loop handles L3/L4: IP routing, TCP state, DNS.
 /// Each TLS connection spawns a thread that owns the full pipeline:
-/// TLS handshake (via rustls StreamOwned) -> HTTP parsing -> upstream
+/// TLS handshake (via rustls `StreamOwned`) -> HTTP parsing -> upstream
 /// relay -> secret injection/scrubbing -> response streaming.
 ///
 /// The poll loop shuttles encrypted bytes between smoltcp TCP sockets
@@ -98,7 +98,7 @@ pub fn run(cfg: ProxyConfig<'_>) {
     });
     let server_config = ca::mitm_server_config(resolver);
     let secrets: Arc<[SecretBinding]> = secrets.into();
-    let allowed_hosts: Option<Arc<[String]>> = allowed_hosts.map(|h| h.into());
+    let allowed_hosts: Option<Arc<[String]>> = allowed_hosts.map(Into::into);
 
     let audit_log: AuditLog = audit_log_path.map(|path| {
         let file = std::fs::OpenOptions::new()
@@ -116,6 +116,7 @@ pub fn run(cfg: ProxyConfig<'_>) {
     let config = Config::new(GATEWAY_MAC.into());
     let mut iface = Interface::new(config, &mut device, SmolInstant::now());
     iface.update_ip_addrs(|addrs| {
+        #[allow(clippy::unwrap_used)] // Single address on fresh interface
         addrs.push(IpCidr::new(GATEWAY_IP.into(), 24)).unwrap();
     });
 
@@ -184,7 +185,7 @@ pub fn run(cfg: ProxyConfig<'_>) {
                                 backlog.is_tls,
                                 &server_config,
                                 &secrets,
-                                &allowed_hosts,
+                                allowed_hosts.as_ref(),
                                 &audit_log,
                             ),
                         );
@@ -224,6 +225,7 @@ const LISTEN_BACKLOG: usize = 32;
 
 // --- DNS (unchanged) ---
 
+#[allow(clippy::unwrap_used)] // Fresh socket bind cannot fail
 fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
     let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
@@ -247,6 +249,7 @@ fn process_dns(sockets: &mut SocketSet, handle: SocketHandle, audit_log: &AuditL
 
 // --- TCP ---
 
+#[allow(clippy::unwrap_used)] // Fresh socket listen cannot fail
 fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     let rx_buf = tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUF]);
     let tx_buf = tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUF]);
@@ -290,7 +293,7 @@ impl ProxyConn {
         is_tls: bool,
         server_config: &Arc<rustls::ServerConfig>,
         secrets: &Arc<[SecretBinding]>,
-        allowed_hosts: &Option<Arc<[String]>>,
+        allowed_hosts: Option<&Arc<[String]>>,
         audit_log: &AuditLog,
     ) -> Self {
         let mut conn = Self {
@@ -316,7 +319,7 @@ impl ProxyConn {
 
             let config = Arc::clone(server_config);
             let secrets = Arc::clone(secrets);
-            let allowed = allowed_hosts.clone();
+            let allowed = allowed_hosts.cloned();
             let alog = audit_log.clone();
             std::thread::spawn(move || {
                 if let Err(e) = tls_connection_thread(
@@ -344,9 +347,8 @@ fn shuttle_bytes(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
                 return;
             }
             let mut buf = vec![0u8; 4096];
-            let n = match sock.recv_slice(&mut buf) {
-                Ok(n) => n,
-                Err(_) => return,
+            let Ok(n) = sock.recv_slice(&mut buf) else {
+                return;
             };
             if n == 0 {
                 return;
@@ -379,13 +381,12 @@ fn shuttle_bytes(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
             // Guest -> Thread: read from smoltcp, send to thread
             let mut buf = vec![0u8; 65535];
             let n = sock.recv_slice(&mut buf).unwrap_or(0);
-            if n > 0 {
-                if let Some(tx) = &conn.to_thread {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        // Thread died
-                        conn.to_thread = None;
-                    }
-                }
+            if n > 0
+                && let Some(tx) = &conn.to_thread
+                && tx.send(buf[..n].to_vec()).is_err()
+            {
+                // Thread died
+                conn.to_thread = None;
             }
 
             // Thread -> Guest: recv from thread, buffer for sending
@@ -466,7 +467,7 @@ fn drain_to_socket(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
 
 // --- Per-connection TLS thread ---
 
-/// Read/Write adapter over mpsc channels. Lets rustls::StreamOwned
+/// Read/Write adapter over mpsc channels. Lets rustls `StreamOwned`
 /// drive the TLS state machine over channel-transported bytes.
 struct ChannelStream {
     rx: mpsc::Receiver<Vec<u8>>,
@@ -476,7 +477,7 @@ struct ChannelStream {
 }
 
 impl ChannelStream {
-    fn new(rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::SyncSender<Vec<u8>>) -> Self {
+    const fn new(rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::SyncSender<Vec<u8>>) -> Self {
         Self {
             rx,
             tx,
@@ -534,7 +535,7 @@ impl Write for ChannelStream {
 }
 
 /// Per-connection thread: TLS handshake, HTTP parsing, upstream relay,
-/// secret injection and response scrubbing. rustls::StreamOwned drives
+/// secret injection and response scrubbing. Rustls `StreamOwned` drives
 /// the TLS state machine automatically.
 fn tls_connection_thread(
     rx: mpsc::Receiver<Vec<u8>>,
@@ -544,7 +545,7 @@ fn tls_connection_thread(
     allowed_hosts: Option<&[String]>,
     audit_log: &AuditLog,
 ) -> Result<(), crate::error::Error> {
-    let stream = ChannelStream::new(rx, tx.clone());
+    let stream = ChannelStream::new(rx, tx);
     let server_conn = rustls::ServerConnection::new(server_config)?;
     let mut tls = rustls::StreamOwned::new(server_conn, stream);
 
@@ -581,22 +582,23 @@ fn tls_connection_thread(
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
     {
-        log::warn!("rejected invalid SNI: {:?}", sni);
+        log::warn!("rejected invalid SNI: {sni:?}");
         return Err("invalid SNI hostname".to_string().into());
     }
 
     // Enforce outbound host allowlist. When set, only SNI hostnames
-    // in the list may be connected to upstream.
-    if let Some(hosts) = allowed_hosts {
-        if !hosts.iter().any(|h| h.eq_ignore_ascii_case(&sni)) {
-            log::warn!("blocked connection to {sni}: not in --allow-host list");
-            audit(
-                audit_log,
-                "reject",
-                &[("host", &sni), ("reason", "not_allowed")],
-            );
-            return Err(format!("host not allowed: {sni}").into());
-        }
+    // matching the list may connect upstream. Supports wildcards:
+    // "*.example.com" matches "api.example.com" but not "example.com".
+    if let Some(hosts) = allowed_hosts
+        && !hosts.iter().any(|h| host_matches(h, &sni))
+    {
+        log::warn!("blocked connection to {sni}: not in --allow-host list");
+        audit(
+            audit_log,
+            "reject",
+            &[("host", &sni), ("reason", "not_allowed")],
+        );
+        return Err(format!("host not allowed: {sni}").into());
     }
 
     log::info!(
@@ -622,6 +624,28 @@ fn tls_connection_thread(
         let resp = b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
         tls.write_all(resp)?;
         return Ok(());
+    }
+
+    // Reject Host/SNI mismatch (domain fronting).
+    // A malicious guest could set SNI to an allowed CDN host but Host
+    // to an attacker-controlled origin. The CDN routes on Host, so the
+    // secret ends up at the attacker. Reject unless they match.
+    if let Some(host) = extract_host_header(&request) {
+        // Strip port if present (Host: example.com:443)
+        let host_name = host.split(':').next().unwrap_or(&host);
+        if !host_name.eq_ignore_ascii_case(&sni) {
+            log::warn!(
+                "rejected domain fronting: SNI={sni}, Host={host_name}"
+            );
+            audit(
+                audit_log,
+                "reject",
+                &[("host", &sni), ("reason", "domain_fronting")],
+            );
+            let resp = b"HTTP/1.1 421 Misdirected Request\r\nConnection: close\r\n\r\n";
+            tls.write_all(resp)?;
+            return Ok(());
+        }
     }
 
     // Reject chunked Transfer-Encoding. We read until Content-Length
@@ -650,7 +674,14 @@ fn tls_connection_thread(
     // Connect upstream
     log::info!("upstream connect for {sni}");
     audit(audit_log, "connect", &[("host", &sni)]);
-    let (mut upstream_tcp, mut upstream_tls) = tls::connect_upstream(&sni, 443)?;
+    // Allow private IPs only for hosts explicitly in the allowlist.
+    // Blocks DNS rebinding attacks to cloud metadata / internal services,
+    // but lets users reach localhost or internal hosts they opted into.
+    let explicitly_allowed = allowed_hosts
+        .as_ref()
+        .is_some_and(|hosts| hosts.iter().any(|h| host_matches(h, &sni)));
+    let (mut upstream_tcp, mut upstream_tls) =
+        tls::connect_upstream(&sni, 443, explicitly_allowed)?;
 
     // Set timeouts before handshake to prevent slowloris-style stalls
     upstream_tcp.set_nonblocking(false)?;
@@ -862,9 +893,8 @@ fn write_scrubbed_chunk(
 fn http_request_complete(data: &[u8]) -> bool {
     let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut req = httparse::Request::new(&mut headers);
-    let body_offset = match req.parse(data) {
-        Ok(httparse::Status::Complete(n)) => n,
-        _ => return false,
+    let Ok(httparse::Status::Complete(body_offset)) = req.parse(data) else {
+        return false;
     };
 
     for header in req.headers.iter() {
@@ -932,14 +962,42 @@ fn request_has_upgrade(data: &[u8]) -> bool {
         .any(|h| h.name.eq_ignore_ascii_case("upgrade"))
 }
 
+/// Check if a hostname matches an allowlist pattern.
+/// Supports exact match (case-insensitive) and wildcard prefix:
+/// - `"api.example.com"` matches `"api.example.com"` and `"API.EXAMPLE.COM"`
+/// - `"*.example.com"` matches `"api.example.com"` and `"foo.bar.example.com"`
+/// - `"*.example.com"` does NOT match `"example.com"` (must have a subdomain)
+pub(crate) fn host_matches(pattern: &str, hostname: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        // Wildcard: hostname must end with .suffix and have something before it
+        let hostname_lower = hostname.to_ascii_lowercase();
+        let suffix_lower = suffix.to_ascii_lowercase();
+        hostname_lower.ends_with(&format!(".{suffix_lower}"))
+    } else {
+        pattern.eq_ignore_ascii_case(hostname)
+    }
+}
+
+/// Extract the Host header value from an HTTP request.
+fn extract_host_header(data: &[u8]) -> Option<String> {
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut req = httparse::Request::new(&mut headers);
+    if req.parse(data).is_err() {
+        return None;
+    }
+    req.headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("host"))
+        .map(|h| String::from_utf8_lossy(h.value).into_owned())
+}
+
 use crate::secret::find_header_end as header_end_offset;
 
 fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
     let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
     let mut resp = httparse::Response::new(&mut parsed_headers);
-    let body_offset = match resp.parse(data) {
-        Ok(httparse::Status::Complete(n)) => n,
-        _ => return data.to_vec(),
+    let Ok(httparse::Status::Complete(body_offset)) = resp.parse(data) else {
+        return data.to_vec();
     };
 
     let mut result = Vec::with_capacity(data.len());
@@ -969,6 +1027,7 @@ fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
 
@@ -1182,5 +1241,53 @@ mod tests {
     fn single_content_length_ok() {
         let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
         assert!(!has_duplicate_content_length(req));
+    }
+
+    #[test]
+    fn wildcard_host_match() {
+        assert!(host_matches("*.example.com", "api.example.com"));
+        assert!(host_matches("*.example.com", "foo.bar.example.com"));
+        assert!(host_matches("*.example.com", "API.EXAMPLE.COM"));
+        assert!(host_matches("*.EXAMPLE.COM", "api.example.com"));
+    }
+
+    #[test]
+    fn wildcard_no_match_bare_domain() {
+        // *.example.com should NOT match example.com itself
+        assert!(!host_matches("*.example.com", "example.com"));
+    }
+
+    #[test]
+    fn wildcard_no_match_different_domain() {
+        assert!(!host_matches("*.example.com", "api.evil.com"));
+        assert!(!host_matches("*.example.com", "example.com.evil.com"));
+    }
+
+    #[test]
+    fn exact_host_match() {
+        assert!(host_matches("api.example.com", "api.example.com"));
+        assert!(host_matches("api.example.com", "API.EXAMPLE.COM"));
+        assert!(!host_matches("api.example.com", "other.example.com"));
+    }
+
+    #[test]
+    fn extract_host_from_request() {
+        let req = b"GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
+        assert_eq!(extract_host_header(req).as_deref(), Some("api.example.com"));
+    }
+
+    #[test]
+    fn extract_host_with_port() {
+        let req = b"GET / HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n";
+        assert_eq!(
+            extract_host_header(req).as_deref(),
+            Some("api.example.com:443")
+        );
+    }
+
+    #[test]
+    fn extract_host_missing() {
+        let req = b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n";
+        assert_eq!(extract_host_header(req), None);
     }
 }

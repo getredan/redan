@@ -20,12 +20,13 @@ pub struct MitmCa {
     ca_key: KeyPair,
     ca_cert_der: CertificateDer<'static>,
     ca_cert_pem: String,
-    /// Cached leaf CertifiedKeys per hostname.
+    /// Cached leaf `CertifiedKey`s per hostname.
     key_cache: HashMap<String, Arc<CertifiedKey>>,
 }
 
 impl MitmCa {
     #[must_use]
+    #[allow(clippy::expect_used)] // CA key gen failure is unrecoverable
     pub fn generate() -> Self {
         let mut params = CertificateParams::default();
         params
@@ -61,7 +62,7 @@ impl MitmCa {
         &self.ca_cert_pem
     }
 
-    /// Mint (or return cached) leaf CertifiedKey for `hostname`.
+    /// Mint (or return cached) leaf `CertifiedKey` for `hostname`.
     /// Returns None if the hostname is not a valid DNS name.
     /// Max cached leaf certs. Prevents memory exhaustion if guest
     /// connects to many unique hostnames.
@@ -125,7 +126,7 @@ impl MitmCa {
     }
 }
 
-/// Dynamic cert resolver for rustls ServerConfig. Called during TLS
+/// Dynamic cert resolver for rustls `ServerConfig`. Called during TLS
 /// handshake with the client's SNI, generates a MITM leaf cert on
 /// the fly. This lets rustls manage the entire handshake state machine.
 #[derive(Debug)]
@@ -141,7 +142,7 @@ impl ResolvesServerCert for MitmCertResolver {
     }
 }
 
-/// Build a shared ServerConfig with dynamic MITM cert resolution.
+/// Build a shared `ServerConfig` with dynamic MITM cert resolution.
 /// One config is shared across all connections.
 pub fn mitm_server_config(resolver: Arc<MitmCertResolver>) -> Arc<rustls::ServerConfig> {
     let mut config = rustls::ServerConfig::builder()
@@ -160,6 +161,7 @@ pub fn mitm_server_config(resolver: Arc<MitmCertResolver>) -> Arc<rustls::Server
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

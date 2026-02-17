@@ -314,7 +314,10 @@ fn write_guest_policy(rootfs: &Path, allowed_hosts: &Option<Vec<String>>) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = std::fs::write(dir.join("policy"), templates::guest_policy(allowed_hosts));
+    let _ = std::fs::write(
+        dir.join("policy"),
+        templates::guest_policy(allowed_hosts.as_ref()),
+    );
 }
 
 /// RAII guard: raw terminal mode on creation, restore on drop.

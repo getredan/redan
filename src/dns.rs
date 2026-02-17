@@ -46,6 +46,7 @@ pub fn handle_query(packet: &[u8], gateway_ip: Ipv4Address) -> Option<(String, V
             // Programs that resolve localhost expect 127.0.0.1.
             // Case-insensitive per RFC 4343.
             let ip = if hostname.eq_ignore_ascii_case("localhost") {
+                #[allow(clippy::ip_constant)] // smoltcp Ipv4Address, not std
                 Ipv4Address::new(127, 0, 0, 1)
             } else {
                 gateway_ip
@@ -147,6 +148,7 @@ fn build_empty_response(id: u16, query: &[u8], question_end: usize) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -160,6 +162,7 @@ mod tests {
         pkt.extend_from_slice(&0u16.to_be_bytes());
 
         for label in hostname.split('.') {
+            #[allow(clippy::cast_possible_truncation)] // DNS labels ≤63 bytes
             pkt.push(label.len() as u8);
             pkt.extend_from_slice(label.as_bytes());
         }

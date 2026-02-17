@@ -14,7 +14,7 @@ use crate::ffi;
 const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
 /// Like assert!, but logs at error level before panicking.
-/// VM thread panics are caught by catch_unwind and abort,
+/// VM thread panics are caught by `catch_unwind` and abort,
 /// so we need the log message to reach stderr first.
 macro_rules! krun_check {
     ($cond:expr, $($arg:tt)+) => {
@@ -63,6 +63,7 @@ impl Vm {
     /// Returns immediately with a `Vm` handle. The VM runs in a background thread.
     /// Use `net_sock` to communicate via smoltcp.
     #[must_use]
+    #[allow(clippy::expect_used, clippy::unwrap_used)] // FFI setup; failures are unrecoverable
     pub fn boot(config: VmConfig) -> Self {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();
@@ -73,12 +74,11 @@ impl Vm {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 Self::run_vm(config, guest_sock, guest_fd)
             }));
-            match result {
-                Ok(code) => code,
-                Err(_) => {
-                    log::error!("VM thread panicked, aborting to prevent UB");
-                    std::process::abort();
-                }
+            if let Ok(code) = result {
+                code
+            } else {
+                log::error!("VM thread panicked, aborting to prevent UB");
+                std::process::abort();
             }
         });
 
@@ -88,6 +88,7 @@ impl Vm {
         }
     }
 
+    #[allow(clippy::unwrap_used, clippy::expect_used)] // FFI setup; failures are unrecoverable
     fn run_vm(config: VmConfig, guest_sock: UnixStream, guest_fd: i32) -> i32 {
         // Raise host process fd limit to hard max. libkrun needs fds
         // for KVM vcpus, virtio devices, etc. (Same as smolvm.)
@@ -96,9 +97,9 @@ impl Vm {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) == 0 {
                 limit.rlim_cur = limit.rlim_max;
-                libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
             }
         }
         let ret = unsafe {
@@ -113,6 +114,7 @@ impl Vm {
 
         let ctx_id = unsafe { ffi::krun_create_ctx() };
         krun_check!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
+        #[allow(clippy::cast_sign_loss)] // Checked non-negative above
         let ctx_id = ctx_id as u32;
 
         unsafe {
@@ -255,6 +257,6 @@ pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
 /// Shell commands to update the CA trust store inside the guest.
 /// Tries both Debian-style and Fedora-style; each is a no-op if
 /// the tool doesn't exist.
-pub fn ca_update_commands() -> &'static str {
+pub const fn ca_update_commands() -> &'static str {
     "update-ca-certificates 2>/dev/null; update-ca-trust 2>/dev/null; true"
 }

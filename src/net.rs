@@ -1,4 +1,4 @@
-/// VirtioNet device for smoltcp.
+/// `VirtioNet` device for smoltcp.
 ///
 /// Reads/writes length-prefixed Ethernet frames over a unix socket
 /// connected to libkrun's virtio-net backend. The framing protocol
@@ -20,6 +20,7 @@ pub struct VirtioNetDevice {
 
 impl VirtioNetDevice {
     #[must_use]
+    #[allow(clippy::unwrap_used)] // Nonblocking mode must succeed on a fresh socket
     pub fn new(sock: UnixStream) -> Self {
         sock.set_nonblocking(true).unwrap();
         Self {
@@ -33,6 +34,7 @@ impl VirtioNetDevice {
     /// Write all pending TX frames to the socket.
     pub fn flush_tx(&mut self) {
         while let Some(frame) = self.pending_tx.pop_front() {
+            #[allow(clippy::cast_possible_truncation)] // Frames are ≤MTU (1500)
             let len_buf = (frame.len() as u32).to_be_bytes();
             if self.sock.write_all(&len_buf).is_err() {
                 break;
@@ -82,7 +84,7 @@ impl VirtioNetDevice {
             self.peer_closed = true;
             return None;
         }
-        result.ok().map(|_| buf)
+        result.ok().map(|()| buf)
     }
 }
 
@@ -135,7 +137,7 @@ pub struct VirtioTxToken<'a> {
     queue: &'a mut VecDeque<Vec<u8>>,
 }
 
-impl<'a> TxToken for VirtioTxToken<'a> {
+impl TxToken for VirtioTxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,

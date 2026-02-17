@@ -2,7 +2,7 @@
 //!
 //! The proxy needs real secret values to inject into requests. Where those
 //! values come from is the provider's concern. The open-source CLI ships
-//! with `Literal` (inline value) and `Vault` (HashiCorp Vault KV v2).
+//! with `Literal` (inline value) and `Vault` (`HashiCorp` Vault KV v2).
 //!
 //! ## Adding a provider
 //!
@@ -36,7 +36,7 @@ impl SecretProvider for Literal {
     }
 }
 
-/// Fetches secrets from HashiCorp Vault KV v2.
+/// Fetches secrets from `HashiCorp` Vault KV v2.
 ///
 /// Reference format: `path#field` where path is the KV path and field
 /// is the JSON key within the secret data.
@@ -154,6 +154,7 @@ pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

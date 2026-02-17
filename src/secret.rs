@@ -137,8 +137,7 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
     let request_line_end = data[..header_end]
         .windows(2)
         .position(|w| w == b"\r\n")
-        .map(|p| p + 2)
-        .unwrap_or(0);
+        .map_or(0, |p| p + 2);
 
     // Only operate on headers (between request line and body)
     let headers = &data[request_line_end..header_end];
@@ -287,6 +286,7 @@ fn byte_replace(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<(V
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

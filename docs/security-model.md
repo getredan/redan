@@ -148,7 +148,7 @@ A malicious guest could set SNI to an allowed host on a shared CDN
 and Host to an attacker-controlled origin, causing the CDN to
 forward the request (with injected secrets) to the attacker.
 
-Mitigations:
-- Use direct API endpoints, not CDN-fronted ones, in allowed_hosts
-- Avoid allowing CDN domains that host untrusted origins
-- Future: optional `--strict-host` flag to reject Host/SNI mismatches
+Redan rejects requests where the Host header does not match the TLS
+SNI hostname (HTTP 421 Misdirected Request). This blocks domain
+fronting in most cases. Residual risk: if the allowed host itself
+routes internally based on other headers or path components.

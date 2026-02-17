@@ -14,28 +14,25 @@ const ALPINE_VERSION: &str = "3.21.3";
 const ALPINE_MINOR: &str = "3.21";
 
 fn home_dir() -> PathBuf {
-    match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => {
-            eprintln!("$HOME not set -- cannot determine config directories");
-            std::process::exit(1);
-        }
+    if let Ok(h) = std::env::var("HOME") {
+        PathBuf::from(h)
+    } else {
+        eprintln!("$HOME not set -- cannot determine config directories");
+        std::process::exit(1);
     }
 }
 
 /// Where images are stored.
 pub fn image_dir() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".local/share"));
+        .map_or_else(|_| home_dir().join(".local/share"), PathBuf::from);
     base.join("redan/images")
 }
 
 /// Where downloaded base images are cached.
 fn cache_dir() -> PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".cache"));
+        .map_or_else(|_| home_dir().join(".cache"), PathBuf::from);
     base.join("redan")
 }
 
@@ -341,7 +338,10 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
 
     // Build with a temporary tag
     let tag = format!("redan-build-{name}");
-    let context = df.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let context = df
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
 
     eprintln!("building Dockerfile...");
     let build = std::process::Command::new("docker")
@@ -388,36 +388,36 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
     let config: serde_json::Value = serde_json::from_str(&stripped)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {e}")))?;
 
-    let config_dir = config_file.parent().unwrap_or(Path::new("."));
+    let config_dir = config_file.parent().unwrap_or_else(|| Path::new("."));
 
     // Try build.dockerfile first, then image
-    if let Some(build) = config.get("build") {
-        if let Some(dockerfile) = build.get("dockerfile").and_then(|v| v.as_str()) {
-            let context = build
-                .get("context")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let df_path = config_dir.join(dockerfile);
-            let ctx_path = config_dir.join(context);
+    if let Some(build) = config.get("build")
+        && let Some(dockerfile) = build.get("dockerfile").and_then(|v| v.as_str())
+    {
+        let context = build
+            .get("context")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+        let df_path = config_dir.join(dockerfile);
+        let ctx_path = config_dir.join(context);
 
-            eprintln!("building from devcontainer: {dockerfile}");
-            let tag = format!("redan-build-{name}");
-            let build_status = std::process::Command::new("docker")
-                .env("DOCKER_BUILDKIT", "1")
-                .args(["build", "-t", &tag, "-f"])
-                .arg(&df_path)
-                .arg(&ctx_path)
-                .status()?;
-            if !build_status.success() {
-                return Err(io::Error::other("docker build failed"));
-            }
-
-            let result = import_docker_inner(name, &tag, false);
-            let _ = std::process::Command::new("docker")
-                .args(["rmi", &tag])
-                .status();
-            return result;
+        eprintln!("building from devcontainer: {dockerfile}");
+        let tag = format!("redan-build-{name}");
+        let build_status = std::process::Command::new("docker")
+            .env("DOCKER_BUILDKIT", "1")
+            .args(["build", "-t", &tag, "-f"])
+            .arg(&df_path)
+            .arg(&ctx_path)
+            .status()?;
+        if !build_status.success() {
+            return Err(io::Error::other("docker build failed"));
         }
+
+        let result = import_docker_inner(name, &tag, false);
+        let _ = std::process::Command::new("docker")
+            .args(["rmi", &tag])
+            .status();
+        return result;
     }
 
     if let Some(image) = config.get("image").and_then(|v| v.as_str()) {
@@ -554,6 +554,7 @@ fn strip_jsonc_comments(input: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

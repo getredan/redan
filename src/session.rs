@@ -18,6 +18,7 @@ pub fn new_id() -> String {
         .is_err()
     {
         // Fallback: timestamp-based
+        #[allow(clippy::cast_possible_truncation)] // Intentional: low 32 bits for entropy
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -29,8 +30,15 @@ pub fn new_id() -> String {
 
 /// Inline hex encoding (avoid adding a dependency).
 mod hex {
+    use std::fmt::Write;
+
     pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bytes
+            .iter()
+            .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+                let _ = write!(s, "{b:02x}");
+                s
+            })
     }
 }
 
@@ -90,8 +98,8 @@ impl SessionMeta {
             .unwrap_or_default();
         Self {
             id: id.into(),
-            image: image.map(|s| s.into()),
-            command: command.map(|s| s.into()),
+            image: image.map(Into::into),
+            command: command.map(Into::into),
             started_at,
             status: SessionStatus::Running,
             pid: Some(std::process::id()),
@@ -135,10 +143,10 @@ pub fn list_sessions() -> Vec<SessionMeta> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let meta_path = entry.path().join("meta.json");
-            if let Ok(content) = std::fs::read_to_string(&meta_path) {
-                if let Ok(meta) = serde_json::from_str(&content) {
-                    sessions.push(meta);
-                }
+            if let Ok(content) = std::fs::read_to_string(&meta_path)
+                && let Ok(meta) = serde_json::from_str(&content)
+            {
+                sessions.push(meta);
             }
         }
     }
@@ -147,6 +155,7 @@ pub fn list_sessions() -> Vec<SessionMeta> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -3,6 +3,10 @@
 //! Template sources live in `templates/*.j2` and are included at
 //! compile time via `include_str!`. Adding or modifying a `.j2` file
 //! triggers a rebuild (see `build.rs`).
+//!
+//! Template registration and rendering use `unwrap()` because the templates
+//! are compiled in and validated by tests. A syntax error is a build bug.
+#![allow(clippy::unwrap_used)]
 
 use std::sync::LazyLock;
 
@@ -82,11 +86,11 @@ pub fn devcontainer_json() -> String {
 }
 
 /// Render the guest `/etc/redan/policy` file.
-pub fn guest_policy(allowed_hosts: &Option<Vec<String>>) -> String {
+pub fn guest_policy(allowed_hosts: Option<&Vec<String>>) -> String {
     let (mode, hosts) = match allowed_hosts {
         None => ("allow-all", vec![]),
         Some(h) if h.is_empty() => ("deny-all", vec![]),
-        Some(h) => ("restrict", h.iter().map(|s| s.as_str()).collect()),
+        Some(h) => ("restrict", h.iter().map(String::as_str).collect()),
     };
 
     ENV
@@ -97,10 +101,10 @@ pub fn guest_policy(allowed_hosts: &Option<Vec<String>>) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::{Config, MountConfig, NetworkConfig};
-    use std::collections::BTreeMap;
 
     #[test]
     fn redan_toml_claude_mode() {
@@ -164,7 +168,7 @@ mod tests {
     #[test]
     fn guest_policy_restrict() {
         let hosts = Some(vec!["api.example.com".into(), "cdn.example.com".into()]);
-        let out = guest_policy(&hosts);
+        let out = guest_policy(hosts.as_ref());
         assert!(out.contains("network: restrict"));
         assert!(out.contains("- api.example.com"));
         assert!(out.contains("- cdn.example.com"));
@@ -172,13 +176,14 @@ mod tests {
 
     #[test]
     fn guest_policy_deny_all() {
-        let out = guest_policy(&Some(vec![]));
+        let empty: Vec<String> = vec![];
+        let out = guest_policy(Some(&empty));
         assert!(out.contains("network: deny-all"));
     }
 
     #[test]
     fn guest_policy_allow_all() {
-        let out = guest_policy(&None);
+        let out = guest_policy(None);
         assert!(out.contains("network: allow-all"));
     }
 }

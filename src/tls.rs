@@ -22,15 +22,32 @@ static UPSTREAM_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(
 pub fn connect_upstream(
     hostname: &str,
     port: u16,
+    allow_private: bool,
 ) -> Result<(TcpStream, rustls::ClientConnection), crate::error::Error> {
     use std::net::ToSocketAddrs;
 
     let addr = format!("{hostname}:{port}")
         .to_socket_addrs()?
-        .find(|a| a.is_ipv4())
+        .find(std::net::SocketAddr::is_ipv4)
         .ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution failed")
         })?;
+
+    // Block connections to private/reserved IP ranges unless the
+    // host was explicitly in the allowlist. Prevents SSRF to cloud
+    // metadata (169.254.169.254) and internal networks via DNS rebinding.
+    // Hosts in the allowlist are trusted -- the user explicitly chose them.
+    if !allow_private {
+        if let std::net::SocketAddr::V4(v4) = &addr {
+            if is_private_ip(*v4.ip()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("blocked connection to private IP: {}", v4.ip()),
+                )
+                .into());
+            }
+        }
+    }
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
     stream.set_nonblocking(false)?;
@@ -44,7 +61,26 @@ pub fn connect_upstream(
     Ok((stream, tls_conn))
 }
 
-/// Extract SNI hostname from a TLS ClientHello message.
+/// Returns true if the IP is in a private, loopback, or link-local range.
+/// Used to block SSRF to cloud metadata endpoints and internal services.
+fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    matches!(
+        octets,
+        [10, ..] |                        // 10.0.0.0/8 (RFC 1918)
+        [172, 16..=31, ..] |              // 172.16.0.0/12 (RFC 1918)
+        [192, 168, ..] |                  // 192.168.0.0/16 (RFC 1918)
+        [169, 254, ..] |                  // 169.254.0.0/16 (link-local, cloud metadata)
+        [127, ..] |                       // 127.0.0.0/8 (loopback)
+        [0, ..] |                         // 0.0.0.0/8 (this network)
+        [100, 64..=127, ..] |             // 100.64.0.0/10 (CGN, RFC 6598)
+        [192, 0, 0, ..] |                 // 192.0.0.0/24 (IETF protocol assignments)
+        [198, 18..=19, ..] |              // 198.18.0.0/15 (benchmarking)
+        [233..=239, ..]                   // 224.0.0.0/4 (multicast, partial)
+    )
+}
+
+/// Extract SNI hostname from a TLS `ClientHello` message.
 ///
 /// Hand-rolled parser used only by tests. Production code uses
 /// `rustls::ServerConnection::server_name()` after the handshake.
@@ -120,6 +156,7 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
 
@@ -193,5 +230,35 @@ mod tests {
     #[test]
     fn extract_sni_rejects_non_tls() {
         assert_eq!(extract_sni(b"GET / HTTP/1.1\r\n"), None);
+    }
+
+    #[test]
+    fn private_ip_blocked() {
+        use std::net::Ipv4Addr;
+        // Cloud metadata
+        assert!(is_private_ip(Ipv4Addr::new(169, 254, 169, 254)));
+        // RFC1918
+        assert!(is_private_ip(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(172, 31, 255, 255)));
+        assert!(is_private_ip(Ipv4Addr::new(192, 168, 1, 1)));
+        // Loopback
+        assert!(is_private_ip(Ipv4Addr::new(127, 0, 0, 1)));
+        // CGN
+        assert!(is_private_ip(Ipv4Addr::new(100, 64, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(100, 127, 255, 255)));
+    }
+
+    #[test]
+    fn public_ip_allowed() {
+        use std::net::Ipv4Addr;
+        assert!(!is_private_ip(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_private_ip(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_private_ip(Ipv4Addr::new(104, 18, 0, 1)));
+        // Edge of RFC1918 ranges
+        assert!(!is_private_ip(Ipv4Addr::new(172, 15, 255, 255)));
+        assert!(!is_private_ip(Ipv4Addr::new(172, 32, 0, 0)));
+        assert!(!is_private_ip(Ipv4Addr::new(100, 63, 255, 255)));
+        assert!(!is_private_ip(Ipv4Addr::new(100, 128, 0, 0)));
     }
 }

@@ -247,8 +247,17 @@ Or on the CLI:
 redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
 ```
 
-Hosts required by secrets are automatically included in the allowlist.
+Wildcard patterns are supported: `"*.amazonaws.com"` matches any
+subdomain. Hosts required by secrets are automatically included.
 Use `"*"` to allow all outbound connections (not recommended).
+
+Connections to private IP ranges (RFC 1918, link-local, cloud metadata
+endpoints) are blocked by default, even in allow-all mode. Hosts
+explicitly in the allowlist may resolve to private IPs -- add
+`"localhost"` if you need local services.
+
+Domain fronting is blocked: requests where the HTTP Host header doesn't
+match the TLS SNI hostname are rejected (HTTP 421).
 
 ## Sessions
 
