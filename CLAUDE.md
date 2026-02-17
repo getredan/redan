@@ -32,17 +32,20 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 | `mise run bench` | Boot-to-proxy benchmark (needs KVM + image) |
 | `mise run build` | Release build |
 
-## Before Every Commit
+## Workflow
 
-Always run `mise run check` before committing. This runs format, lint, and tests -- the same gate CI enforces. Do not commit if it fails.
+`main` is protected. All changes go through pull requests.
 
-```bash
-mise run check    # cargo fmt + clippy + cargo test --lib
-```
+1. Create a branch
+2. `mise run check` before every commit (format + lint + tests, same gate as CI)
+3. Open a PR, wait for CI
+4. Merge (squash or rebase, linear history required)
+
+Direct pushes to `main` are blocked. Signed commits required.
 
 ## Commits
 
-Conventional commits. Sign with GPG when available.
+Conventional commits. GPG-signed.
 
 ```
 feat(proxy): Add secret injection to HTTPS requests
