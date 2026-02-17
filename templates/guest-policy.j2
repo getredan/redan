@@ -1,0 +1,20 @@
+{%- if mode == "allow-all" -%}
+network: allow-all
+
+All outbound HTTPS connections are permitted.
+{%- elif mode == "deny-all" -%}
+network: deny-all
+
+All outbound network connections are blocked.
+This environment has no internet access.
+{%- else -%}
+network: restrict
+
+Outbound HTTPS is restricted to the following hosts:
+{%- for host in hosts %}
+  - {{ host }}
+{%- endfor %}
+
+Connections to other hosts will be refused.
+Do not attempt to access hosts not on this list.
+{%- endif %}

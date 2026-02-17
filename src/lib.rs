@@ -9,5 +9,6 @@ pub mod provider;
 pub mod proxy;
 pub mod secret;
 pub mod session;
+pub mod templates;
 pub mod tls;
 pub mod vm;
