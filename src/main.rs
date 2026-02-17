@@ -119,7 +119,7 @@ enum Cli {
 
         /// Shell command to run in the guest.
         /// If omitted in interactive mode, defaults to /bin/sh.
-        #[arg(long)]
+        #[arg(long, short = 'c')]
         command: Option<String>,
 
         /// Interactive mode: attach terminal to guest console.
@@ -138,7 +138,7 @@ enum Cli {
         /// Visible in ps output; prefer --secret-file for sensitive environments.
         /// The real value is replaced with a placeholder in the guest.
         /// The proxy injects the real value only for requests to allowed hosts.
-        #[arg(long = "secret", value_name = "SPEC")]
+        #[arg(long = "secret", short = 's', value_name = "SPEC")]
         secrets: Vec<String>,
 
         /// Read secret specs from a file (one per line, same format as --secret).
@@ -155,7 +155,7 @@ enum Cli {
 
         /// Mount a host directory into the guest via virtio-fs.
         /// Format: /host/path:/guest/path (default guest path: /workspace)
-        #[arg(long = "mount", value_name = "HOST:GUEST")]
+        #[arg(long = "mount", short = 'm', value_name = "HOST:GUEST")]
         mounts: Vec<String>,
 
         /// Write structured audit events to a JSON-lines file.
@@ -302,7 +302,7 @@ fn main() {
             // CLI flags take precedence over config file values.
             let cfg = config::find_and_load();
             if let Some((path, _)) = &cfg {
-                log::info!("loaded config from {}", path.display());
+                eprintln!("config: {}", path.display());
             }
             let cfg = cfg.map(|(_, c)| c).unwrap_or_default();
 
@@ -349,7 +349,9 @@ fn main() {
                 }
                 (_, Some(path)) => path.clone(),
                 (None, None) => {
-                    eprintln!("specify --image <name> or --rootfs <path>");
+                    eprintln!("no image specified. Set image in redan.toml or pass --image <name>");
+                    eprintln!("  redan init          generate a redan.toml");
+                    eprintln!("  redan image list    show available images");
                     std::process::exit(1);
                 }
             };
@@ -379,13 +381,18 @@ fn main() {
                 name,
                 packages,
                 run_commands,
-            } => match image::create(&name, &packages, &run_commands) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("image create failed: {e}");
-                    std::process::exit(1);
+            } => {
+                if packages.is_empty() && run_commands.is_empty() {
+                    eprintln!("warning: creating image with no packages or commands. Use --packages or --run.");
                 }
-            },
+                match image::create(&name, &packages, &run_commands) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("image create failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             ImageAction::List => {
                 let images = image::list();
                 if images.is_empty() {
@@ -1340,6 +1347,10 @@ fn exec(
     let mut mount_commands: Vec<String> = Vec::new();
     for (i, spec) in mount_specs.iter().enumerate() {
         let (host_path, guest_path) = parse_mount(spec);
+        if !Path::new(&host_path).exists() {
+            eprintln!("mount source does not exist: {host_path}");
+            std::process::exit(1);
+        }
         let tag = format!("fs{i}");
         log::info!("mount: {host_path} -> {guest_path} (tag={tag})");
 

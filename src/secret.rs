@@ -246,7 +246,7 @@ pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
 }
 
 /// Find the byte offset past \r\n\r\n (header/body separator).
-fn find_header_end(data: &[u8]) -> Option<usize> {
+pub(crate) fn find_header_end(data: &[u8]) -> Option<usize> {
     data.windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|p| p + 4)

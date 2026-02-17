@@ -922,11 +922,7 @@ fn request_has_upgrade(data: &[u8]) -> bool {
         .any(|h| h.name.eq_ignore_ascii_case("upgrade"))
 }
 
-fn header_end_offset(data: &[u8]) -> Option<usize> {
-    data.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
-}
+use crate::secret::find_header_end as header_end_offset;
 
 fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
     let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
