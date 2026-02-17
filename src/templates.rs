@@ -4,32 +4,40 @@
 //! compile time via `include_str!`. Adding or modifying a `.j2` file
 //! triggers a rebuild (see `build.rs`).
 
+use std::sync::LazyLock;
+
 use minijinja::{context, Environment};
 
 use crate::config::Config;
 
-const REDAN_TOML: &str = include_str!("../templates/redan.toml.j2");
-const CLAUDE_DOCKERFILE: &str = include_str!("../templates/claude.dockerfile.j2");
-const DEVCONTAINER_JSON: &str = include_str!("../templates/devcontainer.json.j2");
-const GUEST_POLICY: &str = include_str!("../templates/guest-policy.j2");
-
-fn env() -> Environment<'static> {
+static ENV: LazyLock<Environment<'static>> = LazyLock::new(|| {
     let mut env = Environment::new();
-    env.add_template("redan.toml", REDAN_TOML).unwrap();
-    env.add_template("claude.dockerfile", CLAUDE_DOCKERFILE)
+    env.add_template("redan.toml", include_str!("../templates/redan.toml.j2"))
         .unwrap();
-    env.add_template("devcontainer.json", DEVCONTAINER_JSON)
-        .unwrap();
-    env.add_template("guest-policy", GUEST_POLICY).unwrap();
+    env.add_template(
+        "claude.dockerfile",
+        include_str!("../templates/claude.dockerfile.j2"),
+    )
+    .unwrap();
+    env.add_template(
+        "devcontainer.json",
+        include_str!("../templates/devcontainer.json.j2"),
+    )
+    .unwrap();
+    env.add_template(
+        "guest-policy",
+        include_str!("../templates/guest-policy.j2"),
+    )
+    .unwrap();
     env
-}
+});
 
 /// Render `redan.toml` from a Config and mode flag.
 pub fn redan_toml(cfg: &Config, claude: bool) -> String {
     let mounts: Vec<(&String, &crate::config::MountConfig)> = cfg.mount.iter().collect();
     let env_vars: Vec<(&String, &String)> = cfg.env.iter().collect();
 
-    env()
+    ENV
         .get_template("redan.toml")
         .unwrap()
         .render(context! {
@@ -52,7 +60,7 @@ pub fn claude_dockerfile(
     needs_node: bool,
     has_python: bool,
 ) -> String {
-    env()
+    ENV
         .get_template("claude.dockerfile")
         .unwrap()
         .render(context! {
@@ -66,7 +74,7 @@ pub fn claude_dockerfile(
 
 /// Render devcontainer.json (static for now, but templated for future fields).
 pub fn devcontainer_json() -> String {
-    env()
+    ENV
         .get_template("devcontainer.json")
         .unwrap()
         .render(context! {})
@@ -81,7 +89,7 @@ pub fn guest_policy(allowed_hosts: &Option<Vec<String>>) -> String {
         Some(h) => ("restrict", h.iter().map(|s| s.as_str()).collect()),
     };
 
-    env()
+    ENV
         .get_template("guest-policy")
         .unwrap()
         .render(context! { mode, hosts })

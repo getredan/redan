@@ -25,77 +25,44 @@ use serde::{Deserialize, Serialize};
 /// [mount.workspace]
 /// source = "."
 /// ```
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Config {
-    /// Named image (from `redan image create`)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Root filesystem path (alternative to image)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<String>,
-    /// Command to run in the guest
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    /// Proxy timeout in seconds (0 = no timeout)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
-    /// Interactive mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub interactive: Option<bool>,
-    /// Path for structured audit log
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_log: Option<String>,
-    /// Path for proxy/VM debug logs
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
 
-    /// Network policy
-    #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
+    #[serde(default)]
     pub network: NetworkConfig,
 
-    /// Secret definitions, keyed by environment variable name
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub secrets: BTreeMap<String, SecretConfig>,
 
-    /// Mount definitions, keyed by tag name
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub mount: BTreeMap<String, MountConfig>,
 
-    /// Extra environment variables for the guest
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default, Deserialize)]
 pub struct NetworkConfig {
-    /// Allowed outbound hosts. Empty = deny all (default-deny).
     #[serde(default)]
     pub allow: Vec<String>,
 }
 
-impl NetworkConfig {
-    fn is_empty(&self) -> bool {
-        self.allow.is_empty()
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize)]
 pub struct SecretConfig {
-    /// Literal value or provider URI (vault://...).
     pub value: String,
-    /// Hosts this secret may be injected for.
     pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct MountConfig {
-    /// Host path to mount.
     pub source: String,
-    /// Guest mount point (default: /workspace).
     pub target: Option<String>,
 }
 
@@ -119,11 +86,6 @@ impl Config {
                 None => m.source.clone(),
             })
             .collect()
-    }
-
-    /// Serialize to TOML string.
-    pub fn to_toml(&self) -> Result<String, String> {
-        toml::to_string_pretty(self).map_err(|e| e.to_string())
     }
 }
 
@@ -158,8 +120,8 @@ fn dirs_path() -> Option<PathBuf> {
 }
 
 fn load(path: &Path) -> Result<Config, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     toml::from_str(&content).map_err(|e| format!("{e}"))
 }
 
@@ -211,44 +173,16 @@ target = "/workspace"
     }
 
     #[test]
-    fn reject_unknown_fields() {
-        let result: Result<Config, _> = toml::from_str("[bogus]\nfoo = 1");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn roundtrip_to_toml() {
-        let mut config = Config::default();
-        config.image = Some("dev".into());
-        config.command = Some("bash".into());
-        config.network.allow.push("api.github.com".into());
-        config.secrets.insert(
-            "TOKEN".into(),
-            SecretConfig {
-                value: "ghp_abc".into(),
-                hosts: vec!["api.github.com".into()],
-            },
-        );
-        config.mount.insert(
-            "workspace".into(),
-            MountConfig {
-                source: ".".into(),
-                target: Some("/workspace".into()),
-            },
-        );
-
-        let toml_str = config.to_toml().unwrap();
-        let parsed: Config = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.image.as_deref(), Some("dev"));
-        assert_eq!(parsed.secrets.len(), 1);
-        assert_eq!(parsed.mount.len(), 1);
-    }
-
-    #[test]
     fn image_only_config() {
         let config: Config = toml::from_str("image = \"dev\"").unwrap();
         assert_eq!(config.image.as_deref(), Some("dev"));
         assert!(config.secrets.is_empty());
         assert!(config.network.allow.is_empty());
+    }
+
+    #[test]
+    fn unknown_fields_ignored() {
+        let config: Config = toml::from_str("image = \"dev\"\ncustom_field = true").unwrap();
+        assert_eq!(config.image.as_deref(), Some("dev"));
     }
 }
