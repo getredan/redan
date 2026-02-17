@@ -56,7 +56,7 @@ pkill -9 redan  # to stop
 
 Security-critical project. Tests are load-bearing.
 
-- Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs.
+- Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs, templates.
 - Integration tests boot real VMs. Marked `#[ignore]`, need KVM.
 - Test names describe scenarios: `inject_skips_disallowed_host`.
 - Deterministic. No sleeps, no network in unit tests.
@@ -74,10 +74,10 @@ smoltcp (userspace TCP/IP)
   |  TCP :80 -> rejected (HTTPS only)
   |  TCP :443 -> TLS MITM (SNI, ephemeral certs)
   v
-proxy (injection, scrubbing)
+proxy (injection, scrubbing, host allowlist)
   |  rustls (upstream TLS)
   v
-internet
+internet (only allowed hosts)
 ```
 
 ## Modules
@@ -85,16 +85,21 @@ internet
 | Module | What |
 |--------|------|
 | `ca.rs` | Ephemeral MITM CA, per-hostname leaf certs |
+| `config.rs` | `redan.toml` parsing, `[secrets]`, `[network]`, `[mount]`, `[env]` |
 | `dns.rs` | Synthetic DNS (A queries -> gateway IP) |
 | `error.rs` | Error types |
 | `ffi.rs` | libkrun FFI bindings |
-| `image.rs` | Alpine rootfs image management |
+| `image.rs` | Image management: create, import, docker, dockerfile, devcontainer, compose |
 | `net.rs` | smoltcp Device for virtio-net socket |
 | `provider.rs` | Secret providers (literal, Vault KV v2) |
-| `proxy.rs` | smoltcp event loop, connection state machine |
+| `proxy.rs` | smoltcp event loop, connection state machine, host allowlist |
 | `secret.rs` | Injection and scrubbing |
+| `session.rs` | Session lifecycle, metadata, listing |
+| `templates.rs` | Minijinja templates (redan.toml, Dockerfile, devcontainer, guest policy) |
 | `tls.rs` | SNI extraction, upstream relay |
 | `vm.rs` | VM lifecycle |
+
+Templates live in `templates/*.j2`, embedded at compile time via `include_str!`.
 
 ## Style
 

@@ -56,8 +56,8 @@ injects the real key only in HTTPS requests to `api.anthropic.com`.
 Responses are scrubbed of the real value before the agent sees them.
 
 **Note:** `--secret` values are visible in process listings (`ps`).
-For production use, prefer the Vault provider (`vault://`) or set
-secrets in environment variables and pass them through:
+For production use, prefer `--secret-file`, the Vault provider
+(`vault://`), or pass secrets from environment variables:
 `--secret "KEY=$(cat /path/to/secret):host"`.
 
 ### 3. Interactive mode
@@ -74,10 +74,12 @@ network isolation.
 ### 4. Check prerequisites
 
 ```bash
-redan doctor
+redan doctor                         # system checks
+redan doctor --image myimage         # check a specific image exists
+redan doctor --secret "KEY=val:host" # validate secret syntax + providers
 ```
 
-Checks for /dev/kvm, libkrun, libkrunfw, and lists available images.
+Checks for /dev/kvm, libkrun, libkrunfw, and available images.
 
 ## How it works
 
@@ -107,6 +109,7 @@ smoltcp (userspace TCP/IP on host)
 - Injection is restricted to HTTP headers (not URLs, not bodies)
 - DNS is synthetic -- no queries reach the internet
 - All traffic routes through the gateway IP (no direct IP access)
+- Default-deny outbound networking
 - Response scrubbing is best-effort (literal byte match)
 
 ## Secrets
@@ -123,7 +126,10 @@ The value can be a literal or a provider URI:
 --secret "GITHUB_TOKEN=vault://secret/myapp#github_token:api.github.com"
 
 # Multiple hosts
---secret "API_KEY=sk-abc:api.example.com, cdn.example.com"
+--secret "API_KEY=sk-abc:api.example.com,cdn.example.com"
+
+# From a file (one spec per line, # comments)
+--secret-file .redan-secrets
 
 # Multiple secrets
 --secret "GITHUB_TOKEN=ghp_abc:api.github.com" \
@@ -170,18 +176,111 @@ Uses virtio-fs. The guest has read-write access. Git is your safety net.
 
 ```bash
 redan image create myimage --packages "python3 pip" --run "pip install flask"
+redan image import myimage --from ubuntu:24.04
+redan image import myimage --dockerfile path/to/Dockerfile
+redan image import myimage --devcontainer .devcontainer
 redan image list
 redan image remove myimage
 ```
 
-Images are Alpine-based rootfs directories stored at
-`~/.local/share/redan/images/`. Base tarballs cached at `~/.cache/redan/`.
+`create` builds Alpine-based images. `import` supports Docker images,
+Dockerfiles, and devcontainers (all three spec modes: `build.dockerfile`,
+`image`, `dockerComposeFile`).
+
+Images are rootfs directories stored at `~/.local/share/redan/images/`.
+Base tarballs cached at `~/.cache/redan/`.
 
 ## Requirements
 
 - Linux x86_64 with KVM (`/dev/kvm`)
 - [libkrun] >= 1.9.0 and [libkrunfw]
 - Rust 1.85+ (edition 2024)
+
+## Configuration
+
+Use `redan.toml` instead of long CLI invocations. `redan init` generates
+one from project detection:
+
+```bash
+redan init          # detect project type, generate config
+redan init --claude # generate config + devcontainer for Claude Code
+```
+
+Example `redan.toml`:
+
+```toml
+image = "myproject"
+command = "claude --dangerously-skip-permissions"
+interactive = true
+
+[network]
+allow = ["api.anthropic.com", "pypi.org"]
+
+[secrets.ANTHROPIC_API_KEY]
+value = "sk-ant-..."
+hosts = ["api.anthropic.com"]
+
+[mount.workspace]
+source = "."
+target = "/workspace"
+
+[env]
+CLAUDE_CONFIG_DIR = "/workspace/.claude"
+```
+
+Looks for `redan.toml` in the current directory, then
+`~/.config/redan/config.toml`. CLI flags override file values.
+
+## Network policy
+
+Redan defaults to **deny-all** outbound networking. You must explicitly
+allow hosts:
+
+```toml
+[network]
+allow = ["api.anthropic.com", "registry.npmjs.org"]
+```
+
+Or on the CLI:
+
+```bash
+redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
+```
+
+Hosts required by secrets are automatically included in the allowlist.
+Use `"*"` to allow all outbound connections (not recommended).
+
+## Sessions
+
+Each `redan exec` creates a session with a unique ID. Session metadata,
+logs, and audit events are stored at `~/.local/state/redan/sessions/`.
+
+```bash
+redan sessions                # list all sessions
+redan sessions show <id>      # session details
+redan sessions remove         # remove all exited sessions
+redan sessions remove <id>    # remove a specific session
+redan logs                    # logs from most recent session
+redan logs -f                 # tail -f
+redan logs <id>               # logs from a specific session
+```
+
+## Audit log
+
+```bash
+redan exec --audit-log events.jsonl ...
+```
+
+Structured JSON-lines event log for security audit and debugging:
+
+```json
+{"ts":"...","event":"connect","host":"api.github.com"}
+{"ts":"...","event":"inject","host":"api.github.com","env":"API_KEY"}
+{"ts":"...","event":"scrub","host":"api.github.com"}
+{"ts":"...","event":"reject","host":"evil.com","reason":"not_allowed"}
+```
+
+Audit logs are also stored per-session automatically.
 
 ## Agent awareness
 
@@ -235,6 +334,7 @@ the VM tries to exfiltrate secrets or access unauthorized resources.
 - Agent sending secrets to unauthorized hosts
 - Agent making DNS queries to the internet
 - Agent connecting directly to IP addresses (all traffic goes through proxy)
+- Agent reaching hosts not in the allowlist (default-deny networking)
 
 **Known limitations (documented, not bugs):**
 - Scrubbing doesn't catch encoded secrets (base64, URL-encoding, etc.)
@@ -245,10 +345,15 @@ the VM tries to exfiltrate secrets or access unauthorized resources.
 Primary defense is the host allowlist, not scrubbing. Scrubbing reduces
 accidental exposure; it's not a hard security boundary.
 
+See [docs/security-model.md](docs/security-model.md) for the full
+threat model, side-channel analysis, and known limitations.
+
 ## Status
 
-**Alpha.** The full chain works end-to-end. 95 tests (unit,
-integration, adversarial). Not yet packaged for binary distribution.
+**Alpha.** The full chain works end-to-end: `redan init --claude` through
+interactive Claude Code sessions with network policy enforcement. 125
+tests (unit, integration, adversarial). Not yet packaged for binary
+distribution.
 
 ## Acknowledgments
 
