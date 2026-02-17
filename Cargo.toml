@@ -33,6 +33,7 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 time = { version = "0.3.47", features = ["formatting"] }
 toml = "0.8"
 minijinja = "2.15.1"
+thiserror = "2.0.18"
 
 [dev-dependencies]
 base64 = "0.22.1"

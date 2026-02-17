@@ -1,45 +1,16 @@
-use std::fmt;
 use std::io;
 
 /// Error type for redan operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    Io(io::Error),
-    Tls(rustls::Error),
-    /// Configuration or parse errors (CLI input, secret specs, etc.)
+    #[error("{0}")]
+    Io(#[from] io::Error),
+
+    #[error("tls: {0}")]
+    Tls(#[from] rustls::Error),
+
+    #[error("{0}")]
     Config(String),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "{e}"),
-            Self::Tls(e) => write!(f, "tls: {e}"),
-            Self::Config(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Tls(e) => Some(e),
-            Self::Config(_) => None,
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<rustls::Error> for Error {
-    fn from(e: rustls::Error) -> Self {
-        Self::Tls(e)
-    }
 }
 
 impl From<String> for Error {

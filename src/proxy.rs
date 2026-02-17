@@ -75,14 +75,24 @@ fn reap_done(connections: &mut HashMap<SocketHandle, ProxyConn>, sockets: &mut S
     });
 }
 
-pub fn run(
-    host_sock: UnixStream,
-    ca: Arc<Mutex<MitmCa>>,
-    secrets: &[SecretBinding],
-    timeout: Duration,
-    allowed_hosts: Option<Vec<String>>,
-    audit_log_path: Option<&str>,
-) {
+pub struct ProxyConfig<'a> {
+    pub host_sock: UnixStream,
+    pub ca: Arc<Mutex<MitmCa>>,
+    pub secrets: &'a [SecretBinding],
+    pub timeout: Duration,
+    pub allowed_hosts: Option<Vec<String>>,
+    pub audit_log_path: Option<&'a str>,
+}
+
+pub fn run(cfg: ProxyConfig<'_>) {
+    let ProxyConfig {
+        host_sock,
+        ca,
+        secrets,
+        timeout,
+        allowed_hosts,
+        audit_log_path,
+    } = cfg;
     let resolver = Arc::new(MitmCertResolver {
         ca: Arc::clone(&ca),
     });

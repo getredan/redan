@@ -739,6 +739,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smoltcp",
+ "thiserror",
  "time",
  "toml",
  "ureq",

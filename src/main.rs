@@ -1432,16 +1432,17 @@ fn exec(
     // When the proxy returns (timeout or VM socket closes), we're done.
     // The VM thread may still be alive (krun_start_enter blocks indefinitely)
     // but the process exit will clean it up.
-    proxy::run(
-        vm.net_sock
+    proxy::run(proxy::ProxyConfig {
+        host_sock: vm
+            .net_sock
             .try_clone()
             .expect("failed to clone VM network socket"),
-        std::sync::Arc::new(std::sync::Mutex::new(ca)),
-        &secrets,
-        Duration::from_secs(timeout_secs),
+        ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
+        secrets: &secrets,
+        timeout: Duration::from_secs(timeout_secs),
         allowed_hosts,
         audit_log_path,
-    );
+    });
 
     meta.finish(true);
     log::info!("session {session_id} finished");

@@ -231,14 +231,14 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
     let vm_handle = vm::Vm::boot(config);
 
     // Run proxy until VM completes (generous timeout for package installation)
-    proxy::run(
-        vm_handle.net_sock.try_clone()?,
-        std::sync::Arc::new(std::sync::Mutex::new(ca)),
-        &[],                      // no secrets during build
-        Duration::from_secs(600), // 10 min timeout for builds
-        None,                     // no host restriction during build
-        None,                     // no audit log during build
-    );
+    proxy::run(proxy::ProxyConfig {
+        host_sock: vm_handle.net_sock.try_clone()?,
+        ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
+        secrets: &[],              // no secrets during build
+        timeout: Duration::from_secs(600), // 10 min for builds
+        allowed_hosts: None,       // unrestricted during build
+        audit_log_path: None,
+    });
 
     // Verify the build completed successfully by checking for the
     // sentinel file written as the last build step.
