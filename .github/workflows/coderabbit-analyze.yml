@@ -309,7 +309,7 @@ jobs:
           - Is lock ordering consistent to prevent deadlocks?
           - Are there any resource leaks (files, sockets, memory)?
 
- ### Testing
+          ### Testing
           - Are security boundaries tested with adversarial inputs?
           - Is error handling tested (not just happy paths)?
           - Do integration tests properly clean up resources?
