@@ -66,8 +66,8 @@ pub fn list() -> Vec<String> {
     };
     let mut names: Vec<String> = entries
         .filter_map(Result::ok)
-        .filter(|e| e.path().join("bin").is_dir()) // must have bin/ to be a rootfs
-        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|entry| entry.path().join("bin").is_dir()) // must have bin/ to be a rootfs
+        .filter_map(|entry| entry.file_name().into_string().ok())
         .collect();
     names.sort();
     names
@@ -115,7 +115,7 @@ fn ensure_base_cached() -> io::Result<PathBuf> {
     eprintln!(
         "downloaded {} ({} bytes)",
         tarball.display(),
-        fs::metadata(&tarball).map(|m| m.len()).unwrap_or(0)
+        fs::metadata(&tarball).map(|meta| meta.len()).unwrap_or(0)
     );
     Ok(tarball)
 }
@@ -342,7 +342,7 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
     let tag = format!("redan-build-{name}");
     let context = df
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
     eprintln!("building Dockerfile...");
@@ -465,8 +465,8 @@ pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf>
             })?;
         let source_tag = config_json
             .get("services")
-            .and_then(|s| s.get(service))
-            .and_then(|s| s.get("image"))
+            .and_then(|services| services.get(service))
+            .and_then(|svc| svc.get("image"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();

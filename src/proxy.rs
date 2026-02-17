@@ -224,7 +224,7 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
 
         let has_pending = connections
             .values()
-            .any(|c| matches!(c.state, ConnState::Shuttling | ConnState::Draining));
+            .any(|conn| matches!(conn.state, ConnState::Shuttling | ConnState::Draining));
 
         if has_pending {
             std::thread::sleep(Duration::from_micros(100));
@@ -236,7 +236,7 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
     // Return discovered hosts (empty if not in discover mode)
     discovered
         .lock()
-        .map(|h| h.iter().cloned().collect())
+        .map(|hosts| hosts.iter().cloned().collect())
         .unwrap_or_default()
 }
 
@@ -625,7 +625,7 @@ fn tls_connection_thread(
     // matching the list may connect upstream. Supports wildcards:
     // "*.example.com" matches "api.example.com" but not "example.com".
     if let Some(hosts) = allowed_hosts
-        && !hosts.iter().any(|h| host_matches(h, &sni))
+        && !hosts.iter().any(|pattern| host_matches(pattern, &sni))
     {
         log::warn!("blocked connection to {sni}: not in --allow-host list");
         audit(
@@ -742,7 +742,7 @@ fn tls_connection_thread(
     // but lets users reach localhost or internal hosts they opted into.
     let explicitly_allowed = allowed_hosts
         .as_ref()
-        .is_some_and(|hosts| hosts.iter().any(|h| host_matches(h, &sni)));
+        .is_some_and(|hosts| hosts.iter().any(|pattern| host_matches(pattern, &sni)));
     let (mut upstream_tcp, mut upstream_tls) =
         tls::connect_upstream(&sni, 443, explicitly_allowed)?;
 
@@ -785,7 +785,7 @@ fn tls_connection_thread(
     // Read response and stream back to guest
     let max_secret_len = secrets
         .iter()
-        .map(|s| s.real_value().len())
+        .map(|secret| secret.real_value().len())
         .max()
         .unwrap_or(0)
         .min(MAX_SCRUB_SECRET_LEN);
@@ -1022,9 +1022,9 @@ fn request_has_chunked_te(data: &[u8]) -> bool {
     if req.parse(data).is_err() {
         return false;
     }
-    req.headers.iter().any(|h| {
-        h.name.eq_ignore_ascii_case("transfer-encoding")
-            && std::str::from_utf8(h.value)
+    req.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("transfer-encoding")
+            && std::str::from_utf8(header.value)
                 .unwrap_or("")
                 .to_ascii_lowercase()
                 .contains("chunked")
@@ -1039,9 +1039,9 @@ fn has_content_encoding(data: &[u8]) -> bool {
     if resp.parse(data).is_err() {
         return false;
     }
-    resp.headers.iter().any(|h| {
-        h.name.eq_ignore_ascii_case("content-encoding")
-            && !std::str::from_utf8(h.value)
+    resp.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-encoding")
+            && !std::str::from_utf8(header.value)
                 .unwrap_or("")
                 .trim()
                 .eq_ignore_ascii_case("identity")
@@ -1055,7 +1055,7 @@ fn request_is_connect(data: &[u8]) -> bool {
         return false;
     }
     req.method
-        .is_some_and(|m| m.eq_ignore_ascii_case("CONNECT"))
+        .is_some_and(|method| method.eq_ignore_ascii_case("CONNECT"))
 }
 
 fn request_has_upgrade(data: &[u8]) -> bool {
@@ -1066,7 +1066,7 @@ fn request_has_upgrade(data: &[u8]) -> bool {
     }
     req.headers
         .iter()
-        .any(|h| h.name.eq_ignore_ascii_case("upgrade"))
+        .any(|header| header.name.eq_ignore_ascii_case("upgrade"))
 }
 
 /// Check if a hostname matches an allowlist pattern.
@@ -1095,8 +1095,8 @@ fn extract_host_header(data: &[u8]) -> Option<String> {
     }
     req.headers
         .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("host"))
-        .map(|h| String::from_utf8_lossy(h.value).into_owned())
+        .find(|header| header.name.eq_ignore_ascii_case("host"))
+        .map(|header| String::from_utf8_lossy(header.value).into_owned())
 }
 
 use crate::secret::find_header_end as header_end_offset;

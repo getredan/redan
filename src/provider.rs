@@ -60,7 +60,8 @@ impl Vault {
         let token = std::env::var("VAULT_TOKEN").or_else(|_| {
             let home = std::env::var("HOME")
                 .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "$HOME not set"))?;
-            std::fs::read_to_string(format!("{home}/.vault-token")).map(|t| t.trim().to_string())
+            std::fs::read_to_string(format!("{home}/.vault-token"))
+                .map(|token| token.trim().to_string())
         })?;
 
         if token.is_empty() {

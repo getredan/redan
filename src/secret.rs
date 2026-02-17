@@ -143,7 +143,7 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
         if !secret
             .allowed_hosts()
             .iter()
-            .any(|h| h.eq_ignore_ascii_case(hostname))
+            .any(|allowed| allowed.eq_ignore_ascii_case(hostname))
         {
             continue;
         }

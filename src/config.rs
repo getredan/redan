@@ -188,7 +188,7 @@ fn config_paths() -> Vec<PathBuf> {
 }
 
 fn dirs_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| Path::new(&h).join(".config/redan"))
+    std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/redan"))
 }
 
 fn load(path: &Path) -> Result<Config, String> {

@@ -92,13 +92,14 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     }
 
     // Default-deny: all outbound HTTPS blocked unless explicitly allowed.
-    let allowed_hosts: Option<Vec<String>> = if cfg.allow_host_specs.iter().any(|h| h == "*") {
+    let allowed_hosts: Option<Vec<String>> = if cfg.allow_host_specs.iter().any(|spec| spec == "*")
+    {
         None
     } else {
         let mut hosts: Vec<String> = cfg
             .allow_host_specs
             .iter()
-            .map(|h| h.to_ascii_lowercase())
+            .map(|host| host.to_ascii_lowercase())
             .collect();
         // Include secret hosts automatically
         for s in &secrets {
@@ -269,7 +270,10 @@ pub(crate) fn parse_secret(spec: &str) -> Result<(String, SecretBinding), String
     let real_value = redan::provider::resolve_secret_value(value_ref)
         .map_err(|e| format!("failed to resolve secret: {e}"))?;
 
-    let allowed_hosts: Vec<String> = hosts.split(',').map(|h| h.trim().to_string()).collect();
+    let allowed_hosts: Vec<String> = hosts
+        .split(',')
+        .map(|host| host.trim().to_string())
+        .collect();
     let binding =
         SecretBinding::new(env_name, real_value, allowed_hosts).map_err(|e| e.to_string())?;
 
@@ -311,7 +315,7 @@ pub(crate) fn read_secret_file(path: &str) -> Result<Vec<String>, String> {
     Ok(content
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(String::from)
         .collect())
 }
