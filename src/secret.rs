@@ -69,8 +69,7 @@ impl SecretBinding {
         }
 
         let mut buf = [0u8; 16];
-        getrandom::getrandom(&mut buf)
-            .map_err(|e| format!("failed to generate placeholder: {e}"))?;
+        getrandom::fill(&mut buf).map_err(|e| format!("failed to generate placeholder: {e}"))?;
         let suffix = buf.map(|b| format!("{b:02x}")).join("");
 
         Ok(Self {
