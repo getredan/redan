@@ -14,19 +14,52 @@ you explicitly allow.
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
 
-## Install
+## Installation
 
-Redan requires Linux x86_64 with KVM and libkrun.
+Redan requires Linux with KVM (`/dev/kvm`) and libkrun.
+
+### Arch Linux
 
 ```bash
-# Arch Linux
 pacman -S libkrun
+```
 
-# Fedora
+### Fedora
+
+```bash
 dnf install libkrun-devel
+```
 
-# Then:
-cargo install redan
+### Ubuntu / Debian
+
+libkrun is not yet in the Ubuntu/Debian repositories. Build from source:
+
+```bash
+apt install build-essential libkrunfw-dev
+git clone https://github.com/containers/libkrun
+cd libkrun && make && sudo make install
+```
+
+### Then install redan
+
+[Archives of pre-built binaries for redan are available for Linux x86_64 and
+aarch64.](https://github.com/getredan/redan/releases) Download the latest
+release and place it in your `$PATH`:
+
+```bash
+sudo install redan /usr/local/bin/
+```
+
+Or build from source (requires Rust 1.85+):
+
+```bash
+cargo install --git https://github.com/getredan/redan.git
+```
+
+Verify everything works:
+
+```bash
+redan doctor
 ```
 
 ## Quick start
