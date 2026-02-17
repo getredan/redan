@@ -5,7 +5,7 @@ RUN apt-get update -qq && \
       ca-certificates curl git iproute2 && \
     rm -rf /var/lib/apt/lists/*
 
-# Node.js via NodeSource (Ubuntu's nodejs package is too old)
+# Node.js via NodeSource (Ubuntu 24.04 ships Node 18, which is EOL)
 ARG NODE_MAJOR=22
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && \
     apt-get install -y -qq --no-install-recommends nodejs && \

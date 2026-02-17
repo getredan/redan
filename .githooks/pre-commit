@@ -1,7 +1,3 @@
 #!/bin/bash
-# Pre-commit hook: format check + lint + unit tests.
 set -e
-
-mise run format-check
-mise run lint
-mise run test
+mise run check

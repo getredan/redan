@@ -3,7 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "*.*.*"
+      - "*.*.*-*"
 
 permissions:
   contents: write
@@ -38,34 +39,16 @@ jobs:
 
       - name: Install cross-compilation tools
         if: matrix.arch == 'aarch64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      # Stub libkrun for linking. The binary requires real libkrun at
-      # runtime, but we can build against a stub that exports the
-      # symbols.
-      - name: Create libkrun stub
+      - name: Install libkrun stub
         run: |
-          cat > /tmp/libkrun_stub.c << 'EOF'
-          int krun_init_log() { return 0; }
-          int krun_create_ctx() { return 0; }
-          int krun_set_vm_config() { return 0; }
-          int krun_set_root() { return 0; }
-          int krun_set_workdir() { return 0; }
-          int krun_set_exec() { return 0; }
-          int krun_start_enter() { return 0; }
-          int krun_add_net_unixstream() { return 0; }
-          int krun_add_virtiofs() { return 0; }
-          int krun_set_console_output() { return 0; }
-          int krun_set_rlimits() { return 0; }
-          EOF
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            aarch64-linux-gnu-gcc -shared -o /tmp/libkrun.so /tmp/libkrun_stub.c
+            aarch64-linux-gnu-gcc -shared -o /tmp/libkrun.so ci/libkrun_stub.c
             sudo mkdir -p /usr/aarch64-linux-gnu/lib
             sudo cp /tmp/libkrun.so /usr/aarch64-linux-gnu/lib/
           else
-            gcc -shared -o /tmp/libkrun.so /tmp/libkrun_stub.c
+            gcc -shared -o /tmp/libkrun.so ci/libkrun_stub.c
             sudo cp /tmp/libkrun.so /usr/lib/
             sudo ldconfig
           fi
@@ -109,6 +92,8 @@ jobs:
             redan-*.tar.gz
             redan-*.sha256
           body: |
+            See the [changelog](https://github.com/getredan/redan/blob/main/CHANGELOG.md) for details.
+
             ## Install
 
             ```bash
@@ -121,5 +106,5 @@ jobs:
             sudo mv redan /usr/local/bin/
             ```
 
-            Requires libkrun and KVM at runtime. See README for details.
+            Requires libkrun and KVM at runtime. See [README](https://github.com/getredan/redan#installation) for details.
           generate_release_notes: true

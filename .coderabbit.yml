@@ -1,0 +1,17 @@
+language: en
+early_access: true
+reviews:
+  profile: chill
+  path_instructions:
+    - path: "tests/**/*.rs"
+      instructions: >
+        Verify tests assert real functionality, not mocked behavior.
+        Security-critical tests must reference concrete attack vectors.
+        Test names should describe scenarios. No sleeps or network
+        calls in unit tests.
+    - path: "src/**/*.rs"
+      instructions: >
+        This is a security-critical project. Check for: secret leakage
+        in error messages or logs, unchecked unwrap() on user input,
+        TOCTOU in file operations, and missing input validation on
+        guest-controlled data (SNI, DNS, HTTP headers).

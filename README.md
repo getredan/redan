@@ -47,11 +47,11 @@ releases page.](https://github.com/getredan/redan/releases) Download,
 extract, and move to your `$PATH`:
 
 ```bash
-tar xzf redan-v*.tar.gz
+tar xzf redan-*.tar.gz
 sudo mv redan /usr/local/bin/
 ```
 
-Or build from source (requires Rust 1.85+):
+Or build from source (requires Rust 1.85+, edition 2024):
 
 ```bash
 cargo install --git https://github.com/getredan/redan.git
@@ -63,22 +63,71 @@ Verify everything works:
 redan doctor
 ```
 
-## Quick start
+## Setup with Claude Code
 
-### 1. Build an image
-
-```bash
-redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile
-```
-
-Or generate a project-specific devcontainer:
+The fastest way to get started:
 
 ```bash
 redan init --claude
 redan image import myproject --devcontainer .devcontainer/redan
+redan exec
 ```
 
-### 2. Run an agent
+`redan init --claude` generates a devcontainer with Claude Code, Node.js,
+and project-appropriate tooling (Python/uv, Rust, Go, etc.) plus a
+`redan.toml` with Anthropic API hosts pre-configured.
+
+Or use the provided Dockerfile directly:
+
+```bash
+redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile
+redan exec --image claude-code -i \
+  --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
+  --mount ./my-project
+```
+
+## Configuration
+
+Use `redan.toml` instead of long CLI invocations. `redan init` generates
+one from project detection:
+
+```bash
+redan init          # detect project type, generate config
+redan init --claude # generate config + devcontainer for Claude Code
+```
+
+Example `redan.toml`:
+
+```toml
+image = "myproject"
+command = "claude --dangerously-skip-permissions"
+interactive = true
+
+[network]
+allow = ["api.anthropic.com", "pypi.org"]
+
+[secrets.ANTHROPIC_API_KEY]
+value = "sk-ant-..."
+hosts = ["api.anthropic.com"]
+
+[mount.workspace]
+source = "."
+target = "/workspace"
+
+[env]
+CLAUDE_CONFIG_DIR = "/workspace/.claude"
+```
+
+Looks for `redan.toml` in the current directory, then
+`~/.config/redan/config.toml`. CLI flags override file values.
+
+Redan also reads `sandbox.network.allowedDomains` from Claude Code
+settings (`.claude/settings.json` and `~/.claude/settings.json`) and
+merges them into the network allowlist automatically.
+
+## Quick start
+
+### Run an agent
 
 ```bash
 redan exec --image claude-code \
@@ -93,10 +142,11 @@ Responses are scrubbed of the real value before the agent sees them.
 
 **Note:** `--secret` values are visible in process listings (`ps`).
 For production use, prefer `--secret-file`, the Vault provider
-(`vault://`), or pass secrets from environment variables:
-`--secret "KEY=$(cat /path/to/secret):host"`.
+(`vault://`), or read secrets from files:
+`--secret "KEY=$(cat /path/to/secret):host"` (the shell expands this
+before redan sees it).
 
-### 3. Interactive mode
+### Interactive mode
 
 ```bash
 redan exec --image claude-code -i \
@@ -107,7 +157,7 @@ redan exec --image claude-code -i \
 Drops you into a shell inside the VM. Same secret injection, same
 network isolation.
 
-### 4. Check prerequisites
+### Check prerequisites
 
 ```bash
 redan doctor                         # system checks
@@ -190,8 +240,9 @@ Falls back to `~/.vault-token` if `VAULT_TOKEN` is not set.
 ### Provider architecture
 
 Secret resolution is pluggable via the `SecretProvider` trait. The open
-core ships with `Literal` and `Vault`. Enterprise adapters (Keycloak
-OIDC, AWS Secrets Manager, etc.) implement the same trait.
+core ships with `Literal` and `Vault` providers. The trait is designed
+for extension -- additional backends (AWS Secrets Manager, OIDC, etc.)
+can be added in the future.
 
 The value can contain colons (splits on the last `:`). The guest
 receives a `redan_ph_<name>_<hex>` placeholder via environment variable.
@@ -206,7 +257,8 @@ receives a `redan_ph_<name>_<hex>` placeholder via environment variable.
 --mount /home/chris/project:/code
 ```
 
-Uses virtio-fs. The guest has read-write access. Git is your safety net.
+Uses virtio-fs for host directory sharing. The guest has read-write
+access, and git is your safety net for recovering from unwanted changes.
 
 ## Image management
 
@@ -219,53 +271,13 @@ redan image list
 redan image remove myimage
 ```
 
-`create` builds Alpine-based images. `import` supports Docker images,
-Dockerfiles, and devcontainers (all three spec modes: `build.dockerfile`,
-`image`, `dockerComposeFile`).
+`create` builds Alpine-based images with apk packages. `import` pulls
+from Docker images, builds from Dockerfiles, or reads devcontainer
+configs (`build.dockerfile`, `image`, and `dockerComposeFile` are all
+supported).
 
-Images are rootfs directories stored at `~/.local/share/redan/images/`.
-Base tarballs cached at `~/.cache/redan/`.
-
-## Requirements
-
-- Linux x86_64 with KVM (`/dev/kvm`)
-- [libkrun] >= 1.9.0 and [libkrunfw]
-- Rust 1.85+ (edition 2024)
-
-## Configuration
-
-Use `redan.toml` instead of long CLI invocations. `redan init` generates
-one from project detection:
-
-```bash
-redan init          # detect project type, generate config
-redan init --claude # generate config + devcontainer for Claude Code
-```
-
-Example `redan.toml`:
-
-```toml
-image = "myproject"
-command = "claude --dangerously-skip-permissions"
-interactive = true
-
-[network]
-allow = ["api.anthropic.com", "pypi.org"]
-
-[secrets.ANTHROPIC_API_KEY]
-value = "sk-ant-..."
-hosts = ["api.anthropic.com"]
-
-[mount.workspace]
-source = "."
-target = "/workspace"
-
-[env]
-CLAUDE_CONFIG_DIR = "/workspace/.claude"
-```
-
-Looks for `redan.toml` in the current directory, then
-`~/.config/redan/config.toml`. CLI flags override file values.
+Images are rootfs directories stored at `~/.local/share/redan/images/`
+and base tarballs are cached at `~/.cache/redan/`.
 
 ## Network policy
 
@@ -323,24 +335,6 @@ allow = [
 
 Copy the output into your `redan.toml` and subsequent runs enforce it.
 
-### Claude Code integration
-
-Redan reads `sandbox.network.allowedDomains` from Claude Code settings
-(`.claude/settings.json`, `.claude/settings.local.json`, and user-level
-`~/.claude/settings.json`). Domains are merged into the allowlist
-automatically, so you define network policy once and redan enforces it
-with VM isolation.
-
-```json
-{
-  "sandbox": {
-    "network": {
-      "allowedDomains": ["api.anthropic.com", "*.npmjs.org"]
-    }
-  }
-}
-```
-
 ## Sessions
 
 Each `redan exec` creates a session with a unique ID. Session metadata,
@@ -364,7 +358,7 @@ redan exec --audit-log events.jsonl ...
 
 Structured JSON-lines event log for security audit and debugging:
 
-```json
+```jsonl
 {"ts":"...","event":"connect","host":"api.github.com"}
 {"ts":"...","event":"inject","host":"api.github.com","env":"API_KEY"}
 {"ts":"...","event":"scrub","host":"api.github.com"}
@@ -389,25 +383,6 @@ what's allowed and what's blocked.
 Agents that check `$REDAN` can adapt their behavior: skip web searches,
 avoid fetching URLs outside the allowlist, and give users clear error
 messages instead of "connection failed".
-
-Redan reads `sandbox.network.allowedDomains` from Claude Code settings
-and merges them into the allowlist. Define network policy once in your
-agent config, redan enforces it at the VM network layer.
-
-## Setup with Claude Code
-
-```bash
-redan init --claude
-redan image import myproject --devcontainer .devcontainer/redan
-redan exec
-```
-
-`redan init --claude` generates a devcontainer with Claude Code, Node.js,
-and project-appropriate tooling (Python/uv, Rust, Go, etc.) plus a
-`redan.toml` with Anthropic API hosts pre-configured.
-
-Devcontainer support works with all three spec modes: `build.dockerfile`,
-`image`, and `dockerComposeFile`.
 
 ## Security model
 
@@ -443,7 +418,7 @@ Be aware of what redan does and doesn't support before deploying it.
 
 ### Unsupported auth patterns
 
-These patterns require secrets in places redan can't inject:
+These patterns require secrets in places redan currently can't inject:
 
 - **OAuth flows** -- token exchanges happen in request/response bodies
 - **AWS SigV4** -- request signing requires the secret at the call site
@@ -466,7 +441,8 @@ Pass it via environment variable (the guest sees the real value).
 - **No WebSocket.** Upgrade requests return 501. Binary framing after
   the upgrade would bypass scrubbing.
 - **No raw TCP/UDP.** All guest traffic goes through the HTTPS proxy.
-  SSH, database connections, gRPC (over H2) don't work.
+  SSH, database connections, and gRPC (over H2) are not currently
+  supported.
 - **HTTPS only.** Plain HTTP on port 80 is rejected.
 
 ### Platform
@@ -482,6 +458,13 @@ Pass it via environment variable (the guest sees the real value).
 interactive Claude Code sessions with network policy enforcement.
 Pre-built binaries for Linux x86_64 and aarch64 on
 [GitHub Releases](https://github.com/getredan/redan/releases).
+
+This code has not been through an independent security audit. Use at
+your own risk and report vulnerabilities responsibly.
+
+## Support
+
+If redan is useful to you, consider [buying me a coffee](https://buymeacoffee.com/cgrebs).
 
 ## Acknowledgments
 
