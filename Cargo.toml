@@ -34,6 +34,7 @@ time = { version = "0.3.47", features = ["formatting"] }
 toml = "0.8"
 minijinja = "2.15.1"
 thiserror = "2.0.18"
+shell-words = "1.1.1"
 
 [dev-dependencies]
 base64 = "0.22.1"

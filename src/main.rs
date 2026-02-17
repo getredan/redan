@@ -96,10 +96,10 @@ enum Cli {
         #[arg(long)]
         rootfs: Option<String>,
 
-        /// Shell command to run in the guest.
+        /// Command to run in the guest (everything after --).
         /// If omitted in interactive mode, defaults to /bin/sh.
-        #[arg(long, short = 'c')]
-        command: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
 
         /// Interactive mode: attach terminal to guest console.
         #[arg(long, short = 'i')]
@@ -272,7 +272,13 @@ fn main() {
 
             let image_name = image_name.or_else(|| cfg.image.clone());
             let rootfs = rootfs.or_else(|| cfg.rootfs.clone());
-            let command = command.or_else(|| cfg.command.clone());
+            // Trailing args after -- joined into a shell command.
+            // Falls back to config file, then /bin/sh for interactive.
+            let command = if command.is_empty() {
+                cfg.command.clone()
+            } else {
+                Some(shell_words::join(&command))
+            };
             let timeout = timeout.or(cfg.timeout).unwrap_or(3600);
             let interactive = interactive || cfg.interactive.unwrap_or(false);
             let audit_log = audit_log.or_else(|| cfg.audit_log.clone());
@@ -322,7 +328,7 @@ fn main() {
                 if interactive {
                     "/bin/sh".to_string()
                 } else {
-                    "echo 'no --command specified'".to_string()
+                    "echo 'no command specified; use: redan exec --image <name> -- <command>'".to_string()
                 }
             });
             cmd::exec::run(&cmd::exec::ExecConfig {
@@ -401,7 +407,7 @@ fn main() {
             None => {
                 let sessions = session::list_sessions();
                 if sessions.is_empty() {
-                    eprintln!("no sessions. Run: redan exec --image <name> --command <cmd>");
+                    eprintln!("no sessions. Run: redan exec --image <name> -- <command>");
                 } else {
                     for s in &sessions {
                         let status = session_status_label(s);

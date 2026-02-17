@@ -48,7 +48,7 @@ saves the result. Takes about 5 minutes.
 redan exec --image claude-code \
   --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
   --mount ./my-project \
-  --command "claude --print 'review this project'"
+  -- claude --print "review this project"
 ```
 
 The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
@@ -264,7 +264,7 @@ match the TLS SNI hostname are rejected (HTTP 421).
 Don't know what hosts your agent needs? Run once in discover mode:
 
 ```bash
-redan exec --image myimage --discover --command "claude --print 'build this project'"
+redan exec --image myimage --discover -- claude --print "build this project"
 ```
 
 Redan allows all connections and prints the observed hosts at exit:
