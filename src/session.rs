@@ -5,7 +5,7 @@
 //! - `meta.json`: session metadata (image, command, start time, status)
 //! - `audit.jsonl`: structured event log (if no --audit-log override)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,8 @@ pub struct SessionMeta {
     pub command: Option<String>,
     pub started_at: String,
     pub status: SessionStatus,
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,6 +86,7 @@ impl SessionMeta {
             command: command.map(|s| s.into()),
             started_at,
             status: SessionStatus::Running,
+            pid: Some(std::process::id()),
         }
     }
 
@@ -96,6 +99,14 @@ impl SessionMeta {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("cannot serialize session meta: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    }
+
+    /// Check if the session's process is still running.
+    pub fn is_alive(&self) -> bool {
+        match self.pid {
+            Some(pid) => Path::new(&format!("/proc/{pid}")).exists(),
+            None => false,
+        }
     }
 
     /// Update status and re-save.

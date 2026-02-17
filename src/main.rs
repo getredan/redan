@@ -417,7 +417,8 @@ fn main() {
             } else {
                 for s in &sessions {
                     let status = match &s.status {
-                        session::SessionStatus::Running => "running",
+                        session::SessionStatus::Running if s.is_alive() => "running",
+                        session::SessionStatus::Running => "exited",
                         session::SessionStatus::Finished => "finished",
                         session::SessionStatus::Failed => "failed",
                     };

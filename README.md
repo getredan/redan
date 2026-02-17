@@ -183,6 +183,38 @@ Images are Alpine-based rootfs directories stored at
 - [libkrun] >= 1.9.0 and [libkrunfw]
 - Rust 1.85+ (edition 2024)
 
+## Agent awareness
+
+Redan exposes network policy to the guest so AI agents can understand
+their environment instead of guessing "the internet is broken":
+
+**Environment variables:**
+- `REDAN=1` -- running inside a redan sandbox
+- `REDAN_NETWORK=restrict|deny-all|allow-all` -- policy mode
+- `REDAN_ALLOWED_HOSTS=host1,host2,...` -- permitted outbound hosts
+
+**Policy file:** `/etc/redan/policy` -- human-readable description of
+what's allowed and what's blocked.
+
+Agents that check `$REDAN` can adapt their behavior: skip web searches,
+avoid fetching URLs outside the allowlist, and give users clear error
+messages instead of "connection failed".
+
+## Setup with Claude Code
+
+```bash
+redan init --claude
+redan image import myproject --devcontainer .devcontainer/redan
+redan exec
+```
+
+`redan init --claude` generates a devcontainer with Claude Code, Node.js,
+and project-appropriate tooling (Python/uv, Rust, Go, etc.) plus a
+`redan.toml` with Anthropic API hosts pre-configured.
+
+Devcontainer support works with all three spec modes: `build.dockerfile`,
+`image`, and `dockerComposeFile`.
+
 ## Security model
 
 Redan's threat model: a compromised or malicious AI agent running inside
