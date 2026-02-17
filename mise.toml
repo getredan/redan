@@ -37,3 +37,38 @@ run = "./tests/distro_compat.sh"
 [tasks.clean]
 description = "Remove build artifacts"
 run = "cargo clean"
+
+# Security audit tasks (Rust equivalent of ruff/bandit)
+[tasks.audit]
+description = "Run all security audits (cargo-audit + cargo-deny)"
+run = "mise run audit-deps && mise run audit-unsafe"
+
+[tasks.audit-deps]
+description = "Check for vulnerable/outdated dependencies (cargo-audit + cargo-deny)"
+run = """
+cargo audit
+cargo deny check advisories
+"""
+
+[tasks.audit-unsafe]
+description = "Detect unsafe code usage (cargo-geiger)"
+run = "cargo geiger --all-features --all-targets || true"
+
+[tasks.audit-licenses]
+description = "Check license compliance (cargo-deny)"
+run = "cargo deny check licenses"
+
+[tasks.clippy-security]
+description = "Run clippy with security-focused lints"
+run = """
+cargo clippy --all-targets --all-features -- \
+  -D warnings \
+  -W clippy::pedantic \
+  -W clippy::nursery \
+  -W clippy::unwrap_used \
+  -W clippy::expect_used \
+  -W clippy::panic \
+  -W clippy::unwrap_in_result \
+  -W clippy::fallible_impl_from \
+  -W clippy::string_slice
+"""

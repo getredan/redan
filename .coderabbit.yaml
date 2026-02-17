@@ -99,15 +99,15 @@ reviews:
     gitleaks:
       enabled: true  # Critical for this project - secret detection
 
-    # Security-specific
+    # Security-specific (bandit equivalent for Rust via cargo-audit/deny)
     bandit:
-      enabled: false  # Python only
+      enabled: false  # Python only - use cargo-audit/deny instead
     semgrep:
       enabled: true
     ruff:
-      enabled: false  # Python only
+      enabled: false  # Python only - use clippy instead
 
-    # Dependency checking
+    # Dependency checking (cargo-audit, cargo-deny run in CI)
     github-checks:
       enabled: true
     languagetool:

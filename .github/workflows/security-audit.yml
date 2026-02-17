@@ -1,0 +1,129 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # cargo-audit: Check for known vulnerabilities in dependencies
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo-audit
+        run: cargo audit
+
+  # cargo-deny: Comprehensive license and security policy enforcement
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo-deny (security check)
+        run: cargo deny check advisories
+
+      - name: Run cargo-deny (license check)
+        run: cargo deny check licenses
+
+      - name: Run cargo-deny (bans check)
+        run: cargo deny check bans
+
+  # cargo-geiger: Detect usage of unsafe code
+  cargo-geiger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-geiger
+        uses: taiki-e/install-action@cargo-geiger
+
+      - name: Run cargo-geiger
+        run: cargo geiger --all-features --all-targets || true
+        # || true because we want to see output even if unsafe is found
+
+  # cargo-outdated: Check for outdated dependencies
+  cargo-outdated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-outdated
+        uses: taiki-e/install-action@cargo-outdated
+
+      - name: Check for outdated dependencies
+        run: cargo outdated --root-deps-only
+
+  # Miri: Detect undefined behavior in unsafe code
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run Miri tests
+        run: |
+          cargo miri test --lib || true
+        # || true because not all code may be Miri-compatible
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+
+  # Clippy with all lints enabled (security-focused)
+  clippy-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run clippy (security lints)
+        run: |
+          cargo clippy --all-targets --all-features -- \
+            -D warnings \
+            -W clippy::pedantic \
+            -W clippy::nursery \
+            -W clippy::unwrap_used \
+            -W clippy::expect_used \
+            -W clippy::panic \
+            -W clippy::unwrap_in_result \
+            -W clippy::fallible_impl_from \
+            -W clippy::string_slice
+
+  # Summary job
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: [cargo-audit, cargo-deny, cargo-geiger, clippy-security]
+    if: always()
+    steps:
+      - name: Security Audit Summary
+        run: |
+          echo "## Security Audit Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| cargo-audit (vulnerabilities) | ${{ needs.cargo-audit.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| cargo-deny (policy enforcement) | ${{ needs.cargo-deny.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| cargo-geiger (unsafe code) | ${{ needs.cargo-geiger.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| clippy-security (lints) | ${{ needs.clippy-security.result }} |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,106 @@
+# cargo-deny configuration for redan
+# https://embarkstudios.github.io/cargo-deny/
+
+# Target platforms to check
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+
+# Advisory database configuration
+[advisories]
+# The URL of the advisory database to use
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# The path where the advisory database will be cloned
+db-path = "~/.cargo/advisory-db"
+# The threshold for security vulnerabilities
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+# Ignore specific advisories (use sparingly)
+ignore = [
+    # Example: "RUSTSEC-2021-0001",
+]
+
+# License policy
+[licenses]
+# Allow common permissive licenses
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+]
+# Deny problematic licenses
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+]
+# Copyleft licenses require scrutiny
+copyleft = "warn"
+# Allow licenses not explicitly listed
+unlicensed = "deny"
+# Confidence threshold for license detection
+confidence-threshold = 0.9
+
+# Exceptions for specific crates
+[[licenses.exceptions]]
+# Some crates have custom licenses that are still permissive
+# Add exceptions here with justification
+# name = "some-crate"
+# version = "1.0.0"
+# allow = ["Custom-License"]
+# reason = "Used for X, license reviewed and acceptable"
+
+# Clarify licenses for crates with ambiguous detection
+[[licenses.clarify]]
+# Example:
+# name = "ring"
+# expression = "MIT AND ISC AND OpenSSL"
+# license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# Banned dependencies
+[bans]
+# Crates that should not be used (with reasons)
+deny = [
+    # { name = "openssl", reason = "Use rustls instead for pure Rust TLS" },
+    { name = "env_logger", reason = "Use tracing for structured logging" },
+]
+# Skip certain versions (e.g., known bad releases)
+skip = [
+    # { name = "some-crate", version = "=0.1.0" },
+]
+# Skip transitive dependencies (use carefully)
+skip-tree = [
+    # { name = "some-crate", depth = 2 },
+]
+
+# Check for duplicate versions
+[multiple-versions]
+# Consider duplicates problematic
+duplicates = "warn"
+# Skip checking for these
+skip = [
+    # { name = "some-crate", version = "=0.1.0" },
+]
+
+# Sources policy - ensure dependencies come from trusted sources
+[sources]
+# Allow crates.io
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Allow git dependencies from trusted sources
+allow-git = [
+    # "https://github.com/trusted-org",
+]
+# Unknown sources are denied
+unknown-registry = "deny"
+unknown-git = "deny"

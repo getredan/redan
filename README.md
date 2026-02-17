@@ -348,6 +348,28 @@ accidental exposure; it's not a hard security boundary.
 See [docs/security-model.md](docs/security-model.md) for the full
 threat model, side-channel analysis, and known limitations.
 
+## Security tooling
+
+Redan uses the Rust ecosystem's security tooling (equivalent to Python's
+`ruff` + `bandit`):
+
+```bash
+# Dependency vulnerability scanning (cargo-audit)
+mise run audit-deps
+
+# Unsafe code detection (cargo-geiger)
+mise run audit-unsafe
+
+# License compliance (cargo-deny)
+mise run audit-licenses
+
+# Security-focused clippy
+mise run clippy-security
+```
+
+See [docs/security-tooling.md](docs/security-tooling.md) for full
+documentation.
+
 ## Status
 
 **Alpha.** The full chain works end-to-end: `redan init --claude` through
