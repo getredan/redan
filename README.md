@@ -350,25 +350,16 @@ threat model, side-channel analysis, and known limitations.
 
 ## Security tooling
 
-Redan uses the Rust ecosystem's security tooling (equivalent to Python's
-`ruff` + `bandit`):
+Rust security tooling (equivalent to Python's `ruff` + `bandit`):
 
 ```bash
-# Dependency vulnerability scanning (cargo-audit)
-mise run audit-deps
-
-# Unsafe code detection (cargo-geiger)
-mise run audit-unsafe
-
-# License compliance (cargo-deny)
-mise run audit-licenses
-
-# Security-focused clippy
-mise run clippy-security
+mise run audit-deps      # cargo-audit: vulnerable dependencies
+mise run audit-unsafe    # cargo-geiger: unsafe code detection
+mise run audit-licenses  # cargo-deny: license compliance
+mise run lint            # clippy: lints including security checks
 ```
 
-See [docs/security-tooling.md](docs/security-tooling.md) for full
-documentation.
+See [docs/security-tooling.md](docs/security-tooling.md).
 
 ## Status
 
