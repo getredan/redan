@@ -12,7 +12,18 @@ run = "cargo fmt -- --check"
 
 [tasks.lint]
 description = "Lint with clippy"
-run = "cargo clippy -- -D warnings"
+run = """
+cargo clippy --all-targets --all-features -- \
+  -D warnings \
+  -W clippy::pedantic \
+  -W clippy::nursery \
+  -W clippy::unwrap_used \
+  -W clippy::expect_used \
+  -W clippy::panic \
+  -W clippy::unwrap_in_result \
+  -W clippy::fallible_impl_from \
+  -W clippy::string_slice
+"""
 
 [tasks.test]
 description = "Run unit tests"
@@ -37,3 +48,10 @@ run = "./tests/distro_compat.sh"
 [tasks.clean]
 description = "Remove build artifacts"
 run = "cargo clean"
+
+[tasks.audit]
+description = "Check dependencies for vulnerabilities and license issues"
+run = """
+cargo audit
+cargo deny check
+"""
