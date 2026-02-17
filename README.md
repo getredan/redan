@@ -42,12 +42,13 @@ cd libkrun && make && sudo make install
 
 ### Then install redan
 
-[Archives of pre-built binaries for redan are available for Linux x86_64 and
-aarch64.](https://github.com/getredan/redan/releases) Download the latest
-release and place it in your `$PATH`:
+[Pre-built binaries for Linux x86_64 and aarch64 are available on the
+releases page.](https://github.com/getredan/redan/releases) Download,
+extract, and move to your `$PATH`:
 
 ```bash
-sudo install redan /usr/local/bin/
+tar xzf redan-v*.tar.gz
+sudo mv redan /usr/local/bin/
 ```
 
 Or build from source (requires Rust 1.85+):
