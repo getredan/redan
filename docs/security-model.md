@@ -32,8 +32,6 @@ and are injected into HTTP requests at the network layer.
 
 ### What redan does NOT protect against
 
-These are documented limitations, not bugs.
-
 #### Response scrubbing bypasses
 
 Scrubbing matches literal secret bytes in HTTP response bodies.

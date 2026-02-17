@@ -336,7 +336,7 @@ the VM tries to exfiltrate secrets or access unauthorized resources.
 - Agent connecting directly to IP addresses (all traffic goes through proxy)
 - Agent reaching hosts not in the allowlist (default-deny networking)
 
-**Known limitations (documented, not bugs):**
+**Known limitations:**
 - Scrubbing doesn't catch encoded secrets (base64, URL-encoding, etc.)
 - Domain fronting could route secrets to attacker-controlled backends
   behind CDNs

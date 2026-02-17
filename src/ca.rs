@@ -72,8 +72,8 @@ impl MitmCa {
             return Some(Arc::clone(cached));
         }
 
-        // Evict oldest entries when cache is full (not LRU, just clear).
-        // Full LRU is overkill; clearing is rare and certs are cheap to regenerate.
+        // Evict all entries when cache is full. Clearing is rare and certs are
+        // cheap to regenerate; LRU ordering would add complexity without benefit.
         if self.key_cache.len() >= Self::MAX_CACHE_SIZE {
             log::info!("cert cache full ({}), clearing", Self::MAX_CACHE_SIZE);
             self.key_cache.clear();

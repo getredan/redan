@@ -117,23 +117,22 @@ cargo miri test test_name
 
 ## Security-Focused Clippy
 
-Standard clippy + additional security lints:
+Comprehensive clippy with security-focused lints:
 
 ```bash
-# Basic (in CI)
 mise run lint
-
-# Security-focused (stricter)
-mise run clippy-security
 ```
 
-The security configuration enables:
-- `unwrap_used`: Flag all `.unwrap()` calls
-- `expect_used`: Flag all `.expect()` calls
-- `panic`: Flag `panic!()` usage
-- `unwrap_in_result`: Flag unwrap in functions returning Result
-- `fallible_impl_from`: Check From impls for panic safety
-- `string_slice`: Flag string slicing that may panic
+The lint configuration includes:
+- Standard warnings (`-D warnings`)
+- `clippy::pedantic`: Additional correctness checks
+- `clippy::nursery`: Newer lints that may have false positives
+- `clippy::unwrap_used`: Flag all `.unwrap()` calls
+- `clippy::expect_used`: Flag all `.expect()` calls
+- `clippy::panic`: Flag `panic!()` usage
+- `clippy::unwrap_in_result`: Flag unwrap in functions returning Result
+- `clippy::fallible_impl_from`: Check From impls for panic safety
+- `clippy::string_slice`: Flag string slicing that may panic
 
 ## Local Development
 
@@ -165,7 +164,7 @@ All tools run in `.github/workflows/security-audit.yml`:
 | cargo-geiger | Push/PR | Unsafe code tracking |
 | cargo-outdated | Daily | Dependency freshness |
 | miri | Weekly | Undefined behavior |
-| clippy-security | Push/PR | Security lints |
+| clippy | Push/PR/Daily | Comprehensive linting with security focus |
 
 ## Response to Findings
 

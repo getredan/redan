@@ -88,8 +88,8 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
 
-  # Clippy with all lints enabled (security-focused)
-  clippy-security:
+  # Comprehensive clippy with security-focused lints
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +98,7 @@ jobs:
         with:
           components: clippy
 
-      - name: Run clippy (security lints)
+      - name: Run clippy
         run: |
           cargo clippy --all-targets --all-features -- \
             -D warnings \
@@ -114,7 +114,7 @@ jobs:
   # Summary job
   security-summary:
     runs-on: ubuntu-latest
-    needs: [cargo-audit, cargo-deny, cargo-geiger, clippy-security]
+    needs: [cargo-audit, cargo-deny, cargo-geiger, clippy]
     if: always()
     steps:
       - name: Security Audit Summary
@@ -126,4 +126,4 @@ jobs:
           echo "| cargo-audit (vulnerabilities) | ${{ needs.cargo-audit.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| cargo-deny (policy enforcement) | ${{ needs.cargo-deny.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| cargo-geiger (unsafe code) | ${{ needs.cargo-geiger.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| clippy-security (lints) | ${{ needs.clippy-security.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| clippy (linting) | ${{ needs.clippy.result }} |" >> $GITHUB_STEP_SUMMARY
