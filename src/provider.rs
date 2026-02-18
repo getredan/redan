@@ -192,6 +192,12 @@ pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::sync::{LazyLock, Mutex};
+
+    // Serialize all tests that mutate the process environment.
+    // set_var/remove_var are unsafe because they race with other threads
+    // reading or iterating the environment.
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn literal_returns_value() {
@@ -260,7 +266,7 @@ mod tests {
 
     #[test]
     fn env_reads_set_variable() {
-        // SAFETY: test uses a unique prefix unlikely to race with other tests.
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("_REDAN_TEST_VAR", "test-secret-value") };
         assert_eq!(Env.resolve("_REDAN_TEST_VAR").unwrap(), "test-secret-value");
         unsafe { std::env::remove_var("_REDAN_TEST_VAR") };
@@ -268,6 +274,7 @@ mod tests {
 
     #[test]
     fn env_errors_on_unset_variable() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("_REDAN_TEST_UNSET") };
         let err = Env.resolve("_REDAN_TEST_UNSET").unwrap_err();
         assert!(err.to_string().contains("not set"));
@@ -276,7 +283,7 @@ mod tests {
 
     #[test]
     fn env_errors_on_empty_variable() {
-        // SAFETY: test uses a unique prefix unlikely to race with other tests.
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("_REDAN_TEST_EMPTY", "") };
         let err = Env.resolve("_REDAN_TEST_EMPTY").unwrap_err();
         assert!(err.to_string().contains("empty"));
@@ -291,7 +298,7 @@ mod tests {
 
     #[test]
     fn resolve_env_scheme() {
-        // SAFETY: test uses a unique prefix unlikely to race with other tests.
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("_REDAN_TEST_SCHEME", "from-env") };
         assert_eq!(
             resolve_secret_value("env://_REDAN_TEST_SCHEME").unwrap(),
@@ -302,6 +309,7 @@ mod tests {
 
     #[test]
     fn resolve_env_scheme_unset_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe { std::env::remove_var("_REDAN_TEST_SCHEME_UNSET") };
         let err = resolve_secret_value("env://_REDAN_TEST_SCHEME_UNSET").unwrap_err();
         assert!(err.to_string().contains("not set"));
