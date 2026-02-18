@@ -36,6 +36,38 @@ impl SecretProvider for Literal {
     }
 }
 
+/// Reads a secret from a host environment variable.
+///
+/// The reference is the variable name. The variable is read at resolve
+/// time from the host environment, not from inside the VM.
+///
+/// Fails if the variable is not set or is empty.
+pub struct Env;
+
+impl SecretProvider for Env {
+    fn resolve(&self, reference: &str) -> Result<String, io::Error> {
+        if reference.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "env:// variable name cannot be empty",
+            ));
+        }
+        let value = std::env::var(reference).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("environment variable '{reference}' is not set"),
+            )
+        })?;
+        if value.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("environment variable '{reference}' is set but empty"),
+            ));
+        }
+        Ok(value)
+    }
+}
+
 /// Fetches secrets from `HashiCorp` Vault KV v2.
 ///
 /// Reference format: `path#field` where path is the KV path and field
@@ -143,11 +175,14 @@ impl SecretProvider for Vault {
 ///
 /// Scheme detection:
 /// - `vault://path#field` -> Vault KV v2
-/// - anything else -> literal value (backward compatible)
+/// - `env://VAR_NAME`    -> host environment variable
+/// - anything else       -> literal value (backward compatible)
 pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
     if let Some(vault_ref) = reference.strip_prefix("vault://") {
         let vault = Vault::from_env()?;
         vault.resolve(vault_ref)
+    } else if let Some(var_name) = reference.strip_prefix("env://") {
+        Env.resolve(var_name)
     } else {
         Literal.resolve(reference)
     }
@@ -157,6 +192,12 @@ pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::sync::{LazyLock, Mutex};
+
+    // Serialize all tests that mutate the process environment.
+    // set_var/remove_var are unsafe because they race with other threads
+    // reading or iterating the environment.
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn literal_returns_value() {
@@ -221,6 +262,57 @@ mod tests {
         let json = r#"{"data":{"data":{"emoji":"\u0041\u0042\u0043"}}}"#;
         let envelope: VaultKv2Response = serde_json::from_str(json).unwrap();
         assert_eq!(envelope.data.data.get("emoji").unwrap(), "ABC");
+    }
+
+    #[test]
+    fn env_reads_set_variable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("_REDAN_TEST_VAR", "test-secret-value") };
+        assert_eq!(Env.resolve("_REDAN_TEST_VAR").unwrap(), "test-secret-value");
+        unsafe { std::env::remove_var("_REDAN_TEST_VAR") };
+    }
+
+    #[test]
+    fn env_errors_on_unset_variable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("_REDAN_TEST_UNSET") };
+        let err = Env.resolve("_REDAN_TEST_UNSET").unwrap_err();
+        assert!(err.to_string().contains("not set"));
+        assert!(err.to_string().contains("_REDAN_TEST_UNSET"));
+    }
+
+    #[test]
+    fn env_errors_on_empty_variable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("_REDAN_TEST_EMPTY", "") };
+        let err = Env.resolve("_REDAN_TEST_EMPTY").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+        unsafe { std::env::remove_var("_REDAN_TEST_EMPTY") };
+    }
+
+    #[test]
+    fn env_errors_on_empty_var_name() {
+        let err = Env.resolve("").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn resolve_env_scheme() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("_REDAN_TEST_SCHEME", "from-env") };
+        assert_eq!(
+            resolve_secret_value("env://_REDAN_TEST_SCHEME").unwrap(),
+            "from-env"
+        );
+        unsafe { std::env::remove_var("_REDAN_TEST_SCHEME") };
+    }
+
+    #[test]
+    fn resolve_env_scheme_unset_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("_REDAN_TEST_SCHEME_UNSET") };
+        let err = resolve_secret_value("env://_REDAN_TEST_SCHEME_UNSET").unwrap_err();
+        assert!(err.to_string().contains("not set"));
     }
 
     #[test]
