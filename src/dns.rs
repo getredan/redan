@@ -64,7 +64,19 @@ pub fn handle_query(packet: &[u8], resolve_ip: Ipv4Address) -> Option<(String, V
     let question_end = qname_end + 4;
 
     let response = match qtype {
-        1 => build_a_response(id, packet, question_end, resolve_ip),
+        1 => {
+            // localhost always resolves to loopback regardless of `resolve_ip`.
+            // Programs expect 127.0.0.1 for localhost; routing it through the
+            // proxy would break any service binding to the loopback interface.
+            // Case-insensitive per RFC 4343.
+            let ip = if hostname.eq_ignore_ascii_case("localhost") {
+                #[allow(clippy::ip_constant)] // smoltcp Ipv4Address, not std
+                Ipv4Address::new(127, 0, 0, 1)
+            } else {
+                resolve_ip
+            };
+            build_a_response(id, packet, question_end, ip)
+        }
         _ => build_empty_response(id, packet, question_end),
     };
 
@@ -237,12 +249,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::ip_constant)] // smoltcp type, not std::net
     fn localhost_resolves_to_loopback() {
-        // Caller is responsible for passing 127.0.0.1 for localhost.
-        let loopback = Ipv4Address::new(127, 0, 0, 1);
+        // localhost is always overridden to 127.0.0.1 regardless of resolve_ip.
+        let gw = Ipv4Address::new(192, 168, 127, 1);
         let query = build_query(0x0042, "localhost", 1);
-        let (hostname, response) = handle_query(&query, loopback).unwrap();
+        let (hostname, response) = handle_query(&query, gw).unwrap();
         assert_eq!(hostname, "localhost");
         let ip_offset = response.len() - 4;
         assert_eq!(&response[ip_offset..], &[127, 0, 0, 1]);

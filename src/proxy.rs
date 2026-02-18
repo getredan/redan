@@ -412,13 +412,14 @@ fn process_dns(
         let Ok((data, sender)) = sock.recv() else {
             continue;
         };
-        // Parse hostname first so we can decide the resolve IP.
+        // Parse hostname first so we can allocate the per-host IP.
         let Some(hostname) = dns::query_hostname(data) else {
             continue;
         };
-        // localhost always resolves to loopback; skip the host pool.
+        // localhost is handled inside dns::handle_query (always → 127.0.0.1).
+        // For all other hostnames, allocate a unique IP from the host pool.
         let resolve_ip = if hostname.eq_ignore_ascii_case("localhost") {
-            LOOPBACK_IP
+            LOOPBACK_IP // passed to handle_query but overridden internally
         } else {
             let (ip, is_new) = host_map.alloc(&hostname);
             if is_new {
