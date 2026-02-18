@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// allow = ["api.anthropic.com"]
 ///
 /// [secrets.ANTHROPIC_API_KEY]
-/// value = "sk-ant-..."
+/// value = "env://ANTHROPIC_API_KEY"
 /// hosts = ["api.anthropic.com"]
 ///
 /// [mount.workspace]

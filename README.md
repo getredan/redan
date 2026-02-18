@@ -140,11 +140,9 @@ The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
 injects the real key only in HTTPS requests to `api.anthropic.com`.
 Responses are scrubbed of the real value before the agent sees them.
 
-**Note:** `--secret` values are visible in process listings (`ps`).
-For production use, prefer `--secret-file`, the Vault provider
-(`vault://`), or read secrets from files:
-`--secret "KEY=$(cat /path/to/secret):host"` (the shell expands this
-before redan sees it).
+**Note:** `--secret` literal values are visible in process listings (`ps`).
+For production use, prefer `env://`, `vault://`, `--secret-file`, or
+shell expansion: `--secret "KEY=$(cat /path/to/secret):host"`.
 
 ### Interactive mode
 
@@ -208,6 +206,9 @@ The value can be a literal or a provider URI:
 # Literal value
 --secret "GITHUB_TOKEN=ghp_abc123:api.github.com"
 
+# From host environment variable
+--secret "GITHUB_TOKEN=env://GITHUB_TOKEN:api.github.com"
+
 # From HashiCorp Vault (KV v2)
 --secret "GITHUB_TOKEN=vault://secret/myapp#github_token:api.github.com"
 
@@ -218,9 +219,30 @@ The value can be a literal or a provider URI:
 --secret-file .redan-secrets
 
 # Multiple secrets
---secret "GITHUB_TOKEN=ghp_abc:api.github.com" \
+--secret "GITHUB_TOKEN=env://GITHUB_TOKEN:api.github.com" \
 --secret "NPM_TOKEN=vault://secret/myapp#npm_token:registry.npmjs.org"
 ```
+
+In `redan.toml`:
+
+```toml
+[secrets.GITHUB_TOKEN]
+value = "env://GITHUB_TOKEN"
+hosts = ["api.github.com"]
+```
+
+### Environment variable provider
+
+`env://VAR_NAME` reads the secret from a host environment variable at
+session start. The variable is read on the host and never passed into
+the VM.
+
+```bash
+export GITHUB_TOKEN=ghp_abc123
+redan exec --secret "GITHUB_TOKEN=env://GITHUB_TOKEN:api.github.com"
+```
+
+Fails loudly if the variable is not set or is empty.
 
 ### Vault integration
 
@@ -240,9 +262,9 @@ Falls back to `~/.vault-token` if `VAULT_TOKEN` is not set.
 ### Provider architecture
 
 Secret resolution is pluggable via the `SecretProvider` trait. The open
-core ships with `Literal` and `Vault` providers. The trait is designed
-for extension -- additional backends (AWS Secrets Manager, OIDC, etc.)
-can be added in the future.
+core ships with `Literal`, `Env`, and `Vault` providers. The trait is
+designed for extension -- additional backends (AWS Secrets Manager,
+1Password, etc.) can be added in the future.
 
 The value can contain colons (splits on the last `:`). The guest
 receives a `redan_ph_<name>_<hex>` placeholder via environment variable.
