@@ -123,6 +123,11 @@ impl Drop for SecretBinding {
 /// leaking into URL paths, query strings, or request bodies that could
 /// end up in server logs, CDN caches, or Referer headers.
 ///
+/// Two passes run in sequence:
+/// 1. Literal byte replacement (handles `Authorization: Bearer <ph>`, etc.)
+/// 2. Base64 Basic auth: decode `Authorization: Basic <b64>`, replace any
+///    placeholder inside the decoded credentials, re-encode.
+///
 /// Returns the (possibly modified) request data and the number of injections.
 #[must_use]
 pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
@@ -156,16 +161,119 @@ pub fn inject(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8
         }
     }
 
-    if count == 0 {
+    // Reassemble after literal pass (even if count == 0, Basic auth pass may
+    // still find something below).
+    let intermediate = if count > 0 {
+        let mut buf = Vec::with_capacity(data.len());
+        buf.extend_from_slice(&data[..request_line_end]);
+        buf.extend_from_slice(&header_bytes);
+        buf.extend_from_slice(&data[header_end..]);
+        buf
+    } else {
+        data.to_vec()
+    };
+
+    // Pass 2: Base64 Basic auth injection.
+    let (result, basic_count) = inject_basic_auth(&intermediate, hostname, secrets);
+    let total = count + basic_count;
+    if total == 0 {
+        return (data.to_vec(), 0);
+    }
+    (result, total)
+}
+
+/// Decode `Authorization: Basic <b64>`, replace placeholders, re-encode.
+///
+/// Handles the common pattern where an agent passes a placeholder as the
+/// username or password of HTTP Basic credentials. The decoded credentials
+/// are treated as an opaque string -- both username and password fields are
+/// eligible for replacement.
+///
+/// Returns (data, injections). Returns `(data.to_vec(), 0)` if nothing
+/// changed, so the caller never sees a spurious allocation.
+fn inject_basic_auth(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
+    let applicable: Vec<&SecretBinding> = secrets
+        .iter()
+        .filter(|s| {
+            s.allowed_hosts()
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(hostname))
+        })
+        .collect();
+
+    if applicable.is_empty() {
         return (data.to_vec(), 0);
     }
 
-    // Reassemble: request line + modified headers + body
+    let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
+    let mut req = httparse::Request::new(&mut parsed_headers);
+    let Ok(httparse::Status::Complete(body_offset)) = req.parse(data) else {
+        return (data.to_vec(), 0);
+    };
+
+    let method = req.method.unwrap_or("GET");
+    let path = req.path.unwrap_or("/");
+    let version = req.version.unwrap_or(1);
+
     let mut result = Vec::with_capacity(data.len());
-    result.extend_from_slice(&data[..request_line_end]);
-    result.extend_from_slice(&header_bytes);
-    result.extend_from_slice(&data[header_end..]);
-    (result, count)
+    result.extend_from_slice(format!("{method} {path} HTTP/1.{version}\r\n").as_bytes());
+
+    let mut total = 0;
+    let mut any_injected = false;
+
+    for header in req.headers.iter() {
+        if header.name.eq_ignore_ascii_case("authorization")
+            && let Some((new_b64, n)) = try_inject_basic(header.value, &applicable)
+        {
+            result.extend_from_slice(b"Authorization: Basic ");
+            result.extend_from_slice(new_b64.as_bytes());
+            result.extend_from_slice(b"\r\n");
+            total += n;
+            any_injected = true;
+            continue;
+        }
+        result.extend_from_slice(header.name.as_bytes());
+        result.extend_from_slice(b": ");
+        result.extend_from_slice(header.value);
+        result.extend_from_slice(b"\r\n");
+    }
+    result.extend_from_slice(b"\r\n");
+    result.extend_from_slice(&data[body_offset..]);
+
+    if !any_injected {
+        return (data.to_vec(), 0);
+    }
+    (result, total)
+}
+
+/// Try to inject secrets into a single `Authorization: Basic` header value.
+///
+/// `value` is the raw header value bytes (e.g. `Basic dXNlcjpwYXNz`).
+/// Returns `Some((new_b64, count))` if any placeholder was replaced,
+/// `None` if the header is not Basic auth or no placeholder was found.
+fn try_inject_basic(value: &[u8], secrets: &[&SecretBinding]) -> Option<(String, usize)> {
+    let value_str = std::str::from_utf8(value).ok()?;
+    let encoded = value_str.strip_prefix("Basic ")?.trim();
+
+    let decoded_bytes =
+        base64::engine::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+    let mut decoded = String::from_utf8(decoded_bytes).ok()?;
+
+    let mut count = 0;
+    for secret in secrets {
+        if decoded.contains(secret.placeholder()) {
+            decoded = decoded.replace(secret.placeholder(), secret.real_value());
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    let re_encoded =
+        base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, &decoded);
+    Some((re_encoded, count))
 }
 
 /// Replace real secret values with placeholders in an HTTP response.
@@ -396,5 +504,82 @@ mod tests {
         let debug = format!("{b:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("ghp_RealSecretValue99"));
+    }
+
+    // --- Basic auth injection ---
+
+    fn basic_b64(user: &str, pass: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))
+    }
+
+    #[test]
+    fn inject_basic_auth_placeholder_as_password() {
+        let secrets = vec![test_binding()];
+        let b64 = basic_b64("user", "redan_ph_test_1234");
+        let req =
+            format!("GET / HTTP/1.1\r\nAuthorization: Basic {b64}\r\nHost: api.github.com\r\n\r\n");
+        let (result, count) = inject(req.as_bytes(), "api.github.com", &secrets);
+        assert_eq!(count, 1);
+        let expected_b64 = basic_b64("user", "ghp_RealSecretValue99");
+        let text = String::from_utf8_lossy(&result);
+        assert!(text.contains(&expected_b64), "re-encoded b64 not found");
+        assert!(!text.contains(&b64), "original b64 still present");
+    }
+
+    #[test]
+    fn inject_basic_auth_placeholder_as_username() {
+        let secrets = vec![test_binding()];
+        let b64 = basic_b64("redan_ph_test_1234", "");
+        let req =
+            format!("GET / HTTP/1.1\r\nAuthorization: Basic {b64}\r\nHost: api.github.com\r\n\r\n");
+        let (result, count) = inject(req.as_bytes(), "api.github.com", &secrets);
+        assert_eq!(count, 1);
+        let expected_b64 = basic_b64("ghp_RealSecretValue99", "");
+        let text = String::from_utf8_lossy(&result);
+        assert!(text.contains(&expected_b64));
+    }
+
+    #[test]
+    fn inject_basic_auth_wrong_host_no_injection() {
+        let secrets = vec![test_binding()];
+        let b64 = basic_b64("user", "redan_ph_test_1234");
+        let req = format!("GET / HTTP/1.1\r\nAuthorization: Basic {b64}\r\nHost: evil.com\r\n\r\n");
+        let (result, count) = inject(req.as_bytes(), "evil.com", &secrets);
+        assert_eq!(count, 0);
+        assert_eq!(result, req.as_bytes());
+    }
+
+    #[test]
+    fn inject_basic_auth_bearer_unchanged() {
+        // Bearer headers must not be decoded as if they were Basic
+        let secrets = vec![test_binding()];
+        let req = b"GET / HTTP/1.1\r\nAuthorization: Bearer redan_ph_test_1234\r\nHost: api.github.com\r\n\r\n";
+        let (result, count) = inject(req, "api.github.com", &secrets);
+        // The Bearer placeholder is caught by the literal pass, not the Basic pass
+        assert_eq!(count, 1);
+        let text = String::from_utf8_lossy(&result);
+        assert!(text.contains("ghp_RealSecretValue99"));
+        assert!(!text.contains("redan_ph_test_1234"));
+    }
+
+    #[test]
+    fn inject_basic_auth_invalid_b64_unchanged() {
+        let secrets = vec![test_binding()];
+        let req = b"GET / HTTP/1.1\r\nAuthorization: Basic not-valid-b64!!!\r\nHost: api.github.com\r\n\r\n";
+        let (result, count) = inject(req, "api.github.com", &secrets);
+        assert_eq!(count, 0);
+        assert_eq!(result, req.to_vec());
+    }
+
+    #[test]
+    fn inject_basic_auth_no_placeholder_in_credentials_unchanged() {
+        let secrets = vec![test_binding()];
+        let b64 = basic_b64("user", "unrelated-password");
+        let req =
+            format!("GET / HTTP/1.1\r\nAuthorization: Basic {b64}\r\nHost: api.github.com\r\n\r\n");
+        let (result, count) = inject(req.as_bytes(), "api.github.com", &secrets);
+        assert_eq!(count, 0);
+        assert_eq!(result, req.as_bytes());
     }
 }
