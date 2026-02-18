@@ -5,11 +5,34 @@
 /// the MITM proxy and prevents DNS exfiltration.
 use smoltcp::wire::Ipv4Address;
 
+/// Extract just the queried hostname from a DNS query packet.
+///
+/// Used by callers that need the hostname before deciding which IP to
+/// return, without parsing the packet twice.
+/// Returns `None` for malformed packets or non-standard queries.
+pub fn query_hostname(packet: &[u8]) -> Option<String> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    let qd_count = u16::from_be_bytes([packet[4], packet[5]]);
+    if flags & 0x8000 != 0 || flags & 0x7800 != 0 || qd_count != 1 {
+        return None;
+    }
+    let (qname, _) = parse_qname(packet, 12)?;
+    Some(qname.trim_end_matches('.').to_string())
+}
+
 /// Parse a DNS query and build a synthetic response.
+///
+/// `resolve_ip` is the IP address to use in A record responses. The
+/// caller is responsible for choosing the right IP (per-host allocated
+/// or loopback for localhost). For non-A queries, `resolve_ip` is ignored
+/// and an empty NOERROR response is returned.
 ///
 /// Returns `Some((hostname, response_bytes))` on success, `None` if the
 /// packet is malformed or not a query we handle.
-pub fn handle_query(packet: &[u8], gateway_ip: Ipv4Address) -> Option<(String, Vec<u8>)> {
+pub fn handle_query(packet: &[u8], resolve_ip: Ipv4Address) -> Option<(String, Vec<u8>)> {
     if packet.len() < 12 {
         return None;
     }
@@ -41,18 +64,7 @@ pub fn handle_query(packet: &[u8], gateway_ip: Ipv4Address) -> Option<(String, V
     let question_end = qname_end + 4;
 
     let response = match qtype {
-        1 => {
-            // localhost resolves to loopback, not the gateway.
-            // Programs that resolve localhost expect 127.0.0.1.
-            // Case-insensitive per RFC 4343.
-            let ip = if hostname.eq_ignore_ascii_case("localhost") {
-                #[allow(clippy::ip_constant)] // smoltcp Ipv4Address, not std
-                Ipv4Address::new(127, 0, 0, 1)
-            } else {
-                gateway_ip
-            };
-            build_a_response(id, packet, question_end, ip)
-        }
+        1 => build_a_response(id, packet, question_end, resolve_ip),
         _ => build_empty_response(id, packet, question_end),
     };
 
@@ -225,13 +237,26 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::ip_constant)] // smoltcp type, not std::net
     fn localhost_resolves_to_loopback() {
-        let gw = Ipv4Address::new(192, 168, 127, 1);
+        // Caller is responsible for passing 127.0.0.1 for localhost.
+        let loopback = Ipv4Address::new(127, 0, 0, 1);
         let query = build_query(0x0042, "localhost", 1);
-        let (hostname, response) = handle_query(&query, gw).unwrap();
+        let (hostname, response) = handle_query(&query, loopback).unwrap();
         assert_eq!(hostname, "localhost");
         let ip_offset = response.len() - 4;
         assert_eq!(&response[ip_offset..], &[127, 0, 0, 1]);
+    }
+
+    #[test]
+    fn query_hostname_extracts_name() {
+        let query = build_query(0x1234, "api.github.com", 1);
+        assert_eq!(query_hostname(&query).unwrap(), "api.github.com");
+    }
+
+    #[test]
+    fn query_hostname_rejects_malformed() {
+        assert!(query_hostname(&[0; 5]).is_none());
     }
 
     #[test]
