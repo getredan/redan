@@ -175,7 +175,8 @@ Guest VM (libkrun, <1s boot)
   v
 smoltcp (userspace TCP/IP on host)
   |
-  |-- UDP :53  -> synthetic DNS (all names resolve locally)
+  |-- UDP :53  -> synthetic DNS (per-host IP allocation)
+  |-- TCP :22  -> transparent relay (allowlist checked, no injection)
   |-- TCP :80  -> rejected (HTTPS only)
   |-- TCP :443 -> TLS MITM proxy
         |
@@ -191,7 +192,7 @@ smoltcp (userspace TCP/IP on host)
 - Guest never sees real secret values (only placeholders)
 - Secrets are injected only for explicitly allowed hosts
 - Injection is restricted to HTTP headers (not URLs, not bodies)
-- DNS is synthetic -- no queries reach the internet
+- DNS is synthetic -- each hostname gets a unique IP, no queries leave the host
 - All traffic routes through the gateway IP (no direct IP access)
 - Default-deny outbound networking
 - Response scrubbing is best-effort (literal byte match)
@@ -462,9 +463,11 @@ Pass it via environment variable (the guest sees the real value).
   requires HTTP/2, it won't work through redan.
 - **No WebSocket.** Upgrade requests return 501. Binary framing after
   the upgrade would bypass scrubbing.
-- **No raw TCP/UDP.** All guest traffic goes through the HTTPS proxy.
-  SSH, database connections, and gRPC (over H2) are not currently
-  supported.
+- **SSH is transparent.** Port 22 connections are forwarded as-is to
+  the real upstream server. No secret injection or scrubbing -- SSH
+  handles its own authentication. The allowlist still applies.
+- **No other raw TCP/UDP.** Database connections, gRPC (over H2), and
+  other protocols are not currently supported.
 - **HTTPS only.** Plain HTTP on port 80 is rejected.
 
 ### Platform

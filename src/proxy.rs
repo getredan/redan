@@ -36,6 +36,68 @@ pub const GATEWAY_IP: Ipv4Address = Ipv4Address::new(192, 168, 127, 1);
 pub const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
 pub const GUEST_IP: &str = "192.168.127.2";
 
+/// IP assigned to DNS queries for "localhost".
+#[allow(clippy::ip_constant)] // smoltcp type, not std
+const LOOPBACK_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
+
+/// Subnet from which per-host IPs are allocated (.10 – .254).
+/// Each hostname the guest resolves gets a unique IP, enabling
+/// reverse lookup (IP → hostname) for non-SNI protocols like SSH.
+const HOST_POOL_BASE: [u8; 3] = [192, 168, 127];
+const HOST_POOL_START: u8 = 10;
+const HOST_POOL_END: u8 = 254;
+
+/// Maps hostnames to unique per-session IPs and back.
+///
+/// All hostnames in the /24 subnet resolve to distinct IPs so that
+/// TCP connections on any port can be mapped back to a hostname without
+/// needing SNI or other application-layer hints.
+struct HostMap {
+    forward: HashMap<String, Ipv4Address>,
+    reverse: HashMap<[u8; 4], String>,
+    next: u8,
+}
+
+impl HostMap {
+    fn new() -> Self {
+        Self {
+            forward: HashMap::new(),
+            reverse: HashMap::new(),
+            next: HOST_POOL_START,
+        }
+    }
+
+    /// Return the existing IP for `hostname`, or allocate a fresh one.
+    ///
+    /// Returns `(ip, true)` if a new IP was allocated, `(ip, false)` if
+    /// the hostname was already known. Falls back to `GATEWAY_IP` and
+    /// returns `false` if the pool is exhausted.
+    fn alloc(&mut self, hostname: &str) -> (Ipv4Address, bool) {
+        if let Some(&ip) = self.forward.get(hostname) {
+            return (ip, false);
+        }
+        if self.next > HOST_POOL_END {
+            log::warn!("host IP pool exhausted, falling back to gateway IP for {hostname}");
+            return (GATEWAY_IP, false);
+        }
+        let ip = Ipv4Address::new(
+            HOST_POOL_BASE[0],
+            HOST_POOL_BASE[1],
+            HOST_POOL_BASE[2],
+            self.next,
+        );
+        self.next += 1;
+        self.forward.insert(hostname.to_string(), ip);
+        self.reverse.insert(ip.octets(), hostname.to_string());
+        (ip, true)
+    }
+
+    /// Reverse-lookup: return the hostname for a given allocated IP.
+    fn hostname_for_ip(&self, ip: Ipv4Address) -> Option<&str> {
+        self.reverse.get(&ip.octets()).map(String::as_str)
+    }
+}
+
 const TCP_SOCKET_BUF: usize = 256 * 1024;
 const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
 const MAX_RESPONSE_SIZE: usize = 256 * 1024 * 1024;
@@ -140,25 +202,33 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
 
     let mut sockets = SocketSet::new(vec![]);
     let mut connections: HashMap<SocketHandle, ProxyConn> = HashMap::new();
+    let mut host_map = HostMap::new();
 
     let dns_handle = add_udp_listener(&mut sockets, 53);
 
     let mut backlogs: Vec<ListenBacklog> = vec![
         ListenBacklog {
             port: 80,
-            is_tls: false,
+            kind: BacklogKind::Http,
             handles: (0..4).map(|_| add_tcp_listener(&mut sockets, 80)).collect(),
         },
         ListenBacklog {
             port: 443,
-            is_tls: true,
+            kind: BacklogKind::Tls,
             handles: (0..LISTEN_BACKLOG)
                 .map(|_| add_tcp_listener(&mut sockets, 443))
                 .collect(),
         },
+        ListenBacklog {
+            port: 22,
+            kind: BacklogKind::Ssh,
+            handles: (0..LISTEN_BACKLOG)
+                .map(|_| add_tcp_listener(&mut sockets, 22))
+                .collect(),
+        },
     ];
 
-    log::info!("proxy listening on :53 (dns), :80, :443");
+    log::info!("proxy listening on :22 (ssh), :53 (dns), :80, :443");
     let start = Instant::now();
 
     loop {
@@ -176,7 +246,16 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
         device.flush_tx();
 
         if matches!(result, PollResult::SocketStateChanged) {
-            process_dns(&mut sockets, dns_handle, &audit_log);
+            let new_ips = process_dns(&mut sockets, dns_handle, &audit_log, &mut host_map);
+            for ip in new_ips {
+                iface.update_ip_addrs(|addrs| {
+                    // /32 host route: smoltcp responds to ARP only for this IP.
+                    let cidr = IpCidr::new(ip.into(), 32);
+                    if !addrs.contains(&cidr) {
+                        addrs.push(cidr).ok();
+                    }
+                });
+            }
 
             for backlog in &mut backlogs {
                 let mut i = 0;
@@ -196,11 +275,66 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
                             backlog.port,
                             sock.remote_endpoint()
                         );
+
+                        // For SSH: resolve the destination IP to a hostname.
+                        // The connection's local_endpoint is the IP the guest
+                        // connected to, which the HostMap can reverse-lookup.
+                        let conn_kind = match backlog.kind {
+                            BacklogKind::Http => ConnKind::Http,
+                            BacklogKind::Tls => ConnKind::TlsMitm,
+                            BacklogKind::Ssh => {
+                                let dest_ip = sock.local_endpoint().and_then(|ep| {
+                                    if let smoltcp::wire::IpAddress::Ipv4(ip) = ep.addr {
+                                        Some(ip)
+                                    } else {
+                                        None
+                                    }
+                                });
+                                let hostname = dest_ip.and_then(|ip| host_map.hostname_for_ip(ip));
+
+                                if let Some(h) = hostname {
+                                    // Allowlist check for SSH (no SNI available).
+                                    let blocked = allowed_hosts.as_ref().is_some_and(|hosts| {
+                                        !hosts.iter().any(|p| host_matches(p, h))
+                                    });
+                                    if blocked {
+                                        log::warn!("blocking SSH to {h}: not in allowlist");
+                                        audit(
+                                            &audit_log,
+                                            "reject",
+                                            &[("host", h), ("reason", "not_allowed")],
+                                        );
+                                        sock.close();
+                                        backlog.handles[i] = add_tcp_listener(&mut sockets, 22);
+                                        i += 1;
+                                        continue;
+                                    }
+                                    if discover && let Ok(mut d) = discovered.lock() {
+                                        d.insert(h.to_string());
+                                    }
+                                    let allow_private =
+                                        allowed_hosts.as_ref().is_some_and(|hosts| {
+                                            hosts.iter().any(|p| host_matches(p, h))
+                                        });
+                                    ConnKind::SshRelay {
+                                        hostname: h.to_string(),
+                                        allow_private,
+                                    }
+                                } else {
+                                    log::warn!("SSH connection to unknown IP, closing");
+                                    sock.close();
+                                    backlog.handles[i] = add_tcp_listener(&mut sockets, 22);
+                                    i += 1;
+                                    continue;
+                                }
+                            }
+                        };
+
                         connections.insert(
                             handle,
                             ProxyConn::new(
                                 handle,
-                                backlog.is_tls,
+                                conn_kind,
                                 &server_config,
                                 &secrets,
                                 allowed_hosts.as_ref(),
@@ -240,9 +374,20 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What kind of traffic a listener expects.
+#[derive(Clone, Copy)]
+enum BacklogKind {
+    /// HTTP/80: reject with 421.
+    Http,
+    /// HTTPS/443: TLS MITM with secret injection.
+    Tls,
+    /// TCP/22: transparent relay, no inspection.
+    Ssh,
+}
+
 struct ListenBacklog {
     port: u16,
-    is_tls: bool,
+    kind: BacklogKind,
     handles: Vec<SocketHandle>,
 }
 
@@ -259,17 +404,44 @@ fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     sockets.add(sock)
 }
 
-fn process_dns(sockets: &mut SocketSet, handle: SocketHandle, audit_log: &AuditLog) {
+/// Process pending DNS queries. Allocates a unique IP for each new
+/// hostname and returns the list of newly allocated IPs so the caller
+/// can add them to the smoltcp interface (enabling ARP responses).
+fn process_dns(
+    sockets: &mut SocketSet,
+    handle: SocketHandle,
+    audit_log: &AuditLog,
+    host_map: &mut HostMap,
+) -> Vec<Ipv4Address> {
+    let mut new_ips: Vec<Ipv4Address> = Vec::new();
     let sock = sockets.get_mut::<udp::Socket>(handle);
     while sock.can_recv() {
-        if let Ok((data, sender)) = sock.recv()
-            && let Some((hostname, response)) = dns::handle_query(data, GATEWAY_IP)
-        {
-            log::info!("DNS: {hostname} -> {GATEWAY_IP}");
-            audit(audit_log, "dns", &[("hostname", &hostname)]);
-            sock.send_slice(&response, sender).ok();
-        }
+        let Ok((data, sender)) = sock.recv() else {
+            continue;
+        };
+        // Parse hostname first so we can allocate the per-host IP.
+        let Some(hostname) = dns::query_hostname(data) else {
+            continue;
+        };
+        // localhost is handled inside dns::handle_query (always → 127.0.0.1).
+        // For all other hostnames, allocate a unique IP from the host pool.
+        let resolve_ip = if hostname.eq_ignore_ascii_case("localhost") {
+            LOOPBACK_IP // passed to handle_query but overridden internally
+        } else {
+            let (ip, is_new) = host_map.alloc(&hostname);
+            if is_new {
+                new_ips.push(ip);
+            }
+            ip
+        };
+        let Some((hostname, response)) = dns::handle_query(data, resolve_ip) else {
+            continue;
+        };
+        log::info!("DNS: {hostname} -> {resolve_ip}");
+        audit(audit_log, "dns", &[("hostname", &hostname)]);
+        sock.send_slice(&response, sender).ok();
     }
+    new_ips
 }
 
 // --- TCP ---
@@ -285,12 +457,27 @@ fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
 
 // --- Connection handling ---
 
+/// Per-connection kind, set once at accept time and never changed.
+#[derive(Clone)]
+enum ConnKind {
+    /// HTTP/80: reject immediately.
+    Http,
+    /// HTTPS/443: TLS MITM with secret injection.
+    TlsMitm,
+    /// TCP/22: transparent relay, no inspection.
+    SshRelay {
+        hostname: String,
+        /// True if the host was on the explicit allowlist. Passed to the relay
+        /// thread for the private-IP check (same logic as TLS path).
+        allow_private: bool,
+    },
+}
+
 struct ProxyConn {
     handle: SocketHandle,
-    is_tls: bool,
-    /// Channel: poll loop sends encrypted bytes from smoltcp to the thread.
+    /// Channel: poll loop sends bytes from smoltcp to the thread.
     to_thread: Option<mpsc::Sender<Vec<u8>>>,
-    /// Channel: thread sends encrypted bytes back to smoltcp.
+    /// Channel: thread sends bytes back to smoltcp.
     from_thread: Option<mpsc::Receiver<Vec<u8>>>,
     /// Buffered bytes from the thread waiting to be written to smoltcp.
     pending_send: Vec<u8>,
@@ -315,7 +502,7 @@ enum ConnState {
 impl ProxyConn {
     fn new(
         handle: SocketHandle,
-        is_tls: bool,
+        kind: ConnKind,
         server_config: &Arc<rustls::ServerConfig>,
         secrets: &Arc<[SecretBinding]>,
         allowed_hosts: Option<&Arc<[String]>>,
@@ -324,7 +511,6 @@ impl ProxyConn {
     ) -> Self {
         let mut conn = Self {
             handle,
-            is_tls,
             to_thread: None,
             from_thread: None,
             pending_send: Vec::new(),
@@ -332,35 +518,60 @@ impl ProxyConn {
             state: ConnState::WaitingForData,
         };
 
-        if is_tls {
-            // Pre-create channels and spawn the handler thread.
-            // The thread blocks on rx until the poll loop feeds it data.
-            let (to_tx, to_rx) = mpsc::channel::<Vec<u8>>();
-            // Bounded: backpressure when guest TCP window is full.
-            // 64 * 16KB chunks = ~1MB buffered before thread blocks.
-            let (from_tx, from_rx) = mpsc::sync_channel::<Vec<u8>>(64);
-            conn.to_thread = Some(to_tx);
-            conn.from_thread = Some(from_rx);
-            conn.state = ConnState::Shuttling;
+        match kind {
+            ConnKind::Http => {
+                // State stays WaitingForData; no thread needed.
+                // The first bytes from the guest trigger the 421 rejection.
+            }
+            ConnKind::TlsMitm => {
+                // Pre-create channels and spawn the handler thread.
+                // The thread blocks on rx until the poll loop feeds it data.
+                let (to_tx, to_rx) = mpsc::channel::<Vec<u8>>();
+                // Bounded: backpressure when guest TCP window is full.
+                // 64 * 16KB chunks = ~1MB buffered before thread blocks.
+                let (from_tx, from_rx) = mpsc::sync_channel::<Vec<u8>>(64);
+                conn.to_thread = Some(to_tx);
+                conn.from_thread = Some(from_rx);
+                conn.state = ConnState::Shuttling;
 
-            let config = Arc::clone(server_config);
-            let secrets = Arc::clone(secrets);
-            let allowed = allowed_hosts.cloned();
-            let alog = audit_log.clone();
-            let disc = Arc::clone(discovered);
-            std::thread::spawn(move || {
-                if let Err(e) = tls_connection_thread(
-                    to_rx,
-                    from_tx,
-                    config,
-                    &secrets,
-                    allowed.as_deref(),
-                    &alog,
-                    &disc,
-                ) {
-                    log::warn!("TLS connection thread error: {e}");
-                }
-            });
+                let config = Arc::clone(server_config);
+                let secrets = Arc::clone(secrets);
+                let allowed = allowed_hosts.cloned();
+                let alog = audit_log.clone();
+                let disc = Arc::clone(discovered);
+                std::thread::spawn(move || {
+                    if let Err(e) = tls_connection_thread(
+                        to_rx,
+                        from_tx,
+                        config,
+                        &secrets,
+                        allowed.as_deref(),
+                        &alog,
+                        &disc,
+                    ) {
+                        log::warn!("TLS connection thread error: {e}");
+                    }
+                });
+            }
+            ConnKind::SshRelay {
+                hostname,
+                allow_private,
+            } => {
+                let (to_tx, to_rx) = mpsc::channel::<Vec<u8>>();
+                let (from_tx, from_rx) = mpsc::sync_channel::<Vec<u8>>(64);
+                conn.to_thread = Some(to_tx);
+                conn.from_thread = Some(from_rx);
+                conn.state = ConnState::Shuttling;
+
+                let alog = audit_log.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) =
+                        ssh_relay_thread(to_rx, from_tx, &hostname, allow_private, &alog)
+                    {
+                        log::warn!("SSH relay thread error for {hostname}: {e}");
+                    }
+                });
+            }
         }
 
         conn
@@ -371,6 +582,8 @@ impl ProxyConn {
 fn shuttle_bytes(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
     match conn.state {
         ConnState::WaitingForData => {
+            // Only Http connections enter this state (TlsMitm and SshRelay
+            // start in Shuttling). Read the first bytes and reject.
             if !sock.may_recv() {
                 return;
             }
@@ -382,27 +595,18 @@ fn shuttle_bytes(sock: &mut tcp::Socket<'_>, conn: &mut ProxyConn) {
                 return;
             }
 
-            if !conn.is_tls {
-                // HTTP/80: reject immediately
-                let request = String::from_utf8_lossy(&buf[..n]);
-                log::info!(
-                    "HTTP request (plaintext): {}",
-                    request.lines().next().unwrap_or("")
-                );
-                let response = b"HTTP/1.1 421 Misdirected Request\r\n\
-                    Content-Type: text/plain\r\n\
-                    Connection: close\r\n\r\n\
-                    redan: use HTTPS. Plaintext HTTP is not proxied.\n";
-                conn.pending_send = response.to_vec();
-                conn.send_offset = 0;
-                conn.state = ConnState::Draining;
-                return;
-            }
-
-            // TLS: forward to the thread
-            if let Some(tx) = &conn.to_thread {
-                tx.send(buf[..n].to_vec()).ok();
-            }
+            let request = String::from_utf8_lossy(&buf[..n]);
+            log::info!(
+                "HTTP request (plaintext): {}",
+                request.lines().next().unwrap_or("")
+            );
+            let response = b"HTTP/1.1 421 Misdirected Request\r\n\
+                Content-Type: text/plain\r\n\
+                Connection: close\r\n\r\n\
+                redan: use HTTPS. Plaintext HTTP is not proxied.\n";
+            conn.pending_send = response.to_vec();
+            conn.send_offset = 0;
+            conn.state = ConnState::Draining;
         }
 
         ConnState::Shuttling => {
@@ -934,6 +1138,97 @@ fn tls_connection_thread(
     Ok(())
 }
 
+/// Transparent TCP relay for SSH connections.
+///
+/// Forwards raw bytes in both directions between the guest (via smoltcp
+/// channels) and the real upstream SSH server. No inspection, no injection,
+/// no scrubbing -- SSH uses its own authentication and encryption.
+///
+/// The allowlist check happens in the poll loop before this thread is
+/// spawned, so by the time we reach here the connection is permitted.
+fn ssh_relay_thread(
+    rx: mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::SyncSender<Vec<u8>>,
+    hostname: &str,
+    allow_private: bool,
+    audit_log: &AuditLog,
+) -> Result<(), crate::error::Error> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+
+    // Resolve the hostname and check for private IPs, matching the same
+    // SSRF protection the TLS path applies via tls::connect_upstream.
+    let addr = format!("{hostname}:22")
+        .to_socket_addrs()?
+        .find(std::net::SocketAddr::is_ipv4)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution failed")
+        })?;
+
+    if !allow_private
+        && let std::net::SocketAddr::V4(v4) = &addr
+        && crate::tls::is_private_ip(*v4.ip())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("blocked SSH to private IP: {}", v4.ip()),
+        )
+        .into());
+    }
+
+    let upstream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("SSH connect to {hostname}: {e}"))?;
+    upstream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    upstream.set_write_timeout(Some(Duration::from_secs(30)))?;
+
+    audit(audit_log, "ssh_connect", &[("host", hostname)]);
+    log::info!("SSH relay: connected to {addr}");
+
+    let mut upstream_r = upstream
+        .try_clone()
+        .map_err(|e| format!("SSH stream clone: {e}"))?;
+    let mut upstream_w = upstream;
+
+    // Upstream → guest: runs on a dedicated thread so reads don't
+    // block the guest → upstream direction.
+    // `tx` is moved (consumed) into this thread -- no clone needed.
+    let host_copy = hostname.to_string();
+    let read_thread = std::thread::spawn(move || {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match upstream_r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(e) => {
+                    log::debug!("SSH upstream read error for {host_copy}: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Guest → upstream: consume `rx` via IntoIterator so the channel is
+    // dropped when the loop exits (signals EOF to the read thread).
+    for data in rx {
+        if upstream_w.write_all(&data).is_err() {
+            break;
+        }
+    }
+
+    upstream_w.shutdown(std::net::Shutdown::Write).ok();
+    read_thread.join().ok();
+
+    audit(audit_log, "ssh_disconnect", &[("host", hostname)]);
+    log::info!("SSH relay: disconnected from {addr}");
+
+    Ok(())
+}
+
 /// Write a body chunk with secret scrubbing. Maintains an overlap
 /// buffer to catch secrets spanning chunk boundaries.
 fn write_scrubbed_chunk(
@@ -1142,6 +1437,61 @@ fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
 )]
 mod tests {
     use super::*;
+
+    // --- HostMap ---
+
+    #[test]
+    fn host_map_alloc_new_hostname() {
+        let mut map = HostMap::new();
+        let (ip, is_new) = map.alloc("api.github.com");
+        assert!(is_new);
+        assert_eq!(ip.octets()[3], HOST_POOL_START);
+    }
+
+    #[test]
+    fn host_map_alloc_same_hostname_returns_existing() {
+        let mut map = HostMap::new();
+        let (ip1, _) = map.alloc("api.github.com");
+        let (ip2, is_new) = map.alloc("api.github.com");
+        assert!(!is_new);
+        assert_eq!(ip1, ip2);
+    }
+
+    #[test]
+    fn host_map_different_hostnames_get_different_ips() {
+        let mut map = HostMap::new();
+        let (ip1, _) = map.alloc("api.github.com");
+        let (ip2, _) = map.alloc("registry.npmjs.org");
+        assert_ne!(ip1, ip2);
+    }
+
+    #[test]
+    fn host_map_reverse_lookup() {
+        let mut map = HostMap::new();
+        let (ip, _) = map.alloc("api.github.com");
+        assert_eq!(map.hostname_for_ip(ip), Some("api.github.com"));
+    }
+
+    #[test]
+    fn host_map_reverse_lookup_unknown_ip() {
+        let map = HostMap::new();
+        let unknown = Ipv4Address::new(1, 2, 3, 4);
+        assert!(map.hostname_for_ip(unknown).is_none());
+    }
+
+    #[test]
+    fn host_map_pool_exhaustion_falls_back_to_gateway() {
+        let mut map = HostMap::new();
+        // Fill the pool
+        for i in HOST_POOL_START..=HOST_POOL_END {
+            let hostname = format!("host{i}.example.com");
+            map.alloc(&hostname);
+        }
+        // Next alloc should fall back to GATEWAY_IP
+        let (ip, is_new) = map.alloc("overflow.example.com");
+        assert!(!is_new);
+        assert_eq!(ip, GATEWAY_IP);
+    }
 
     #[test]
     fn http_request_complete_get() {
