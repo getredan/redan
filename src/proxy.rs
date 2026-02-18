@@ -312,7 +312,14 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
                                     if discover && let Ok(mut d) = discovered.lock() {
                                         d.insert(h.to_string());
                                     }
-                                    ConnKind::SshRelay(h.to_string())
+                                    let allow_private =
+                                        allowed_hosts.as_ref().is_some_and(|hosts| {
+                                            hosts.iter().any(|p| host_matches(p, h))
+                                        });
+                                    ConnKind::SshRelay {
+                                        hostname: h.to_string(),
+                                        allow_private,
+                                    }
                                 } else {
                                     log::warn!("SSH connection to unknown IP, closing");
                                     sock.close();
@@ -458,7 +465,12 @@ enum ConnKind {
     /// HTTPS/443: TLS MITM with secret injection.
     TlsMitm,
     /// TCP/22: transparent relay, no inspection.
-    SshRelay(String), // hostname
+    SshRelay {
+        hostname: String,
+        /// True if the host was on the explicit allowlist. Passed to the relay
+        /// thread for the private-IP check (same logic as TLS path).
+        allow_private: bool,
+    },
 }
 
 struct ProxyConn {
@@ -541,7 +553,10 @@ impl ProxyConn {
                     }
                 });
             }
-            ConnKind::SshRelay(hostname) => {
+            ConnKind::SshRelay {
+                hostname,
+                allow_private,
+            } => {
                 let (to_tx, to_rx) = mpsc::channel::<Vec<u8>>();
                 let (from_tx, from_rx) = mpsc::sync_channel::<Vec<u8>>(64);
                 conn.to_thread = Some(to_tx);
@@ -550,7 +565,9 @@ impl ProxyConn {
 
                 let alog = audit_log.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = ssh_relay_thread(to_rx, from_tx, &hostname, &alog) {
+                    if let Err(e) =
+                        ssh_relay_thread(to_rx, from_tx, &hostname, allow_private, &alog)
+                    {
                         log::warn!("SSH relay thread error for {hostname}: {e}");
                     }
                 });
@@ -1133,13 +1150,36 @@ fn ssh_relay_thread(
     rx: mpsc::Receiver<Vec<u8>>,
     tx: mpsc::SyncSender<Vec<u8>>,
     hostname: &str,
+    allow_private: bool,
     audit_log: &AuditLog,
 ) -> Result<(), crate::error::Error> {
     use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
 
-    let addr = format!("{hostname}:22");
-    let upstream =
-        std::net::TcpStream::connect(&addr).map_err(|e| format!("SSH connect to {addr}: {e}"))?;
+    // Resolve the hostname and check for private IPs, matching the same
+    // SSRF protection the TLS path applies via tls::connect_upstream.
+    let addr = format!("{hostname}:22")
+        .to_socket_addrs()?
+        .find(std::net::SocketAddr::is_ipv4)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "DNS resolution failed")
+        })?;
+
+    if !allow_private
+        && let std::net::SocketAddr::V4(v4) = &addr
+        && crate::tls::is_private_ip(*v4.ip())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("blocked SSH to private IP: {}", v4.ip()),
+        )
+        .into());
+    }
+
+    let upstream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("SSH connect to {hostname}: {e}"))?;
+    upstream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    upstream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     audit(audit_log, "ssh_connect", &[("host", hostname)]);
     log::info!("SSH relay: connected to {addr}");
