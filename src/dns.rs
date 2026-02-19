@@ -19,7 +19,13 @@ pub fn query_hostname(packet: &[u8]) -> Option<String> {
     if flags & 0x8000 != 0 || flags & 0x7800 != 0 || qd_count != 1 {
         return None;
     }
-    let (qname, _) = parse_qname(packet, 12)?;
+    let (qname, qname_end) = parse_qname(packet, 12)?;
+    // Ensure QTYPE (2 bytes) and QCLASS (2 bytes) are present after the name.
+    // Without this check a packet truncated right after QNAME would return a
+    // hostname and trigger host-pool allocation on a malformed query.
+    if qname_end + 4 > packet.len() {
+        return None;
+    }
     Some(qname.trim_end_matches('.').to_string())
 }
 
@@ -268,6 +274,15 @@ mod tests {
     #[test]
     fn query_hostname_rejects_malformed() {
         assert!(query_hostname(&[0; 5]).is_none());
+    }
+
+    #[test]
+    fn query_hostname_rejects_truncated_after_qname() {
+        // Build a valid query then truncate it to remove QTYPE/QCLASS.
+        let full = build_query(0x1234, "example.com", 1);
+        // Trim the last 4 bytes (QTYPE + QCLASS).
+        let truncated = &full[..full.len() - 4];
+        assert!(query_hostname(truncated).is_none());
     }
 
     #[test]
