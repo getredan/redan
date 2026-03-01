@@ -194,6 +194,14 @@ enum Cli {
         follow: bool,
     },
 
+    /// Internal: daemon process for detached sessions. Not user-facing.
+    #[command(hide = true)]
+    Daemon {
+        /// Session ID to run
+        #[arg(long)]
+        session: String,
+    },
+
     /// Generate redan.toml and image config for a project
     Init {
         /// Generate Claude Code devcontainer and config
@@ -300,6 +308,7 @@ fn main() {
         }
         Cli::Attach { session } => attach_session(session.as_deref()),
         Cli::Stop { session } => stop_session(session.as_deref()),
+        Cli::Daemon { session } => run_daemon(&session),
 
         Cli::Image { action } => match action {
             ImageAction::Create {
@@ -593,19 +602,182 @@ fn exec_command(args: ExecArgs) {
             "echo 'no command specified; use: redan exec --image <name> -- <command>'".to_string()
         }
     });
-    cmd::exec::run(&cmd::exec::ExecConfig {
-        rootfs: &rootfs_path,
-        command: &command,
-        interactive,
+    if args.detach {
+        exec_detached(
+            &rootfs_path,
+            &command,
+            timeout,
+            &secrets,
+            &allow_hosts,
+            &mounts,
+            audit_log.as_deref(),
+            image_name.as_deref(),
+            &cfg.env,
+            args.discover,
+            args.name.as_deref(),
+        );
+    } else {
+        cmd::exec::run(&cmd::exec::ExecConfig {
+            rootfs: &rootfs_path,
+            command: &command,
+            interactive,
+            timeout_secs: timeout,
+            secret_specs: &secrets,
+            allow_host_specs: &allow_hosts,
+            mount_specs: &mounts,
+            audit_log_path: audit_log.as_deref(),
+            image_name: image_name.as_deref(),
+            guest_env: &cfg.env,
+            discover: args.discover,
+            session_name: args.name.as_deref(),
+            session_id: None,
+        });
+    }
+}
+
+/// Serializable exec config for passing to the daemon process.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DaemonConfig {
+    rootfs: String,
+    command: String,
+    timeout_secs: u64,
+    secrets: Vec<String>,
+    allow_hosts: Vec<String>,
+    mounts: Vec<String>,
+    audit_log: Option<String>,
+    image_name: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
+    discover: bool,
+    session_name: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exec_detached(
+    rootfs: &str,
+    command: &str,
+    timeout: u64,
+    secrets: &[String],
+    allow_hosts: &[String],
+    mounts: &[String],
+    audit_log: Option<&str>,
+    image_name: Option<&str>,
+    env: &std::collections::BTreeMap<String, String>,
+    discover: bool,
+    session_name: Option<&str>,
+) {
+    // Create session directory and write daemon config
+    let session_id = session::new_id();
+    let session_dir = session::session_dir(&session_id);
+    std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| {
+        eprintln!("cannot create session dir: {e}");
+        std::process::exit(1);
+    });
+
+    let daemon_cfg = DaemonConfig {
+        rootfs: rootfs.into(),
+        command: command.into(),
         timeout_secs: timeout,
-        secret_specs: &secrets,
-        allow_host_specs: &allow_hosts,
-        mount_specs: &mounts,
-        audit_log_path: audit_log.as_deref(),
-        image_name: image_name.as_deref(),
+        secrets: secrets.to_vec(),
+        allow_hosts: allow_hosts.to_vec(),
+        mounts: mounts.to_vec(),
+        audit_log: audit_log.map(Into::into),
+        image_name: image_name.map(Into::into),
+        env: env.clone(),
+        discover,
+        session_name: session_name.map(Into::into),
+    };
+
+    let config_path = session_dir.join("daemon_config.json");
+    let config_json = serde_json::to_string(&daemon_cfg).unwrap_or_else(|e| {
+        eprintln!("cannot serialize daemon config: {e}");
+        std::process::exit(1);
+    });
+    std::fs::write(&config_path, &config_json).unwrap_or_else(|e| {
+        eprintln!("cannot write daemon config: {e}");
+        std::process::exit(1);
+    });
+
+    // Spawn daemon process
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        eprintln!("cannot find redan executable: {e}");
+        std::process::exit(1);
+    });
+
+    let log_path = session_dir.join("redan.log");
+    let log_file = std::fs::File::create(&log_path).unwrap_or_else(|e| {
+        eprintln!("cannot create log file: {e}");
+        std::process::exit(1);
+    });
+
+    let mut child = std::process::Command::new(exe)
+        .arg("daemon")
+        .arg("--session")
+        .arg(&session_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone().unwrap_or_else(|e| {
+            eprintln!("cannot clone log file handle: {e}");
+            std::process::exit(1);
+        }))
+        .stderr(log_file)
+        .spawn()
+        .unwrap_or_else(|e| {
+            eprintln!("cannot spawn daemon: {e}");
+            std::process::exit(1);
+        });
+
+    let daemon_pid = child.id();
+
+    // Detach from child: parent exits soon, daemon gets reparented to init.
+    // Spawn a thread to wait() so we don't leave a zombie if parent lingers.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    // Write initial session metadata
+    let mut meta = session::SessionMeta::new(&session_id, image_name, Some(command));
+    meta.pid = Some(daemon_pid);
+    meta.name = session_name.map(Into::into);
+    if let Err(e) = meta.save() {
+        eprintln!("warning: cannot save session metadata: {e}");
+    }
+
+    let name_display = session_name.map_or(String::new(), |n| format!(" ({n})"));
+    eprintln!("session {session_id}{name_display} started (detached)");
+    eprintln!("  redan logs {session_id} -f  tail logs");
+    eprintln!("  redan stop {session_id}     stop session");
+}
+
+fn run_daemon(session_id: &str) {
+    let session_dir = session::session_dir(session_id);
+    let config_path = session_dir.join("daemon_config.json");
+
+    let config_json = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        eprintln!("cannot read daemon config: {e}");
+        std::process::exit(1);
+    });
+    let cfg: DaemonConfig = serde_json::from_str(&config_json).unwrap_or_else(|e| {
+        eprintln!("invalid daemon config: {e}");
+        std::process::exit(1);
+    });
+
+    // Clean up the config file — it contains secret specs
+    let _ = std::fs::remove_file(&config_path);
+
+    // Run the VM+proxy (non-interactive: daemon has no terminal)
+    cmd::exec::run(&cmd::exec::ExecConfig {
+        rootfs: &cfg.rootfs,
+        command: &cfg.command,
+        interactive: false,
+        timeout_secs: cfg.timeout_secs,
+        secret_specs: &cfg.secrets,
+        allow_host_specs: &cfg.allow_hosts,
+        mount_specs: &cfg.mounts,
+        audit_log_path: cfg.audit_log.as_deref(),
+        image_name: cfg.image_name.as_deref(),
         guest_env: &cfg.env,
-        discover: args.discover,
-        session_name: args.name.as_deref(),
+        discover: cfg.discover,
+        session_name: cfg.session_name.as_deref(),
+        session_id: Some(session_id),
     });
 }
 

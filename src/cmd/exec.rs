@@ -22,16 +22,30 @@ pub(crate) struct ExecConfig<'a> {
     pub guest_env: &'a BTreeMap<String, String>,
     pub discover: bool,
     pub session_name: Option<&'a str>,
+    /// Pre-existing session ID (for daemon mode). If None, creates a new session.
+    pub session_id: Option<&'a str>,
 }
 
 pub(crate) fn run(cfg: &ExecConfig<'_>) {
-    // Create session
-    let session_id = session::new_id();
-    let mut meta = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
-    meta.name = cfg.session_name.map(Into::into);
-    if let Err(e) = meta.save() {
-        log::warn!("cannot save session metadata: {e}");
-    }
+    // Create or reuse session
+    let session_id = cfg.session_id.map_or_else(session::new_id, Into::into);
+    let mut meta = if cfg.session_id.is_some() {
+        // Daemon mode: reload existing metadata (written by exec_detached)
+        let meta_path = session::session_dir(&session_id).join("meta.json");
+        std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_else(|| {
+                session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command))
+            })
+    } else {
+        let mut m = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
+        m.name = cfg.session_name.map(Into::into);
+        if let Err(e) = m.save() {
+            log::warn!("cannot save session metadata: {e}");
+        }
+        m
+    };
     log::info!("session {session_id} started");
 
     // In interactive mode, redirect logs to a file so they don't
