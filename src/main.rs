@@ -594,6 +594,15 @@ fn exec_command(args: ExecArgs) {
                 eprintln!("image '{name}' not found. Run: redan image create {name} ...");
                 std::process::exit(1);
             }
+            // Warn about stale images (don't block execution)
+            if let Some(meta) = redan::image_meta::ImageMeta::load(&p)
+                && let Some(days) = meta.age_days()
+                && days > 30
+            {
+                eprintln!(
+                    "warning: image '{name}' is {days} days old. Run: redan image update {name}"
+                );
+            }
             p.to_string_lossy().into_owned()
         }
         (_, Some(path)) => path.clone(),
