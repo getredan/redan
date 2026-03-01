@@ -1,0 +1,280 @@
+//! Zero-config auto-detection for `redan exec`.
+//!
+//! When no `redan.toml` exists and no CLI flags are given, redan tries to
+//! detect a usable configuration automatically. Currently detects Claude Code
+//! setups: if the `claude-code` image exists and `ANTHROPIC_API_KEY` is set,
+//! redan runs Claude Code with smart defaults.
+
+use std::path::Path;
+
+use crate::config::{Config, MountConfig, NetworkConfig, SecretConfig};
+use crate::image;
+
+/// Hosts required for Claude Code to function.
+const CLAUDE_HOSTS: &[&str] = &[
+    "api.anthropic.com",
+    "statsig.anthropic.com",
+    "sentry.io",
+    "platform.claude.com",
+    "raw.githubusercontent.com",
+];
+
+/// Result of auto-detection: a Config plus messages about what was detected.
+pub struct AutoDetected {
+    pub config: Config,
+    /// Human-readable lines describing what was detected and chosen.
+    pub messages: Vec<String>,
+    /// Whether the claude-code image needs to be built first.
+    pub needs_image_build: bool,
+}
+
+/// Attempt to build a Config from environment detection.
+///
+/// Returns `None` if auto-detection can't produce a usable config
+/// (e.g., no known image, no API key).
+pub fn detect() -> Option<AutoDetected> {
+    let home = home_dir();
+    detect_with_env(
+        std::env::var("ANTHROPIC_API_KEY").ok(),
+        image_exists("claude-code"),
+        home.as_deref(),
+    )
+}
+
+/// Testable inner function with injected environment.
+fn detect_with_env(
+    anthropic_key: Option<String>,
+    claude_image_exists: bool,
+    home: Option<&str>,
+) -> Option<AutoDetected> {
+    // For now, we only auto-detect Claude Code setups.
+    // Future: detect other agent types (Codex, etc.)
+    let api_key = anthropic_key?;
+    if api_key.is_empty() {
+        return None;
+    }
+
+    let mut messages = Vec::new();
+    let needs_image_build = !claude_image_exists;
+
+    if claude_image_exists {
+        messages.push("Using image: claude-code".into());
+    } else {
+        messages.push("Image claude-code not found, will build from bundled Dockerfile".into());
+    }
+
+    messages.push("Injecting ANTHROPIC_API_KEY for api.anthropic.com".into());
+
+    let mut config = Config {
+        image: Some("claude-code".into()),
+        command: Some("claude --dangerously-skip-permissions".into()),
+        interactive: Some(true),
+        timeout: Some(3600),
+        ..Config::default()
+    };
+
+    // Network: Claude's required hosts
+    config.network = NetworkConfig {
+        allow: CLAUDE_HOSTS.iter().map(|&h| h.to_string()).collect(),
+    };
+
+    // Secret: ANTHROPIC_API_KEY via env://
+    config.secrets.insert(
+        "ANTHROPIC_API_KEY".into(),
+        SecretConfig {
+            value: "env://ANTHROPIC_API_KEY".to_string(),
+            hosts: vec!["api.anthropic.com".into()],
+        },
+    );
+
+    // Mount: current directory → /workspace
+    config.mount.insert(
+        "workspace".into(),
+        MountConfig {
+            source: ".".into(),
+            target: Some("/workspace".into()),
+        },
+    );
+
+    // Claude Code config dir in workspace
+    config
+        .env
+        .insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
+
+    // Git/SSH identity mounts
+    if let Some(home) = home {
+        let gitconfig = Path::new(home).join(".gitconfig");
+        if gitconfig.exists() {
+            config.mount.insert(
+                "gitconfig".into(),
+                MountConfig {
+                    source: gitconfig.to_string_lossy().into_owned(),
+                    target: Some("/home/dev/.gitconfig".into()),
+                },
+            );
+            messages.push("Mounting ~/.gitconfig (read-only)".into());
+        }
+
+        let ssh_dir = Path::new(home).join(".ssh");
+        if ssh_dir.is_dir() {
+            config.mount.insert(
+                "ssh".into(),
+                MountConfig {
+                    source: ssh_dir.to_string_lossy().into_owned(),
+                    target: Some("/home/dev/.ssh".into()),
+                },
+            );
+            messages.push("Mounting ~/.ssh (read-only)".into());
+        }
+    }
+
+    // Summarize mount
+    messages.push("Mounting current directory → /workspace".into());
+
+    Some(AutoDetected {
+        config,
+        messages,
+        needs_image_build,
+    })
+}
+
+/// Check if a named image exists.
+fn image_exists(name: &str) -> bool {
+    image::image_path(name).map(|p| p.exists()).unwrap_or(false)
+}
+
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok()
+}
+
+/// Check if any explicit exec flags were provided on the CLI.
+///
+/// Returns true if the user passed flags that indicate they want
+/// manual control (not auto-detect).
+pub const fn has_explicit_flags(
+    image: &Option<String>,
+    rootfs: &Option<String>,
+    command: &[String],
+    secrets: &[String],
+    secret_file: &Option<String>,
+    mounts: &[String],
+    discover: bool,
+) -> bool {
+    image.is_some()
+        || rootfs.is_some()
+        || !command.is_empty()
+        || !secrets.is_empty()
+        || secret_file.is_some()
+        || !mounts.is_empty()
+        || discover
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_claude_code_with_key_and_image() {
+        let result = detect_with_env(Some("sk-ant-test123".into()), true, Some("/home/testuser"));
+        let auto = result.expect("should detect");
+        assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
+        assert!(auto.config.command.as_deref().unwrap().contains("claude"));
+        assert_eq!(auto.config.interactive, Some(true));
+        assert!(!auto.needs_image_build);
+
+        // Secret should be env:// reference, not the literal key
+        let secret = auto.config.secrets.get("ANTHROPIC_API_KEY").unwrap();
+        assert_eq!(secret.value, "env://ANTHROPIC_API_KEY");
+        assert_eq!(secret.hosts, vec!["api.anthropic.com"]);
+
+        // Network should have Claude hosts
+        assert!(
+            auto.config
+                .network
+                .allow
+                .contains(&"api.anthropic.com".to_string())
+        );
+        assert!(
+            auto.config
+                .network
+                .allow
+                .contains(&"statsig.anthropic.com".to_string())
+        );
+
+        // Mount should have workspace
+        assert!(auto.config.mount.contains_key("workspace"));
+
+        // Messages should describe what was chosen
+        assert!(auto.messages.iter().any(|m| m.contains("claude-code")));
+        assert!(
+            auto.messages
+                .iter()
+                .any(|m| m.contains("ANTHROPIC_API_KEY"))
+        );
+    }
+
+    #[test]
+    fn detect_needs_image_build_when_missing() {
+        let result = detect_with_env(Some("sk-ant-test123".into()), false, Some("/home/testuser"));
+        let auto = result.expect("should detect");
+        assert!(auto.needs_image_build);
+        assert!(auto.messages.iter().any(|m| m.contains("will build")));
+    }
+
+    #[test]
+    fn detect_returns_none_without_api_key() {
+        let result = detect_with_env(None, true, Some("/home/testuser"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn detect_returns_none_with_empty_api_key() {
+        let result = detect_with_env(Some(String::new()), true, Some("/home/testuser"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn has_explicit_flags_detects_image() {
+        assert!(has_explicit_flags(
+            &Some("myimage".into()),
+            &None,
+            &[],
+            &[],
+            &None,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn has_explicit_flags_detects_command() {
+        assert!(has_explicit_flags(
+            &None,
+            &None,
+            &["echo".into(), "hello".into()],
+            &[],
+            &None,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn has_explicit_flags_none_when_empty() {
+        assert!(!has_explicit_flags(
+            &None,
+            &None,
+            &[],
+            &[],
+            &None,
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn has_explicit_flags_detects_discover() {
+        assert!(has_explicit_flags(&None, &None, &[], &[], &None, &[], true));
+    }
+}

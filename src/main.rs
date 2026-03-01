@@ -260,89 +260,17 @@ fn main() {
             log_file: _,
             discover,
         } => {
-            let cfg = config::find_and_load();
-            if let Some((path, _)) = &cfg {
-                eprintln!("config: {}", path.display());
-            }
-            let cfg = cfg.map(|(_, c)| c).unwrap_or_default();
-
-            let mut all_secrets = cmd::exec::collect_secret_specs(&secrets, secret_file.as_deref());
-            all_secrets.extend(cfg.secret_specs());
-            let secrets = all_secrets;
-
-            let image_name = image_name.or_else(|| cfg.image.clone());
-            let rootfs = rootfs.or_else(|| cfg.rootfs.clone());
-            // Trailing args after -- joined into a shell command.
-            // Falls back to config file, then /bin/sh for interactive.
-            let command = if command.is_empty() {
-                cfg.command.clone()
-            } else {
-                Some(shell_words::join(&command))
-            };
-            let timeout = timeout.or(cfg.timeout).unwrap_or(3600);
-            let interactive = interactive || cfg.interactive.unwrap_or(false);
-            let audit_log = audit_log.or_else(|| cfg.audit_log.clone());
-
-            let mut allow_hosts = allow_hosts;
-            allow_hosts.extend(cfg.network.allow.clone());
-
-            // Import allowedDomains from Claude Code settings if present.
-            // Lets users define network policy once in .claude/settings.json
-            // and have redan enforce it with real VM isolation.
-            let claude_domains = config::claude_allowed_domains();
-            if !claude_domains.is_empty() {
-                log::info!(
-                    "imported {} domains from Claude Code settings",
-                    claude_domains.len()
-                );
-                allow_hosts.extend(claude_domains);
-            }
-
-            let mut mounts = mounts;
-            mounts.extend(cfg.mount_specs());
-
-            let rootfs_path = match (&image_name, &rootfs) {
-                (Some(name), _) => {
-                    let p = match image::image_path(name) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            std::process::exit(1);
-                        }
-                    };
-                    if !p.exists() {
-                        eprintln!("image '{name}' not found. Run: redan image create {name} ...");
-                        std::process::exit(1);
-                    }
-                    p.to_string_lossy().into_owned()
-                }
-                (_, Some(path)) => path.clone(),
-                (None, None) => {
-                    eprintln!("no image specified. Set image in redan.toml or pass --image <name>");
-                    eprintln!("  redan init          generate a redan.toml");
-                    eprintln!("  redan image list    show available images");
-                    std::process::exit(1);
-                }
-            };
-            let command = command.unwrap_or_else(|| {
-                if interactive {
-                    "/bin/sh".to_string()
-                } else {
-                    "echo 'no command specified; use: redan exec --image <name> -- <command>'"
-                        .to_string()
-                }
-            });
-            cmd::exec::run(&cmd::exec::ExecConfig {
-                rootfs: &rootfs_path,
-                command: &command,
+            exec_command(ExecArgs {
+                image_name,
+                rootfs,
+                command,
                 interactive,
-                timeout_secs: timeout,
-                secret_specs: &secrets,
-                allow_host_specs: &allow_hosts,
-                mount_specs: &mounts,
-                audit_log_path: audit_log.as_deref(),
-                image_name: image_name.as_deref(),
-                guest_env: &cfg.env,
+                timeout,
+                secrets,
+                secret_file,
+                allow_hosts,
+                mounts,
+                audit_log,
                 discover,
             });
         }
@@ -494,6 +422,161 @@ fn main() {
             }
         },
     }
+}
+
+struct ExecArgs {
+    image_name: Option<String>,
+    rootfs: Option<String>,
+    command: Vec<String>,
+    interactive: bool,
+    timeout: Option<u64>,
+    secrets: Vec<String>,
+    secret_file: Option<String>,
+    allow_hosts: Vec<String>,
+    mounts: Vec<String>,
+    audit_log: Option<String>,
+    discover: bool,
+}
+
+fn exec_command(args: ExecArgs) {
+    let config_file = config::find_and_load();
+    if let Some((ref path, _)) = config_file {
+        eprintln!("config: {}", path.display());
+    }
+
+    let explicit = redan::auto_detect::has_explicit_flags(
+        &args.image_name,
+        &args.rootfs,
+        &args.command,
+        &args.secrets,
+        &args.secret_file,
+        &args.mounts,
+        args.discover,
+    );
+
+    // Three paths:
+    // 1. Config file exists → use it (existing behavior)
+    // 2. Explicit CLI flags → use them (existing behavior)
+    // 3. Neither → try auto-detect
+    let cfg = if let Some((_, cfg)) = config_file {
+        cfg
+    } else if !explicit {
+        // No config, no explicit flags: try auto-detect
+        if let Some(auto) = redan::auto_detect::detect() {
+            if auto.needs_image_build {
+                eprintln!("Building claude-code image (this may take a minute)...");
+                match image::import_dockerfile("claude-code", "dockerfiles/claude-code.dockerfile")
+                {
+                    Ok(_) => eprintln!("Image claude-code built successfully."),
+                    Err(e) => {
+                        eprintln!("error: failed to build claude-code image: {e}");
+                        eprintln!(
+                            "  Build manually: redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            for msg in &auto.messages {
+                eprintln!("  {msg}");
+            }
+            auto.config
+        } else {
+            eprintln!("no redan.toml found and auto-detect failed.");
+            eprintln!();
+            if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                eprintln!("  Set ANTHROPIC_API_KEY to auto-detect Claude Code:");
+                eprintln!("    export ANTHROPIC_API_KEY=sk-ant-...");
+                eprintln!();
+            }
+            eprintln!("  Or create a config:");
+            eprintln!("    redan init          generate a redan.toml");
+            eprintln!("    redan init --claude  generate config + devcontainer for Claude Code");
+            eprintln!();
+            eprintln!("  Or specify an image directly:");
+            eprintln!("    redan exec --image <name> -- <command>");
+            eprintln!("    redan image list    show available images");
+            std::process::exit(1);
+        }
+    } else {
+        config::Config::default()
+    };
+
+    let mut all_secrets =
+        cmd::exec::collect_secret_specs(&args.secrets, args.secret_file.as_deref());
+    all_secrets.extend(cfg.secret_specs());
+    let secrets = all_secrets;
+
+    let image_name = args.image_name.or_else(|| cfg.image.clone());
+    let rootfs = args.rootfs.or_else(|| cfg.rootfs.clone());
+    let command = if args.command.is_empty() {
+        cfg.command.clone()
+    } else {
+        Some(shell_words::join(&args.command))
+    };
+    let timeout = args.timeout.or(cfg.timeout).unwrap_or(3600);
+    let interactive = args.interactive || cfg.interactive.unwrap_or(false);
+    let audit_log = args.audit_log.or_else(|| cfg.audit_log.clone());
+
+    let mut allow_hosts = args.allow_hosts;
+    allow_hosts.extend(cfg.network.allow.clone());
+
+    // Import allowedDomains from Claude Code settings if present.
+    let claude_domains = config::claude_allowed_domains();
+    if !claude_domains.is_empty() {
+        log::info!(
+            "imported {} domains from Claude Code settings",
+            claude_domains.len()
+        );
+        allow_hosts.extend(claude_domains);
+    }
+
+    let mut mounts = args.mounts;
+    mounts.extend(cfg.mount_specs());
+
+    let rootfs_path = match (&image_name, &rootfs) {
+        (Some(name), _) => {
+            let p = match image::image_path(name) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if !p.exists() {
+                eprintln!("image '{name}' not found. Run: redan image create {name} ...");
+                std::process::exit(1);
+            }
+            p.to_string_lossy().into_owned()
+        }
+        (_, Some(path)) => path.clone(),
+        (None, None) => {
+            eprintln!("no image specified. Set image in redan.toml or pass --image <name>");
+            eprintln!("  redan init          generate a redan.toml");
+            eprintln!("  redan image list    show available images");
+            std::process::exit(1);
+        }
+    };
+    let command = command.unwrap_or_else(|| {
+        if interactive {
+            "/bin/sh".to_string()
+        } else {
+            "echo 'no command specified; use: redan exec --image <name> -- <command>'".to_string()
+        }
+    });
+    cmd::exec::run(&cmd::exec::ExecConfig {
+        rootfs: &rootfs_path,
+        command: &command,
+        interactive,
+        timeout_secs: timeout,
+        secret_specs: &secrets,
+        allow_host_specs: &allow_hosts,
+        mount_specs: &mounts,
+        audit_log_path: audit_log.as_deref(),
+        image_name: image_name.as_deref(),
+        guest_env: &cfg.env,
+        discover: args.discover,
+    });
 }
 
 fn import_image(
