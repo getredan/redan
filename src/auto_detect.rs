@@ -147,26 +147,28 @@ fn home_dir() -> Option<String> {
     std::env::var("HOME").ok()
 }
 
+/// Fields from CLI that indicate the user wants manual control (not auto-detect).
+pub struct ExecFlags<'a> {
+    pub image: &'a Option<String>,
+    pub rootfs: &'a Option<String>,
+    pub command: &'a [String],
+    pub secrets: &'a [String],
+    pub secret_file: &'a Option<String>,
+    pub mounts: &'a [String],
+    pub discover: bool,
+    pub detach: bool,
+}
+
 /// Check if any explicit exec flags were provided on the CLI.
-///
-/// Returns true if the user passed flags that indicate they want
-/// manual control (not auto-detect).
-pub const fn has_explicit_flags(
-    image: &Option<String>,
-    rootfs: &Option<String>,
-    command: &[String],
-    secrets: &[String],
-    secret_file: &Option<String>,
-    mounts: &[String],
-    discover: bool,
-) -> bool {
-    image.is_some()
-        || rootfs.is_some()
-        || !command.is_empty()
-        || !secrets.is_empty()
-        || secret_file.is_some()
-        || !mounts.is_empty()
-        || discover
+pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
+    f.image.is_some()
+        || f.rootfs.is_some()
+        || !f.command.is_empty()
+        || !f.secrets.is_empty()
+        || f.secret_file.is_some()
+        || !f.mounts.is_empty()
+        || f.discover
+        || f.detach
 }
 
 #[cfg(test)]
@@ -183,12 +185,10 @@ mod tests {
         assert_eq!(auto.config.interactive, Some(true));
         assert!(!auto.needs_image_build);
 
-        // Secret should be env:// reference, not the literal key
         let secret = auto.config.secrets.get("ANTHROPIC_API_KEY").unwrap();
         assert_eq!(secret.value, "env://ANTHROPIC_API_KEY");
         assert_eq!(secret.hosts, vec!["api.anthropic.com"]);
 
-        // Network should have Claude hosts
         assert!(
             auto.config
                 .network
@@ -202,10 +202,7 @@ mod tests {
                 .contains(&"statsig.anthropic.com".to_string())
         );
 
-        // Mount should have workspace
         assert!(auto.config.mount.contains_key("workspace"));
-
-        // Messages should describe what was chosen
         assert!(auto.messages.iter().any(|m| m.contains("claude-code")));
         assert!(
             auto.messages
@@ -224,57 +221,63 @@ mod tests {
 
     #[test]
     fn detect_returns_none_without_api_key() {
-        let result = detect_with_env(None, true, Some("/home/testuser"));
-        assert!(result.is_none());
+        assert!(detect_with_env(None, true, Some("/home/testuser")).is_none());
     }
 
     #[test]
     fn detect_returns_none_with_empty_api_key() {
-        let result = detect_with_env(Some(String::new()), true, Some("/home/testuser"));
-        assert!(result.is_none());
+        assert!(detect_with_env(Some(String::new()), true, Some("/home/testuser")).is_none());
+    }
+
+    fn empty_flags() -> ExecFlags<'static> {
+        ExecFlags {
+            image: &None,
+            rootfs: &None,
+            command: &[],
+            secrets: &[],
+            secret_file: &None,
+            mounts: &[],
+            discover: false,
+            detach: false,
+        }
     }
 
     #[test]
-    fn has_explicit_flags_detects_image() {
-        assert!(has_explicit_flags(
-            &Some("myimage".into()),
-            &None,
-            &[],
-            &[],
-            &None,
-            &[],
-            false
-        ));
+    fn explicit_flags_none_when_empty() {
+        assert!(!has_explicit_flags(&empty_flags()));
     }
 
     #[test]
-    fn has_explicit_flags_detects_command() {
-        assert!(has_explicit_flags(
-            &None,
-            &None,
-            &["echo".into(), "hello".into()],
-            &[],
-            &None,
-            &[],
-            false
-        ));
+    fn explicit_flags_detects_image() {
+        let img = Some("myimage".into());
+        assert!(has_explicit_flags(&ExecFlags {
+            image: &img,
+            ..empty_flags()
+        }));
     }
 
     #[test]
-    fn has_explicit_flags_none_when_empty() {
-        assert!(!has_explicit_flags(
-            &None,
-            &None,
-            &[],
-            &[],
-            &None,
-            &[],
-            false
-        ));
+    fn explicit_flags_detects_command() {
+        let cmd = vec!["echo".into(), "hello".into()];
+        assert!(has_explicit_flags(&ExecFlags {
+            command: &cmd,
+            ..empty_flags()
+        }));
     }
 
     #[test]
-    fn has_explicit_flags_detects_discover() {
-        assert!(has_explicit_flags(&None, &None, &[], &[], &None, &[], true));
+    fn explicit_flags_detects_discover() {
+        assert!(has_explicit_flags(&ExecFlags {
+            discover: true,
+            ..empty_flags()
+        }));
+    }
+
+    #[test]
+    fn explicit_flags_detects_detach() {
+        assert!(has_explicit_flags(&ExecFlags {
+            detach: true,
+            ..empty_flags()
+        }));
     }
 }

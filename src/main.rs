@@ -151,6 +151,26 @@ enum Cli {
         /// Run once to find out what hosts the agent needs, then lock down.
         #[arg(long)]
         discover: bool,
+
+        /// Run session in the background. Use `redan attach` to reconnect.
+        #[arg(long, short = 'd')]
+        detach: bool,
+
+        /// Name this session for easy reference (e.g., `redan attach my-agent`).
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Attach to a running session
+    Attach {
+        /// Session ID or name (default: most recent running session)
+        session: Option<String>,
+    },
+
+    /// Stop a running session
+    Stop {
+        /// Session ID or name (default: most recent running session)
+        session: Option<String>,
     },
 
     /// Manage rootfs images
@@ -259,6 +279,8 @@ fn main() {
             audit_log,
             log_file: _,
             discover,
+            detach,
+            name,
         } => {
             exec_command(ExecArgs {
                 image_name,
@@ -272,8 +294,12 @@ fn main() {
                 mounts,
                 audit_log,
                 discover,
+                detach,
+                name,
             });
         }
+        Cli::Attach { session } => attach_session(session.as_deref()),
+        Cli::Stop { session } => stop_session(session.as_deref()),
 
         Cli::Image { action } => match action {
             ImageAction::Create {
@@ -436,6 +462,8 @@ struct ExecArgs {
     mounts: Vec<String>,
     audit_log: Option<String>,
     discover: bool,
+    detach: bool,
+    name: Option<String>,
 }
 
 fn exec_command(args: ExecArgs) {
@@ -444,15 +472,16 @@ fn exec_command(args: ExecArgs) {
         eprintln!("config: {}", path.display());
     }
 
-    let explicit = redan::auto_detect::has_explicit_flags(
-        &args.image_name,
-        &args.rootfs,
-        &args.command,
-        &args.secrets,
-        &args.secret_file,
-        &args.mounts,
-        args.discover,
-    );
+    let explicit = redan::auto_detect::has_explicit_flags(&redan::auto_detect::ExecFlags {
+        image: &args.image_name,
+        rootfs: &args.rootfs,
+        command: &args.command,
+        secrets: &args.secrets,
+        secret_file: &args.secret_file,
+        mounts: &args.mounts,
+        discover: args.discover,
+        detach: args.detach,
+    });
 
     // Three paths:
     // 1. Config file exists → use it (existing behavior)
@@ -576,7 +605,140 @@ fn exec_command(args: ExecArgs) {
         image_name: image_name.as_deref(),
         guest_env: &cfg.env,
         discover: args.discover,
+        session_name: args.name.as_deref(),
     });
+}
+
+fn attach_session(id_or_name: Option<&str>) {
+    let meta = session::find_session(id_or_name).unwrap_or_else(|| {
+        if let Some(q) = id_or_name {
+            eprintln!("session '{q}' not found");
+        } else {
+            eprintln!("no sessions found");
+        }
+        std::process::exit(1);
+    });
+
+    if !meta.is_alive() {
+        eprintln!("session {} is not running", meta.id);
+        std::process::exit(1);
+    }
+
+    let sock_path = meta.console_socket.unwrap_or_else(|| {
+        eprintln!(
+            "session {} has no console socket (started without --detach?)",
+            meta.id
+        );
+        std::process::exit(1);
+    });
+
+    let sock_path = std::path::Path::new(&sock_path);
+    if !sock_path.exists() {
+        eprintln!("console socket not found: {}", sock_path.display());
+        std::process::exit(1);
+    }
+
+    eprintln!("attaching to session {} ...", meta.id);
+
+    let stream = std::os::unix::net::UnixStream::connect(sock_path).unwrap_or_else(|e| {
+        eprintln!("cannot connect to console: {e}");
+        std::process::exit(1);
+    });
+
+    // Raw terminal mode for interactive I/O
+    let _raw_guard = redan::terminal::RawTerminalGuard::enter();
+
+    // Relay between stdin/stdout and the console socket
+    let reader = stream.try_clone().unwrap_or_else(|e| {
+        eprintln!("cannot clone socket: {e}");
+        std::process::exit(1);
+    });
+
+    // Socket → stdout
+    let stdout_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    use std::io::Write;
+                    let _ = std::io::stdout().write_all(&buf[..n]);
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        }
+    });
+
+    // stdin → socket
+    {
+        use std::io::Read;
+        let mut writer = stream;
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    use std::io::Write;
+                    if writer.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = stdout_thread.join();
+    eprintln!("\ndetached from session {}", meta.id);
+}
+
+fn stop_session(id_or_name: Option<&str>) {
+    let meta = session::find_session(id_or_name).unwrap_or_else(|| {
+        if let Some(q) = id_or_name {
+            eprintln!("session '{q}' not found");
+        } else {
+            eprintln!("no sessions found");
+        }
+        std::process::exit(1);
+    });
+
+    if !meta.is_alive() {
+        eprintln!("session {} is not running", meta.id);
+        std::process::exit(1);
+    }
+
+    let pid = meta.pid.unwrap_or_else(|| {
+        eprintln!("session {} has no pid recorded", meta.id);
+        std::process::exit(1);
+    });
+
+    eprintln!("stopping session {} (pid {pid})...", meta.id);
+
+    // Send SIGTERM for graceful shutdown
+    let ret = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
+    if ret != 0 {
+        eprintln!(
+            "failed to send SIGTERM: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(1);
+    }
+
+    // Wait briefly for exit, then SIGKILL
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !meta.is_alive() {
+            eprintln!("session {} stopped", meta.id);
+            return;
+        }
+    }
+
+    eprintln!("session {} did not exit, sending SIGKILL", meta.id);
+    unsafe {
+        libc::kill(pid.cast_signed(), libc::SIGKILL);
+    }
+    eprintln!("session {} killed", meta.id);
 }
 
 fn import_image(

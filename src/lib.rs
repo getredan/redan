@@ -17,5 +17,6 @@ pub mod proxy;
 pub mod secret;
 pub mod session;
 pub mod templates;
+pub mod terminal;
 pub mod tls;
 pub mod vm;

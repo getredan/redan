@@ -21,12 +21,14 @@ pub(crate) struct ExecConfig<'a> {
     pub image_name: Option<&'a str>,
     pub guest_env: &'a BTreeMap<String, String>,
     pub discover: bool,
+    pub session_name: Option<&'a str>,
 }
 
 pub(crate) fn run(cfg: &ExecConfig<'_>) {
     // Create session
     let session_id = session::new_id();
     let mut meta = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
+    meta.name = cfg.session_name.map(Into::into);
     if let Err(e) = meta.save() {
         log::warn!("cannot save session metadata: {e}");
     }
@@ -195,7 +197,7 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
 
     // In interactive mode, set the host terminal to raw mode
     let _raw_guard = if cfg.interactive {
-        Some(RawTerminalGuard::enter())
+        Some(redan::terminal::RawTerminalGuard::enter())
     } else {
         None
     };
@@ -352,36 +354,6 @@ fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
         return;
     }
     let _ = std::fs::write(dir.join("policy"), templates::guest_policy(allowed_hosts));
-}
-
-/// RAII guard: raw terminal mode on creation, restore on drop.
-struct RawTerminalGuard {
-    original: libc::termios,
-}
-
-impl RawTerminalGuard {
-    fn enter() -> Self {
-        unsafe {
-            let mut original: libc::termios = std::mem::zeroed();
-            libc::tcgetattr(libc::STDIN_FILENO, std::ptr::from_mut(&mut original));
-            let mut raw = original;
-            libc::cfmakeraw(std::ptr::from_mut(&mut raw));
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, std::ptr::from_ref(&raw));
-            Self { original }
-        }
-    }
-}
-
-impl Drop for RawTerminalGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(
-                libc::STDIN_FILENO,
-                libc::TCSANOW,
-                std::ptr::from_ref(&self.original),
-            );
-        }
-    }
 }
 
 #[cfg(test)]
