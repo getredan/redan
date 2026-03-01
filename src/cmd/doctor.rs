@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::exec::parse_secret;
 use redan::image;
+use redan::image_meta::ImageMeta;
 
 pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
@@ -63,6 +64,18 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
         );
     } else {
         println!("[ok]   images: {}", images.join(", "));
+    }
+
+    // Check image freshness
+    for name in &images {
+        if let Ok(path) = image::image_path(name)
+            && let Some(meta) = ImageMeta::load(&path)
+            && let Some(days) = meta.age_days()
+            && days > 30
+        {
+            println!("[warn] image {name}: {days} days old");
+            println!("       run: redan image update {name}");
+        }
     }
 
     if let Some(name) = check_image {

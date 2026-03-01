@@ -235,6 +235,8 @@ enum ImageAction {
     List,
     /// Remove an image
     Remove { name: String },
+    /// Rebuild an image from its original source
+    Update { name: String },
     /// Import from Docker image, Dockerfile, or devcontainer
     Import {
         /// Image name to create
@@ -341,10 +343,14 @@ fn main() {
                             continue;
                         };
                         let size = cmd::doctor::dir_size(&path);
-                        println!("{name:20} {}", cmd::doctor::humanize_bytes(size));
+                        let age = redan::image_meta::ImageMeta::load(&path)
+                            .and_then(|m| m.age_days())
+                            .map_or(String::new(), |d| format!("  ({d}d ago)"));
+                        println!("{name:20} {}{}", cmd::doctor::humanize_bytes(size), age);
                     }
                 }
             }
+            ImageAction::Update { name } => update_image(&name),
             ImageAction::Remove { name } => match image::remove(&name) {
                 Ok(()) => eprintln!("removed image '{name}'"),
                 Err(e) => {
@@ -914,6 +920,60 @@ fn stop_session(id_or_name: Option<&str>) {
         libc::kill(pid.cast_signed(), libc::SIGKILL);
     }
     eprintln!("session {} killed", meta.id);
+}
+
+fn update_image(name: &str) {
+    let path = match image::image_path(name) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if !path.exists() {
+        eprintln!("image '{name}' not found");
+        std::process::exit(1);
+    }
+
+    let meta = redan::image_meta::ImageMeta::load(&path).unwrap_or_else(|| {
+        eprintln!("image '{name}' has no build metadata (cannot determine how it was built)");
+        eprintln!("  remove and rebuild manually: redan image remove {name}");
+        std::process::exit(1);
+    });
+
+    eprintln!("updating image '{name}'...");
+
+    // Remove old image first
+    if let Err(e) = image::remove(name) {
+        eprintln!("cannot remove old image: {e}");
+        std::process::exit(1);
+    }
+
+    let result = match &meta.source {
+        redan::image_meta::ImageSource::Dockerfile { path } => image::import_dockerfile(name, path),
+        redan::image_meta::ImageSource::Docker { image: img } => image::import_docker(name, img),
+        redan::image_meta::ImageSource::Devcontainer { path } => {
+            let config_path = cmd::init::resolve_devcontainer_path(path);
+            image::import_devcontainer(name, &config_path)
+        }
+        redan::image_meta::ImageSource::Create {
+            packages,
+            run_commands,
+        } => image::create(name, packages, run_commands),
+        redan::image_meta::ImageSource::Unknown => {
+            eprintln!("image '{name}' was built from an unknown source, cannot update");
+            eprintln!("  remove and rebuild manually: redan image remove {name}");
+            std::process::exit(1);
+        }
+    };
+
+    match result {
+        Ok(_) => eprintln!("image '{name}' updated"),
+        Err(e) => {
+            eprintln!("update failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn import_image(

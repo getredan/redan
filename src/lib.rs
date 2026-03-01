@@ -11,6 +11,7 @@ pub mod dns;
 pub mod error;
 pub mod ffi;
 pub mod image;
+pub mod image_meta;
 pub mod net;
 pub mod provider;
 pub mod proxy;
