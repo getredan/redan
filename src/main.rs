@@ -371,17 +371,20 @@ fn main() {
             None => {
                 let sessions = session::list_sessions();
                 if sessions.is_empty() {
-                    eprintln!("no sessions. Run: redan exec --image <name> -- <command>");
+                    eprintln!("no sessions. Run: redan exec");
                 } else {
                     for s in &sessions {
                         let status = session_status_label(s);
-                        println!(
-                            "{}  {:10} {:20} {}",
-                            s.id,
-                            status,
-                            s.image.as_deref().unwrap_or("-"),
-                            s.started_at,
-                        );
+                        let name = s.name.as_deref().unwrap_or("");
+                        let image = s.image.as_deref().unwrap_or("-");
+                        if name.is_empty() {
+                            println!("{}  {:10} {:20} {}", s.id, status, image, s.started_at,);
+                        } else {
+                            println!(
+                                "{}  {:10} {:20} {} ({})",
+                                s.id, status, image, s.started_at, name,
+                            );
+                        }
                     }
                 }
             }
