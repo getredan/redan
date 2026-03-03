@@ -69,7 +69,7 @@ jobs:
             > redan-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: redan-${{ matrix.arch }}
           path: |
