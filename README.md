@@ -185,8 +185,9 @@ redan exec --image claude-code \
 ```
 
 **Note:** `--secret` literal values are visible in process listings (`ps`).
-For production use, prefer `env://`, `vault://`, `--secret-file`, or
-shell expansion: `--secret "KEY=$(cat /path/to/secret):host"`.
+For production use, prefer `env://`, `vault://`, or `--secret-file`,
+which keep secrets out of process listings by having redan read them
+internally.
 
 ### Check prerequisites
 
