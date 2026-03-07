@@ -683,13 +683,21 @@ fn exec_detached(
     discover: bool,
     session_name: Option<&str>,
 ) {
-    // Create session directory and write daemon config
+    // Create session directory and write daemon config.
+    // Directory is 0o700 and config file is 0o600 because the config
+    // contains secret specs that are briefly on disk until the daemon
+    // reads and deletes them.
     let session_id = session::new_id();
     let session_dir = session::session_dir(&session_id);
     std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| {
         eprintln!("cannot create session dir: {e}");
         std::process::exit(1);
     });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700));
+    }
 
     let daemon_cfg = DaemonConfig {
         rootfs: rootfs.into(),
@@ -710,10 +718,22 @@ fn exec_detached(
         eprintln!("cannot serialize daemon config: {e}");
         std::process::exit(1);
     });
-    std::fs::write(&config_path, &config_json).unwrap_or_else(|e| {
-        eprintln!("cannot write daemon config: {e}");
-        std::process::exit(1);
-    });
+    {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        opts.open(&config_path)
+            .and_then(|mut f| f.write_all(config_json.as_bytes()))
+            .unwrap_or_else(|e| {
+                eprintln!("cannot write daemon config: {e}");
+                std::process::exit(1);
+            });
+    }
 
     // Spawn daemon process
     let exe = std::env::current_exe().unwrap_or_else(|e| {
@@ -766,6 +786,10 @@ fn exec_detached(
 }
 
 fn run_daemon(session_id: &str) {
+    if !session::valid_session_id(session_id) {
+        eprintln!("invalid session ID: {session_id}");
+        std::process::exit(1);
+    }
     let session_dir = session::session_dir(session_id);
     let config_path = session_dir.join("daemon_config.json");
 
@@ -836,7 +860,10 @@ fn attach_session(id_or_name: Option<&str>) {
     });
 
     // Raw terminal mode for interactive I/O
-    let _raw_guard = redan::terminal::RawTerminalGuard::enter();
+    let _raw_guard = redan::terminal::RawTerminalGuard::enter().unwrap_or_else(|e| {
+        eprintln!("cannot enter raw terminal mode: {e}");
+        std::process::exit(1);
+    });
 
     // Relay between stdin/stdout and the console socket
     let reader = stream.try_clone().unwrap_or_else(|e| {

@@ -50,7 +50,7 @@ fn detect_with_env(
     // For now, we only auto-detect Claude Code setups.
     // Future: detect other agent types (Codex, etc.)
     let api_key = anthropic_key?;
-    if api_key.is_empty() {
+    if api_key.trim().is_empty() {
         return None;
     }
 
@@ -112,7 +112,7 @@ fn detect_with_env(
                     target: Some("/home/dev/.gitconfig".into()),
                 },
             );
-            messages.push("Mounting ~/.gitconfig (read-only)".into());
+            messages.push("Mounting ~/.gitconfig".into());
         }
 
         let ssh_dir = Path::new(home).join(".ssh");
@@ -124,7 +124,7 @@ fn detect_with_env(
                     target: Some("/home/dev/.ssh".into()),
                 },
             );
-            messages.push("Mounting ~/.ssh (read-only)".into());
+            messages.push("Mounting ~/.ssh".into());
         }
     }
 

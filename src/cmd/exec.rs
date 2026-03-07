@@ -29,15 +29,21 @@ pub(crate) struct ExecConfig<'a> {
 pub(crate) fn run(cfg: &ExecConfig<'_>) {
     // Create or reuse session
     let session_id = cfg.session_id.map_or_else(session::new_id, Into::into);
+    if cfg.session_id.is_some() && !session::valid_session_id(&session_id) {
+        eprintln!("invalid session ID: {session_id}");
+        std::process::exit(1);
+    }
     let mut meta = if cfg.session_id.is_some() {
         // Daemon mode: reload existing metadata (written by exec_detached)
         let meta_path = session::session_dir(&session_id).join("meta.json");
-        std::fs::read_to_string(&meta_path)
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_else(|| {
-                session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command))
-            })
+        let json = std::fs::read_to_string(&meta_path).unwrap_or_else(|e| {
+            eprintln!("cannot read session metadata {}: {e}", meta_path.display());
+            std::process::exit(1);
+        });
+        serde_json::from_str(&json).unwrap_or_else(|e| {
+            eprintln!("invalid session metadata {}: {e}", meta_path.display());
+            std::process::exit(1);
+        })
     } else {
         let mut m = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
         m.name = cfg.session_name.map(Into::into);
@@ -211,7 +217,13 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
 
     // In interactive mode, set the host terminal to raw mode
     let _raw_guard = if cfg.interactive {
-        Some(redan::terminal::RawTerminalGuard::enter())
+        match redan::terminal::RawTerminalGuard::enter() {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                eprintln!("warning: cannot enter raw terminal mode: {e}");
+                None
+            }
+        }
     } else {
         None
     };

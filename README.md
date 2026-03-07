@@ -80,11 +80,11 @@ builds the `claude-code` image if needed, mounts the current directory,
 allows Anthropic's API hosts, and drops you into an interactive session.
 It prints what it chose so nothing is silent:
 
-```
+```text
   Using image: claude-code
   Injecting ANTHROPIC_API_KEY for api.anthropic.com
-  Mounting ~/.gitconfig (read-only)
-  Mounting ~/.ssh (read-only)
+  Mounting ~/.gitconfig
+  Mounting ~/.ssh
   Mounting current directory → /workspace
 ```
 
