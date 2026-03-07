@@ -498,7 +498,6 @@ fn exec_command(args: ExecArgs) {
         secret_file: &args.secret_file,
         mounts: &args.mounts,
         discover: args.discover,
-        detach: args.detach,
     });
 
     // Three paths:

@@ -147,7 +147,9 @@ fn home_dir() -> Option<String> {
     std::env::var("HOME").ok()
 }
 
-/// Fields from CLI that indicate the user wants manual control (not auto-detect).
+/// Config-level fields from CLI that indicate the user wants manual control
+/// (not auto-detect). Mode flags like --detach and --name are excluded;
+/// they modify how the session runs, not what it runs.
 pub struct ExecFlags<'a> {
     pub image: &'a Option<String>,
     pub rootfs: &'a Option<String>,
@@ -156,10 +158,11 @@ pub struct ExecFlags<'a> {
     pub secret_file: &'a Option<String>,
     pub mounts: &'a [String],
     pub discover: bool,
-    pub detach: bool,
 }
 
-/// Check if any explicit exec flags were provided on the CLI.
+/// Whether the user passed any config-level flags (image, secrets, mounts, etc.).
+/// Mode flags like --detach and --name don't count; they modify how the
+/// session runs, not what it runs.
 pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
     f.image.is_some()
         || f.rootfs.is_some()
@@ -168,7 +171,6 @@ pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
         || f.secret_file.is_some()
         || !f.mounts.is_empty()
         || f.discover
-        || f.detach
 }
 
 #[cfg(test)]
@@ -238,7 +240,6 @@ mod tests {
             secret_file: &None,
             mounts: &[],
             discover: false,
-            detach: false,
         }
     }
 
@@ -269,14 +270,6 @@ mod tests {
     fn explicit_flags_detects_discover() {
         assert!(has_explicit_flags(&ExecFlags {
             discover: true,
-            ..empty_flags()
-        }));
-    }
-
-    #[test]
-    fn explicit_flags_detects_detach() {
-        assert!(has_explicit_flags(&ExecFlags {
-            detach: true,
             ..empty_flags()
         }));
     }

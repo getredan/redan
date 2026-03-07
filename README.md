@@ -448,7 +448,7 @@ redan stop my-agent           # stop by name or ID prefix
 ```bash
 redan logs                    # logs from most recent session
 redan logs -f                 # tail -f
-redan logs my-agent           # logs by session ID
+redan logs my-agent           # logs by name or session ID
 ```
 
 ## Audit log
