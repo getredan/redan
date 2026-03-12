@@ -151,6 +151,26 @@ enum Cli {
         /// Run once to find out what hosts the agent needs, then lock down.
         #[arg(long)]
         discover: bool,
+
+        /// Run session in the background. Use `redan attach` to reconnect.
+        #[arg(long, short = 'd')]
+        detach: bool,
+
+        /// Name this session for easy reference (e.g., `redan attach my-agent`).
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Attach to a running session
+    Attach {
+        /// Session ID or name (default: most recent running session)
+        session: Option<String>,
+    },
+
+    /// Stop a running session
+    Stop {
+        /// Session ID or name (default: most recent running session)
+        session: Option<String>,
     },
 
     /// Manage rootfs images
@@ -172,6 +192,14 @@ enum Cli {
         /// Follow (tail -f)
         #[arg(short, long)]
         follow: bool,
+    },
+
+    /// Internal: daemon process for detached sessions. Not user-facing.
+    #[command(hide = true)]
+    Daemon {
+        /// Session ID to run
+        #[arg(long)]
+        session: String,
     },
 
     /// Generate redan.toml and image config for a project
@@ -207,6 +235,8 @@ enum ImageAction {
     List,
     /// Remove an image
     Remove { name: String },
+    /// Rebuild an image from its original source
+    Update { name: String },
     /// Import from Docker image, Dockerfile, or devcontainer
     Import {
         /// Image name to create
@@ -259,93 +289,28 @@ fn main() {
             audit_log,
             log_file: _,
             discover,
+            detach,
+            name,
         } => {
-            let cfg = config::find_and_load();
-            if let Some((path, _)) = &cfg {
-                eprintln!("config: {}", path.display());
-            }
-            let cfg = cfg.map(|(_, c)| c).unwrap_or_default();
-
-            let mut all_secrets = cmd::exec::collect_secret_specs(&secrets, secret_file.as_deref());
-            all_secrets.extend(cfg.secret_specs());
-            let secrets = all_secrets;
-
-            let image_name = image_name.or_else(|| cfg.image.clone());
-            let rootfs = rootfs.or_else(|| cfg.rootfs.clone());
-            // Trailing args after -- joined into a shell command.
-            // Falls back to config file, then /bin/sh for interactive.
-            let command = if command.is_empty() {
-                cfg.command.clone()
-            } else {
-                Some(shell_words::join(&command))
-            };
-            let timeout = timeout.or(cfg.timeout).unwrap_or(3600);
-            let interactive = interactive || cfg.interactive.unwrap_or(false);
-            let audit_log = audit_log.or_else(|| cfg.audit_log.clone());
-
-            let mut allow_hosts = allow_hosts;
-            allow_hosts.extend(cfg.network.allow.clone());
-
-            // Import allowedDomains from Claude Code settings if present.
-            // Lets users define network policy once in .claude/settings.json
-            // and have redan enforce it with real VM isolation.
-            let claude_domains = config::claude_allowed_domains();
-            if !claude_domains.is_empty() {
-                log::info!(
-                    "imported {} domains from Claude Code settings",
-                    claude_domains.len()
-                );
-                allow_hosts.extend(claude_domains);
-            }
-
-            let mut mounts = mounts;
-            mounts.extend(cfg.mount_specs());
-
-            let rootfs_path = match (&image_name, &rootfs) {
-                (Some(name), _) => {
-                    let p = match image::image_path(name) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            std::process::exit(1);
-                        }
-                    };
-                    if !p.exists() {
-                        eprintln!("image '{name}' not found. Run: redan image create {name} ...");
-                        std::process::exit(1);
-                    }
-                    p.to_string_lossy().into_owned()
-                }
-                (_, Some(path)) => path.clone(),
-                (None, None) => {
-                    eprintln!("no image specified. Set image in redan.toml or pass --image <name>");
-                    eprintln!("  redan init          generate a redan.toml");
-                    eprintln!("  redan image list    show available images");
-                    std::process::exit(1);
-                }
-            };
-            let command = command.unwrap_or_else(|| {
-                if interactive {
-                    "/bin/sh".to_string()
-                } else {
-                    "echo 'no command specified; use: redan exec --image <name> -- <command>'"
-                        .to_string()
-                }
-            });
-            cmd::exec::run(&cmd::exec::ExecConfig {
-                rootfs: &rootfs_path,
-                command: &command,
+            exec_command(ExecArgs {
+                image_name,
+                rootfs,
+                command,
                 interactive,
-                timeout_secs: timeout,
-                secret_specs: &secrets,
-                allow_host_specs: &allow_hosts,
-                mount_specs: &mounts,
-                audit_log_path: audit_log.as_deref(),
-                image_name: image_name.as_deref(),
-                guest_env: &cfg.env,
+                timeout,
+                secrets,
+                secret_file,
+                allow_hosts,
+                mounts,
+                audit_log,
                 discover,
+                detach,
+                name,
             });
         }
+        Cli::Attach { session } => attach_session(session.as_deref()),
+        Cli::Stop { session } => stop_session(session.as_deref()),
+        Cli::Daemon { session } => run_daemon(&session),
 
         Cli::Image { action } => match action {
             ImageAction::Create {
@@ -378,10 +343,14 @@ fn main() {
                             continue;
                         };
                         let size = cmd::doctor::dir_size(&path);
-                        println!("{name:20} {}", cmd::doctor::humanize_bytes(size));
+                        let age = redan::image_meta::ImageMeta::load(&path)
+                            .and_then(|m| m.age_days())
+                            .map_or(String::new(), |d| format!("  ({d}d ago)"));
+                        println!("{name:20} {}{}", cmd::doctor::humanize_bytes(size), age);
                     }
                 }
             }
+            ImageAction::Update { name } => update_image(&name),
             ImageAction::Remove { name } => match image::remove(&name) {
                 Ok(()) => eprintln!("removed image '{name}'"),
                 Err(e) => {
@@ -408,17 +377,20 @@ fn main() {
             None => {
                 let sessions = session::list_sessions();
                 if sessions.is_empty() {
-                    eprintln!("no sessions. Run: redan exec --image <name> -- <command>");
+                    eprintln!("no sessions. Run: redan exec");
                 } else {
                     for s in &sessions {
                         let status = session_status_label(s);
-                        println!(
-                            "{}  {:10} {:20} {}",
-                            s.id,
-                            status,
-                            s.image.as_deref().unwrap_or("-"),
-                            s.started_at,
-                        );
+                        let name = s.name.as_deref().unwrap_or("");
+                        let image = s.image.as_deref().unwrap_or("-");
+                        if name.is_empty() {
+                            println!("{}  {:10} {:20} {}", s.id, status, image, s.started_at,);
+                        } else {
+                            println!(
+                                "{}  {:10} {:20} {} ({})",
+                                s.id, status, image, s.started_at, name,
+                            );
+                        }
                     }
                 }
             }
@@ -496,6 +468,581 @@ fn main() {
     }
 }
 
+struct ExecArgs {
+    image_name: Option<String>,
+    rootfs: Option<String>,
+    command: Vec<String>,
+    interactive: bool,
+    timeout: Option<u64>,
+    secrets: Vec<String>,
+    secret_file: Option<String>,
+    allow_hosts: Vec<String>,
+    mounts: Vec<String>,
+    audit_log: Option<String>,
+    discover: bool,
+    detach: bool,
+    name: Option<String>,
+}
+
+fn exec_command(args: ExecArgs) {
+    let config_file = config::find_and_load();
+    if let Some((ref path, _)) = config_file {
+        eprintln!("config: {}", path.display());
+    }
+
+    let explicit = redan::auto_detect::has_explicit_flags(&redan::auto_detect::ExecFlags {
+        image: &args.image_name,
+        rootfs: &args.rootfs,
+        command: &args.command,
+        secrets: &args.secrets,
+        secret_file: &args.secret_file,
+        mounts: &args.mounts,
+        discover: args.discover,
+    });
+
+    // Three paths:
+    // 1. Config file exists → use it (existing behavior)
+    // 2. Explicit CLI flags → use them (existing behavior)
+    // 3. Neither → try auto-detect
+    let cfg = if let Some((_, cfg)) = config_file {
+        cfg
+    } else if !explicit {
+        // No config, no explicit flags: try auto-detect
+        if let Some(auto) = redan::auto_detect::detect() {
+            if auto.needs_image_build {
+                eprintln!("Building claude-code image (this may take a minute)...");
+                match build_bundled_claude_image() {
+                    Ok(_) => eprintln!("Image claude-code built successfully."),
+                    Err(e) => {
+                        eprintln!("error: failed to build claude-code image: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            for msg in &auto.messages {
+                eprintln!("  {msg}");
+            }
+            auto.config
+        } else {
+            eprintln!("no redan.toml found and auto-detect failed.");
+            eprintln!();
+            if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                eprintln!("  Set ANTHROPIC_API_KEY to auto-detect Claude Code:");
+                eprintln!("    export ANTHROPIC_API_KEY=sk-ant-...");
+                eprintln!();
+            }
+            eprintln!("  Or create a config:");
+            eprintln!("    redan init          generate a redan.toml");
+            eprintln!("    redan init --claude  generate config + devcontainer for Claude Code");
+            eprintln!();
+            eprintln!("  Or specify an image directly:");
+            eprintln!("    redan exec --image <name> -- <command>");
+            eprintln!("    redan image list    show available images");
+            std::process::exit(1);
+        }
+    } else {
+        config::Config::default()
+    };
+
+    let mut all_secrets =
+        cmd::exec::collect_secret_specs(&args.secrets, args.secret_file.as_deref());
+    all_secrets.extend(cfg.secret_specs());
+    let secrets = all_secrets;
+
+    let image_name = args.image_name.or_else(|| cfg.image.clone());
+    let rootfs = args.rootfs.or_else(|| cfg.rootfs.clone());
+    let command = if args.command.is_empty() {
+        cfg.command.clone()
+    } else {
+        Some(shell_words::join(&args.command))
+    };
+    let timeout = args.timeout.or(cfg.timeout).unwrap_or(3600);
+    let interactive = args.interactive || cfg.interactive.unwrap_or(false);
+    let audit_log = args.audit_log.or_else(|| cfg.audit_log.clone());
+
+    let mut allow_hosts = args.allow_hosts;
+    allow_hosts.extend(cfg.network.allow.clone());
+
+    // Import allowedDomains from Claude Code settings if present.
+    let claude_domains = config::claude_allowed_domains();
+    if !claude_domains.is_empty() {
+        log::info!(
+            "imported {} domains from Claude Code settings",
+            claude_domains.len()
+        );
+        allow_hosts.extend(claude_domains);
+    }
+
+    let mut mounts = args.mounts;
+    mounts.extend(cfg.mount_specs());
+
+    let rootfs_path = match (&image_name, &rootfs) {
+        (Some(name), _) => {
+            let p = match image::image_path(name) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if !p.exists() {
+                eprintln!("image '{name}' not found. Run: redan image create {name} ...");
+                std::process::exit(1);
+            }
+            // Warn about stale images (don't block execution)
+            if let Some(meta) = redan::image_meta::ImageMeta::load(&p)
+                && let Some(days) = meta.age_days()
+                && days > 30
+            {
+                eprintln!(
+                    "warning: image '{name}' is {days} days old. Run: redan image update {name}"
+                );
+            }
+            p.to_string_lossy().into_owned()
+        }
+        (_, Some(path)) => path.clone(),
+        (None, None) => {
+            eprintln!("no image specified. Set image in redan.toml or pass --image <name>");
+            eprintln!("  redan init          generate a redan.toml");
+            eprintln!("  redan image list    show available images");
+            std::process::exit(1);
+        }
+    };
+    let command = command.unwrap_or_else(|| {
+        if interactive {
+            "/bin/sh".to_string()
+        } else {
+            "echo 'no command specified; use: redan exec --image <name> -- <command>'".to_string()
+        }
+    });
+    if args.detach {
+        exec_detached(
+            &rootfs_path,
+            &command,
+            timeout,
+            &secrets,
+            &allow_hosts,
+            &mounts,
+            audit_log.as_deref(),
+            image_name.as_deref(),
+            &cfg.env,
+            args.discover,
+            args.name.as_deref(),
+        );
+    } else {
+        cmd::exec::run(&cmd::exec::ExecConfig {
+            rootfs: &rootfs_path,
+            command: &command,
+            interactive,
+            timeout_secs: timeout,
+            secret_specs: &secrets,
+            allow_host_specs: &allow_hosts,
+            mount_specs: &mounts,
+            audit_log_path: audit_log.as_deref(),
+            image_name: image_name.as_deref(),
+            guest_env: &cfg.env,
+            discover: args.discover,
+            session_name: args.name.as_deref(),
+            session_id: None,
+        });
+    }
+}
+
+/// Serializable exec config for passing to the daemon process.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DaemonConfig {
+    rootfs: String,
+    command: String,
+    timeout_secs: u64,
+    secrets: Vec<String>,
+    allow_hosts: Vec<String>,
+    mounts: Vec<String>,
+    audit_log: Option<String>,
+    image_name: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
+    discover: bool,
+    session_name: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exec_detached(
+    rootfs: &str,
+    command: &str,
+    timeout: u64,
+    secrets: &[String],
+    allow_hosts: &[String],
+    mounts: &[String],
+    audit_log: Option<&str>,
+    image_name: Option<&str>,
+    env: &std::collections::BTreeMap<String, String>,
+    discover: bool,
+    session_name: Option<&str>,
+) {
+    // Create session directory and write daemon config.
+    // Directory is 0o700 and config file is 0o600 because the config
+    // contains secret specs that are briefly on disk until the daemon
+    // reads and deletes them.
+    let session_id = session::new_id();
+    let session_dir = session::session_dir(&session_id);
+    std::fs::create_dir_all(&session_dir).unwrap_or_else(|e| {
+        eprintln!("cannot create session dir: {e}");
+        std::process::exit(1);
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let daemon_cfg = DaemonConfig {
+        rootfs: rootfs.into(),
+        command: command.into(),
+        timeout_secs: timeout,
+        secrets: secrets.to_vec(),
+        allow_hosts: allow_hosts.to_vec(),
+        mounts: mounts.to_vec(),
+        audit_log: audit_log.map(Into::into),
+        image_name: image_name.map(Into::into),
+        env: env.clone(),
+        discover,
+        session_name: session_name.map(Into::into),
+    };
+
+    let config_path = session_dir.join("daemon_config.json");
+    let config_json = serde_json::to_string(&daemon_cfg).unwrap_or_else(|e| {
+        eprintln!("cannot serialize daemon config: {e}");
+        std::process::exit(1);
+    });
+    {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        opts.open(&config_path)
+            .and_then(|mut f| f.write_all(config_json.as_bytes()))
+            .unwrap_or_else(|e| {
+                eprintln!("cannot write daemon config: {e}");
+                std::process::exit(1);
+            });
+    }
+
+    // Spawn daemon process. If anything fails before the child starts,
+    // clean up the session dir (it contains daemon_config.json with secret specs).
+    let cleanup_and_exit = |msg: &str, err: &dyn std::fmt::Display| -> ! {
+        eprintln!("{msg}: {err}");
+        let _ = std::fs::remove_dir_all(&session_dir);
+        std::process::exit(1);
+    };
+
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        cleanup_and_exit("cannot find redan executable", &e);
+    });
+
+    let log_path = session_dir.join("redan.log");
+    let log_file = std::fs::File::create(&log_path).unwrap_or_else(|e| {
+        cleanup_and_exit("cannot create log file", &e);
+    });
+
+    let mut child = std::process::Command::new(exe)
+        .arg("daemon")
+        .arg("--session")
+        .arg(&session_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone().unwrap_or_else(|e| {
+            cleanup_and_exit("cannot clone log file handle", &e);
+        }))
+        .stderr(log_file)
+        .spawn()
+        .unwrap_or_else(|e| {
+            cleanup_and_exit("cannot spawn daemon", &e);
+        });
+
+    let daemon_pid = child.id();
+
+    // Detach from child: parent exits soon, daemon gets reparented to init.
+    // Spawn a thread to wait() so we don't leave a zombie if parent lingers.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    // Write initial session metadata
+    let mut meta = session::SessionMeta::new(&session_id, image_name, Some(command));
+    meta.pid = Some(daemon_pid);
+    meta.name = session_name.map(Into::into);
+    if let Err(e) = meta.save() {
+        eprintln!("warning: cannot save session metadata: {e}");
+    }
+
+    let name_display = session_name.map_or(String::new(), |n| format!(" ({n})"));
+    eprintln!("session {session_id}{name_display} started (detached)");
+    eprintln!("  redan logs {session_id} -f  tail logs");
+    eprintln!("  redan stop {session_id}     stop session");
+}
+
+fn run_daemon(session_id: &str) {
+    if !session::valid_session_id(session_id) {
+        eprintln!("invalid session ID: {session_id}");
+        std::process::exit(1);
+    }
+    let session_dir = session::session_dir(session_id);
+    let config_path = session_dir.join("daemon_config.json");
+
+    let config_json = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        eprintln!("cannot read daemon config: {e}");
+        std::process::exit(1);
+    });
+    let cfg: DaemonConfig = serde_json::from_str(&config_json).unwrap_or_else(|e| {
+        eprintln!("invalid daemon config: {e}");
+        std::process::exit(1);
+    });
+
+    // Clean up the config file — it contains secret specs
+    let _ = std::fs::remove_file(&config_path);
+
+    // Run the VM+proxy (non-interactive: daemon has no terminal)
+    cmd::exec::run(&cmd::exec::ExecConfig {
+        rootfs: &cfg.rootfs,
+        command: &cfg.command,
+        interactive: false,
+        timeout_secs: cfg.timeout_secs,
+        secret_specs: &cfg.secrets,
+        allow_host_specs: &cfg.allow_hosts,
+        mount_specs: &cfg.mounts,
+        audit_log_path: cfg.audit_log.as_deref(),
+        image_name: cfg.image_name.as_deref(),
+        guest_env: &cfg.env,
+        discover: cfg.discover,
+        session_name: cfg.session_name.as_deref(),
+        session_id: Some(session_id),
+    });
+}
+
+fn attach_session(id_or_name: Option<&str>) {
+    let mut meta = session::find_session(id_or_name).unwrap_or_else(|| {
+        if let Some(q) = id_or_name {
+            eprintln!("session '{q}' not found");
+        } else {
+            eprintln!("no sessions found");
+        }
+        std::process::exit(1);
+    });
+
+    if !meta.is_alive() {
+        eprintln!("session {} is not running", meta.id);
+        std::process::exit(1);
+    }
+
+    // The daemon may not have written the console socket path to meta.json yet.
+    // Retry briefly (up to 3s) before giving up.
+    let sock_path_str = 'retry: {
+        for _ in 0..10 {
+            if let Some(ref s) = meta.console_socket {
+                break 'retry s.clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Reload meta in case the daemon updated it
+            let meta_path = session::session_dir(&meta.id).join("meta.json");
+            if let Ok(json) = std::fs::read_to_string(&meta_path)
+                && let Ok(fresh) = serde_json::from_str::<session::SessionMeta>(&json)
+            {
+                meta = fresh;
+            }
+        }
+        eprintln!(
+            "session {} has no console socket (started without --detach?)",
+            meta.id
+        );
+        std::process::exit(1);
+    };
+
+    let sock_path = std::path::Path::new(&sock_path_str);
+    if !sock_path.exists() {
+        eprintln!("console socket not found: {}", sock_path.display());
+        std::process::exit(1);
+    }
+
+    eprintln!("attaching to session {} ...", meta.id);
+
+    let stream = std::os::unix::net::UnixStream::connect(sock_path).unwrap_or_else(|e| {
+        eprintln!("cannot connect to console: {e}");
+        std::process::exit(1);
+    });
+
+    // Raw terminal mode for interactive I/O
+    let _raw_guard = redan::terminal::RawTerminalGuard::enter().unwrap_or_else(|e| {
+        eprintln!("cannot enter raw terminal mode: {e}");
+        std::process::exit(1);
+    });
+
+    // Relay between stdin/stdout and the console socket
+    let reader = stream.try_clone().unwrap_or_else(|e| {
+        eprintln!("cannot clone socket: {e}");
+        std::process::exit(1);
+    });
+
+    // Socket → stdout
+    let stdout_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    use std::io::Write;
+                    let _ = std::io::stdout().write_all(&buf[..n]);
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        }
+    });
+
+    // stdin → socket
+    {
+        use std::io::Read;
+        let mut writer = stream;
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    use std::io::Write;
+                    if writer.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = stdout_thread.join();
+    eprintln!("\ndetached from session {}", meta.id);
+}
+
+fn stop_session(id_or_name: Option<&str>) {
+    let meta = session::find_session(id_or_name).unwrap_or_else(|| {
+        if let Some(q) = id_or_name {
+            eprintln!("session '{q}' not found");
+        } else {
+            eprintln!("no sessions found");
+        }
+        std::process::exit(1);
+    });
+
+    if !meta.is_alive() {
+        eprintln!("session {} is not running", meta.id);
+        std::process::exit(1);
+    }
+
+    let pid = meta.pid.unwrap_or_else(|| {
+        eprintln!("session {} has no pid recorded", meta.id);
+        std::process::exit(1);
+    });
+
+    eprintln!("stopping session {} (pid {pid})...", meta.id);
+
+    // Send SIGTERM for graceful shutdown
+    let ret = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
+    if ret != 0 {
+        eprintln!(
+            "failed to send SIGTERM: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(1);
+    }
+
+    // Wait briefly for exit, then SIGKILL
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if !meta.is_alive() {
+            eprintln!("session {} stopped", meta.id);
+            return;
+        }
+    }
+
+    eprintln!("session {} did not exit, sending SIGKILL", meta.id);
+    unsafe {
+        libc::kill(pid.cast_signed(), libc::SIGKILL);
+    }
+    eprintln!("session {} killed", meta.id);
+}
+
+fn update_image(name: &str) {
+    let path = match image::image_path(name) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if !path.exists() {
+        eprintln!("image '{name}' not found");
+        std::process::exit(1);
+    }
+
+    let meta = redan::image_meta::ImageMeta::load(&path).unwrap_or_else(|| {
+        eprintln!("image '{name}' has no build metadata (cannot determine how it was built)");
+        eprintln!("  remove and rebuild manually: redan image remove {name}");
+        std::process::exit(1);
+    });
+
+    eprintln!("updating image '{name}'...");
+
+    if matches!(meta.source, redan::image_meta::ImageSource::Unknown) {
+        eprintln!("image '{name}' was built from an unknown source, cannot update");
+        eprintln!("  remove and rebuild manually: redan image remove {name}");
+        std::process::exit(1);
+    }
+
+    // Move old image aside so we can restore it if the rebuild fails.
+    // The build functions require the destination not to exist.
+    let backup = {
+        let mut b = path.clone();
+        b.set_extension("bak");
+        b
+    };
+    if let Err(e) = std::fs::rename(&path, &backup) {
+        eprintln!("cannot back up old image: {e}");
+        std::process::exit(1);
+    }
+
+    let result = match &meta.source {
+        redan::image_meta::ImageSource::Dockerfile { path } => image::import_dockerfile(name, path),
+        redan::image_meta::ImageSource::Docker { image: img } => image::import_docker(name, img),
+        redan::image_meta::ImageSource::Devcontainer { path } => {
+            let config_path = cmd::init::resolve_devcontainer_path(path);
+            image::import_devcontainer(name, &config_path)
+        }
+        redan::image_meta::ImageSource::Create {
+            packages,
+            run_commands,
+        } => image::create(name, packages, run_commands),
+        redan::image_meta::ImageSource::Unknown => unreachable!(),
+    };
+
+    match result {
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&backup);
+            eprintln!("image '{name}' updated");
+        }
+        Err(e) => {
+            eprintln!("update failed: {e}");
+            // Restore the old image so the user isn't left with nothing
+            if let Err(restore_err) = std::fs::rename(&backup, &path) {
+                eprintln!("cannot restore old image: {restore_err}");
+                eprintln!("  backup is at: {}", backup.display());
+            } else {
+                eprintln!("old image restored");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
 fn import_image(
     name: &str,
     from: Option<String>,
@@ -566,4 +1113,17 @@ fn logs(session_id: Option<&str>, follow: bool) {
             }
         }
     }
+}
+
+/// Build the claude-code image from the Dockerfile embedded in the binary.
+/// This avoids depending on CWD containing the redan source tree.
+fn build_bundled_claude_image() -> std::io::Result<std::path::PathBuf> {
+    static DOCKERFILE: &str = include_str!("../dockerfiles/claude-code.dockerfile");
+    let tmp = std::env::temp_dir().join("redan-claude-code-build");
+    std::fs::create_dir_all(&tmp)?;
+    let df_path = tmp.join("Dockerfile");
+    std::fs::write(&df_path, DOCKERFILE)?;
+    let result = image::import_dockerfile("claude-code", df_path.to_str().unwrap_or(""));
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
 }

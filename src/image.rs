@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::{fs, io};
 
 use crate::ca::MitmCa;
+use crate::image_meta::{ImageMeta, ImageSource};
 use crate::{proxy, vm};
 
 const ALPINE_VERSION: &str = "3.21.3";
@@ -161,6 +162,13 @@ pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::R
     // From here, clean up dest on any error.
     match build_image(&dest, packages, run_commands) {
         Ok(()) => {
+            let meta = ImageMeta::new(ImageSource::Create {
+                packages: packages.to_vec(),
+                run_commands: run_commands.to_vec(),
+            });
+            if let Err(e) = meta.save(&dest) {
+                log::warn!("cannot save image metadata: {e}");
+            }
             eprintln!("image '{name}' created at {}", dest.display());
             Ok(dest)
         }
@@ -323,6 +331,13 @@ fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result
         ));
     }
 
+    let meta = ImageMeta::new(ImageSource::Docker {
+        image: docker_image.into(),
+    });
+    if let Err(e) = meta.save(&dest) {
+        log::warn!("cannot save image metadata: {e}");
+    }
+
     eprintln!("image '{name}' imported from {docker_image}");
     eprintln!("  {}", dest.display());
     Ok(dest)
@@ -364,6 +379,16 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
         .args(["rmi", &tag])
         .status();
 
+    // Save build metadata after successful import
+    if let Ok(ref dest) = result {
+        let meta = ImageMeta::new(ImageSource::Dockerfile {
+            path: dockerfile_path.into(),
+        });
+        if let Err(e) = meta.save(dest) {
+            log::warn!("cannot save image metadata: {e}");
+        }
+    }
+
     result
 }
 
@@ -377,6 +402,17 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
 /// or `.devcontainer.json` (per the spec).
 #[allow(clippy::too_many_lines)] // Devcontainer has 3 code paths (dockerfile, image, compose)
 pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf> {
+    let result = import_devcontainer_inner(name, config_path)?;
+    let meta = ImageMeta::new(ImageSource::Devcontainer {
+        path: config_path.into(),
+    });
+    if let Err(e) = meta.save(&result) {
+        log::warn!("cannot save image metadata: {e}");
+    }
+    Ok(result)
+}
+
+fn import_devcontainer_inner(name: &str, config_path: &str) -> io::Result<PathBuf> {
     let config_file = Path::new(config_path);
     if !config_file.exists() {
         return Err(io::Error::new(

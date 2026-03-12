@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::exec::parse_secret;
 use redan::image;
+use redan::image_meta::ImageMeta;
 
 pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
@@ -65,6 +66,18 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
         println!("[ok]   images: {}", images.join(", "));
     }
 
+    // Check image freshness
+    for name in &images {
+        if let Ok(path) = image::image_path(name)
+            && let Some(meta) = ImageMeta::load(&path)
+            && let Some(days) = meta.age_days()
+            && days > 30
+        {
+            println!("[warn] image {name}: {days} days old");
+            println!("       run: redan image update {name}");
+        }
+    }
+
     if let Some(name) = check_image {
         match image::image_path(name) {
             Ok(p) if p.exists() => println!("[ok]   image {name}: found"),
@@ -77,6 +90,18 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
                 println!("[err]  image {name}: {e}");
                 ok = false;
             }
+        }
+    }
+
+    // ANTHROPIC_API_KEY check (when claude-code image exists)
+    if images.contains(&"claude-code".to_string()) {
+        if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty()) {
+            println!("[ok]   ANTHROPIC_API_KEY: set");
+        } else {
+            println!("[warn] ANTHROPIC_API_KEY: not set");
+            println!(
+                "       needed for zero-config Claude Code: export ANTHROPIC_API_KEY=sk-ant-..."
+            );
         }
     }
 

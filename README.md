@@ -65,7 +65,37 @@ redan doctor
 
 ## Setup with Claude Code
 
-The fastest way to get started:
+### Zero-config (recommended)
+
+Set your API key and run:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+cd ~/my-project
+redan exec
+```
+
+That's it. Redan auto-detects Claude Code: picks up your API key,
+builds the `claude-code` image if needed, mounts the current directory,
+allows Anthropic's API hosts, and drops you into an interactive session.
+It prints what it chose so nothing is silent:
+
+```text
+  Using image: claude-code
+  Injecting ANTHROPIC_API_KEY for api.anthropic.com
+  Mounting ~/.gitconfig
+  Mounting ~/.ssh
+  Mounting current directory → /workspace
+```
+
+Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
+flags. Your `~/.gitconfig` and `~/.ssh` are mounted into the VM
+automatically, and git remote hosts are added to the network allowlist
+so git works out of the box.
+
+### With redan.toml
+
+For repeatable setups, use `redan init`:
 
 ```bash
 redan init --claude
@@ -77,7 +107,7 @@ redan exec
 and project-appropriate tooling (Python/uv, Rust, Go, etc.) plus a
 `redan.toml` with Anthropic API hosts pre-configured.
 
-Or use the provided Dockerfile directly:
+### Manual
 
 ```bash
 redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile
@@ -127,7 +157,26 @@ merges them into the network allowlist automatically.
 
 ## Quick start
 
-### Run an agent
+### Run an agent (zero-config)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+redan exec
+```
+
+The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
+injects the real key only in HTTPS requests to `api.anthropic.com`.
+Responses are scrubbed of the real value before the agent sees them.
+
+### Run in the background
+
+```bash
+redan exec -d --name my-agent
+redan logs my-agent -f           # tail the logs
+redan stop my-agent              # stop when done
+```
+
+### Run with explicit config
 
 ```bash
 redan exec --image claude-code \
@@ -136,24 +185,10 @@ redan exec --image claude-code \
   -- claude --print "review this project"
 ```
 
-The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
-injects the real key only in HTTPS requests to `api.anthropic.com`.
-Responses are scrubbed of the real value before the agent sees them.
-
 **Note:** `--secret` literal values are visible in process listings (`ps`).
-For production use, prefer `env://`, `vault://`, `--secret-file`, or
-shell expansion: `--secret "KEY=$(cat /path/to/secret):host"`.
-
-### Interactive mode
-
-```bash
-redan exec --image claude-code -i \
-  --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
-  --mount ./my-project
-```
-
-Drops you into a shell inside the VM. Same secret injection, same
-network isolation.
+For production use, prefer `env://`, `vault://`, or `--secret-file`,
+which keep secrets out of process listings by having redan read them
+internally.
 
 ### Check prerequisites
 
@@ -163,7 +198,8 @@ redan doctor --image myimage         # check a specific image exists
 redan doctor --secret "KEY=val:host" # validate secret syntax + providers
 ```
 
-Checks for /dev/kvm, libkrun, libkrunfw, and available images.
+Checks for /dev/kvm, libkrun, libkrunfw, available images, and
+whether `ANTHROPIC_API_KEY` is set (for zero-config Claude Code).
 
 ## How it works
 
@@ -291,6 +327,7 @@ redan image import myimage --from ubuntu:24.04
 redan image import myimage --dockerfile path/to/Dockerfile
 redan image import myimage --devcontainer .devcontainer
 redan image list
+redan image update myimage
 redan image remove myimage
 ```
 
@@ -301,6 +338,21 @@ supported).
 
 Images are rootfs directories stored at `~/.local/share/redan/images/`
 and base tarballs are cached at `~/.cache/redan/`.
+
+### Image freshness
+
+Redan tracks when images were built and from what source. `redan image
+list` shows the age of each image, `redan doctor` warns about images
+older than 30 days, and `redan exec` prints a non-blocking warning
+before launching.
+
+```bash
+redan image update claude-code   # rebuild from the original Dockerfile
+```
+
+`redan image update` remembers how the image was built (Dockerfile,
+Docker image, devcontainer, or `create` args) and rebuilds from
+the same source.
 
 ## Network policy
 
@@ -363,14 +415,41 @@ Copy the output into your `redan.toml` and subsequent runs enforce it.
 Each `redan exec` creates a session with a unique ID. Session metadata,
 logs, and audit events are stored at `~/.local/state/redan/sessions/`.
 
+### Detached sessions
+
+Run agents in the background:
+
+```bash
+redan exec -d                    # detach, auto-generated ID
+redan exec -d --name my-agent    # detach with a name
+```
+
+### Session management
+
 ```bash
 redan sessions                # list all sessions
 redan sessions show <id>      # session details
 redan sessions remove         # remove all exited sessions
 redan sessions remove <id>    # remove a specific session
+```
+
+### Attach and stop
+
+```bash
+redan attach                  # attach to most recent running session
+redan attach my-agent         # attach by name or ID prefix
+redan stop                    # stop most recent running session
+redan stop my-agent           # stop by name or ID prefix
+```
+
+`redan stop` sends SIGTERM, waits 3 seconds, then SIGKILL.
+
+### Logs
+
+```bash
 redan logs                    # logs from most recent session
 redan logs -f                 # tail -f
-redan logs <id>               # logs from a specific session
+redan logs my-agent           # logs by name or session ID
 ```
 
 ## Audit log

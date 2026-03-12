@@ -75,7 +75,7 @@ pub fn audit_log_path(id: &str) -> PathBuf {
 }
 
 /// Session metadata, written to `meta.json`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub image: Option<String>,
@@ -84,9 +84,15 @@ pub struct SessionMeta {
     pub status: SessionStatus,
     #[serde(default)]
     pub pid: Option<u32>,
+    /// Path to the unix socket for console I/O (detached sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_socket: Option<String>,
+    /// Optional human-friendly name for the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
     Running,
@@ -106,6 +112,8 @@ impl SessionMeta {
             started_at,
             status: SessionStatus::Running,
             pid: Some(std::process::id()),
+            console_socket: None,
+            name: None,
         }
     }
 
@@ -135,6 +143,38 @@ impl SessionMeta {
         };
         let _ = self.save();
     }
+}
+
+/// Path to the console unix socket for a session.
+pub fn console_socket_path(id: &str) -> std::path::PathBuf {
+    session_dir(id).join("console.sock")
+}
+
+/// Find a session by ID prefix or name. Returns the full session metadata.
+pub fn find_session(id_or_name: Option<&str>) -> Option<SessionMeta> {
+    let sessions = list_sessions();
+    let Some(query) = id_or_name else {
+        // No query: return most recent running session, or most recent overall
+        return sessions
+            .iter()
+            .find(|s| matches!(s.status, SessionStatus::Running) && s.is_alive())
+            .or_else(|| sessions.first())
+            .cloned();
+    };
+
+    // Try exact ID match
+    if let Some(s) = sessions.iter().find(|s| s.id == query) {
+        return Some(s.clone());
+    }
+    // Try ID prefix match
+    if let Some(s) = sessions.iter().find(|s| s.id.starts_with(query)) {
+        return Some(s.clone());
+    }
+    // Try name match
+    sessions
+        .iter()
+        .find(|s| s.name.as_deref() == Some(query))
+        .cloned()
 }
 
 /// List recent sessions, newest first.

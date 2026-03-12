@@ -21,15 +21,37 @@ pub(crate) struct ExecConfig<'a> {
     pub image_name: Option<&'a str>,
     pub guest_env: &'a BTreeMap<String, String>,
     pub discover: bool,
+    pub session_name: Option<&'a str>,
+    /// Pre-existing session ID (for daemon mode). If None, creates a new session.
+    pub session_id: Option<&'a str>,
 }
 
 pub(crate) fn run(cfg: &ExecConfig<'_>) {
-    // Create session
-    let session_id = session::new_id();
-    let mut meta = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
-    if let Err(e) = meta.save() {
-        log::warn!("cannot save session metadata: {e}");
+    // Create or reuse session
+    let session_id = cfg.session_id.map_or_else(session::new_id, Into::into);
+    if cfg.session_id.is_some() && !session::valid_session_id(&session_id) {
+        eprintln!("invalid session ID: {session_id}");
+        std::process::exit(1);
     }
+    let mut meta = if cfg.session_id.is_some() {
+        // Daemon mode: reload existing metadata (written by exec_detached)
+        let meta_path = session::session_dir(&session_id).join("meta.json");
+        let json = std::fs::read_to_string(&meta_path).unwrap_or_else(|e| {
+            eprintln!("cannot read session metadata {}: {e}", meta_path.display());
+            std::process::exit(1);
+        });
+        serde_json::from_str(&json).unwrap_or_else(|e| {
+            eprintln!("invalid session metadata {}: {e}", meta_path.display());
+            std::process::exit(1);
+        })
+    } else {
+        let mut m = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
+        m.name = cfg.session_name.map(Into::into);
+        if let Err(e) = m.save() {
+            log::warn!("cannot save session metadata: {e}");
+        }
+        m
+    };
     log::info!("session {session_id} started");
 
     // In interactive mode, redirect logs to a file so they don't
@@ -195,7 +217,13 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
 
     // In interactive mode, set the host terminal to raw mode
     let _raw_guard = if cfg.interactive {
-        Some(RawTerminalGuard::enter())
+        match redan::terminal::RawTerminalGuard::enter() {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                eprintln!("warning: cannot enter raw terminal mode: {e}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -352,36 +380,6 @@ fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
         return;
     }
     let _ = std::fs::write(dir.join("policy"), templates::guest_policy(allowed_hosts));
-}
-
-/// RAII guard: raw terminal mode on creation, restore on drop.
-struct RawTerminalGuard {
-    original: libc::termios,
-}
-
-impl RawTerminalGuard {
-    fn enter() -> Self {
-        unsafe {
-            let mut original: libc::termios = std::mem::zeroed();
-            libc::tcgetattr(libc::STDIN_FILENO, std::ptr::from_mut(&mut original));
-            let mut raw = original;
-            libc::cfmakeraw(std::ptr::from_mut(&mut raw));
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, std::ptr::from_ref(&raw));
-            Self { original }
-        }
-    }
-}
-
-impl Drop for RawTerminalGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(
-                libc::STDIN_FILENO,
-                libc::TCSANOW,
-                std::ptr::from_ref(&self.original),
-            );
-        }
-    }
 }
 
 #[cfg(test)]
