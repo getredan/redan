@@ -511,14 +511,10 @@ fn exec_command(args: ExecArgs) {
         if let Some(auto) = redan::auto_detect::detect() {
             if auto.needs_image_build {
                 eprintln!("Building claude-code image (this may take a minute)...");
-                match image::import_dockerfile("claude-code", "dockerfiles/claude-code.dockerfile")
-                {
+                match build_bundled_claude_image() {
                     Ok(_) => eprintln!("Image claude-code built successfully."),
                     Err(e) => {
                         eprintln!("error: failed to build claude-code image: {e}");
-                        eprintln!(
-                            "  Build manually: redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile"
-                        );
                         std::process::exit(1);
                     }
                 }
@@ -734,16 +730,21 @@ fn exec_detached(
             });
     }
 
-    // Spawn daemon process
-    let exe = std::env::current_exe().unwrap_or_else(|e| {
-        eprintln!("cannot find redan executable: {e}");
+    // Spawn daemon process. If anything fails before the child starts,
+    // clean up the session dir (it contains daemon_config.json with secret specs).
+    let cleanup_and_exit = |msg: &str, err: &dyn std::fmt::Display| -> ! {
+        eprintln!("{msg}: {err}");
+        let _ = std::fs::remove_dir_all(&session_dir);
         std::process::exit(1);
+    };
+
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        cleanup_and_exit("cannot find redan executable", &e);
     });
 
     let log_path = session_dir.join("redan.log");
     let log_file = std::fs::File::create(&log_path).unwrap_or_else(|e| {
-        eprintln!("cannot create log file: {e}");
-        std::process::exit(1);
+        cleanup_and_exit("cannot create log file", &e);
     });
 
     let mut child = std::process::Command::new(exe)
@@ -752,14 +753,12 @@ fn exec_detached(
         .arg(&session_id)
         .stdin(std::process::Stdio::null())
         .stdout(log_file.try_clone().unwrap_or_else(|e| {
-            eprintln!("cannot clone log file handle: {e}");
-            std::process::exit(1);
+            cleanup_and_exit("cannot clone log file handle", &e);
         }))
         .stderr(log_file)
         .spawn()
         .unwrap_or_else(|e| {
-            eprintln!("cannot spawn daemon: {e}");
-            std::process::exit(1);
+            cleanup_and_exit("cannot spawn daemon", &e);
         });
 
     let daemon_pid = child.id();
@@ -823,7 +822,7 @@ fn run_daemon(session_id: &str) {
 }
 
 fn attach_session(id_or_name: Option<&str>) {
-    let meta = session::find_session(id_or_name).unwrap_or_else(|| {
+    let mut meta = session::find_session(id_or_name).unwrap_or_else(|| {
         if let Some(q) = id_or_name {
             eprintln!("session '{q}' not found");
         } else {
@@ -837,15 +836,30 @@ fn attach_session(id_or_name: Option<&str>) {
         std::process::exit(1);
     }
 
-    let sock_path = meta.console_socket.unwrap_or_else(|| {
+    // The daemon may not have written the console socket path to meta.json yet.
+    // Retry briefly (up to 3s) before giving up.
+    let sock_path_str = 'retry: {
+        for _ in 0..10 {
+            if let Some(ref s) = meta.console_socket {
+                break 'retry s.clone();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Reload meta in case the daemon updated it
+            let meta_path = session::session_dir(&meta.id).join("meta.json");
+            if let Ok(json) = std::fs::read_to_string(&meta_path)
+                && let Ok(fresh) = serde_json::from_str::<session::SessionMeta>(&json)
+            {
+                meta = fresh;
+            }
+        }
         eprintln!(
             "session {} has no console socket (started without --detach?)",
             meta.id
         );
         std::process::exit(1);
-    });
+    };
 
-    let sock_path = std::path::Path::new(&sock_path);
+    let sock_path = std::path::Path::new(&sock_path_str);
     if !sock_path.exists() {
         eprintln!("console socket not found: {}", sock_path.display());
         std::process::exit(1);
@@ -1099,4 +1113,17 @@ fn logs(session_id: Option<&str>, follow: bool) {
             }
         }
     }
+}
+
+/// Build the claude-code image from the Dockerfile embedded in the binary.
+/// This avoids depending on CWD containing the redan source tree.
+fn build_bundled_claude_image() -> std::io::Result<std::path::PathBuf> {
+    static DOCKERFILE: &str = include_str!("../dockerfiles/claude-code.dockerfile");
+    let tmp = std::env::temp_dir().join("redan-claude-code-build");
+    std::fs::create_dir_all(&tmp)?;
+    let df_path = tmp.join("Dockerfile");
+    std::fs::write(&df_path, DOCKERFILE)?;
+    let result = image::import_dockerfile("claude-code", df_path.to_str().unwrap_or(""));
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
 }

@@ -185,19 +185,26 @@ fn git_remote_hosts() -> Vec<String> {
     hosts
 }
 
-/// Extract hostname from a git remote URL (SSH or HTTPS).
+/// Extract hostname from a git remote URL.
+/// Handles HTTPS, HTTP, ssh://, and SCP-style (git@host:path) formats.
 fn host_from_remote_url(url: &str) -> Option<String> {
-    // HTTPS: https://github.com/user/repo.git
+    // ssh://[user@]host[:port]/path
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let authority = rest.rsplit_once('@').map_or(rest, |(_, a)| a);
+        let host = authority.split('/').next()?;
+        return Some(host.split(':').next().unwrap_or(host).to_string());
+    }
+    // https://host[:port]/path or http://
     if let Some(rest) = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
     {
-        return rest.split('/').next().map(|h| {
-            // Strip port if present: github.com:8443 -> github.com
-            h.split(':').next().unwrap_or(h).to_string()
-        });
+        return rest
+            .split('/')
+            .next()
+            .map(|h| h.split(':').next().unwrap_or(h).to_string());
     }
-    // SSH: git@github.com:user/repo.git
+    // SCP-style: git@github.com:user/repo.git
     if let Some((_user, host_and_path)) = url.split_once('@') {
         return host_and_path.split(':').next().map(String::from);
     }
@@ -360,6 +367,22 @@ mod tests {
         assert_eq!(
             host_from_remote_url("git@gitlab.internal.corp:team/project.git"),
             Some("gitlab.internal.corp".into())
+        );
+    }
+
+    #[test]
+    fn host_from_ssh_scheme() {
+        assert_eq!(
+            host_from_remote_url("ssh://git@github.com/org/repo.git"),
+            Some("github.com".into())
+        );
+    }
+
+    #[test]
+    fn host_from_ssh_scheme_with_port() {
+        assert_eq!(
+            host_from_remote_url("ssh://git@gitlab.example.com:2222/group/repo.git"),
+            Some("gitlab.example.com".into())
         );
     }
 
