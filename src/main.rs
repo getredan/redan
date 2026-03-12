@@ -978,9 +978,21 @@ fn update_image(name: &str) {
 
     eprintln!("updating image '{name}'...");
 
-    // Remove old image first
-    if let Err(e) = image::remove(name) {
-        eprintln!("cannot remove old image: {e}");
+    if matches!(meta.source, redan::image_meta::ImageSource::Unknown) {
+        eprintln!("image '{name}' was built from an unknown source, cannot update");
+        eprintln!("  remove and rebuild manually: redan image remove {name}");
+        std::process::exit(1);
+    }
+
+    // Move old image aside so we can restore it if the rebuild fails.
+    // The build functions require the destination not to exist.
+    let backup = {
+        let mut b = path.clone();
+        b.set_extension("bak");
+        b
+    };
+    if let Err(e) = std::fs::rename(&path, &backup) {
+        eprintln!("cannot back up old image: {e}");
         std::process::exit(1);
     }
 
@@ -995,17 +1007,23 @@ fn update_image(name: &str) {
             packages,
             run_commands,
         } => image::create(name, packages, run_commands),
-        redan::image_meta::ImageSource::Unknown => {
-            eprintln!("image '{name}' was built from an unknown source, cannot update");
-            eprintln!("  remove and rebuild manually: redan image remove {name}");
-            std::process::exit(1);
-        }
+        redan::image_meta::ImageSource::Unknown => unreachable!(),
     };
 
     match result {
-        Ok(_) => eprintln!("image '{name}' updated"),
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&backup);
+            eprintln!("image '{name}' updated");
+        }
         Err(e) => {
             eprintln!("update failed: {e}");
+            // Restore the old image so the user isn't left with nothing
+            if let Err(restore_err) = std::fs::rename(&backup, &path) {
+                eprintln!("cannot restore old image: {restore_err}");
+                eprintln!("  backup is at: {}", backup.display());
+            } else {
+                eprintln!("old image restored");
+            }
             std::process::exit(1);
         }
     }

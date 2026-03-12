@@ -90,7 +90,8 @@ It prints what it chose so nothing is silent:
 
 Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
 flags. Your `~/.gitconfig` and `~/.ssh` are mounted into the VM
-automatically so git works out of the box.
+automatically, and git remote hosts are added to the network allowlist
+so git works out of the box.
 
 ### With redan.toml
 
@@ -426,7 +427,7 @@ redan exec -d --name my-agent    # detach with a name
 ### Session management
 
 ```bash
-redan sessions                # list all sessions (shows name, status, age)
+redan sessions                # list all sessions
 redan sessions show <id>      # session details
 redan sessions remove         # remove all exited sessions
 redan sessions remove <id>    # remove a specific session

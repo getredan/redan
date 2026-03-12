@@ -73,10 +73,17 @@ fn detect_with_env(
         ..Config::default()
     };
 
-    // Network: Claude's required hosts
-    config.network = NetworkConfig {
-        allow: CLAUDE_HOSTS.iter().map(|&h| h.to_string()).collect(),
-    };
+    // Network: Claude's required hosts + git remote hosts from the working directory
+    let mut allow: Vec<String> = CLAUDE_HOSTS.iter().map(|&h| h.to_string()).collect();
+    let git_hosts = git_remote_hosts();
+    if !git_hosts.is_empty() {
+        messages.push(format!(
+            "Allowing git remote hosts: {}",
+            git_hosts.join(", ")
+        ));
+        allow.extend(git_hosts);
+    }
+    config.network = NetworkConfig { allow };
 
     // Secret: ANTHROPIC_API_KEY via env://
     config.secrets.insert(
@@ -101,7 +108,11 @@ fn detect_with_env(
         .env
         .insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
 
-    // Git/SSH identity mounts
+    // Git/SSH identity mounts.
+    // NOTE: virtio-fs via libkrun does not currently support read-only mounts,
+    // so these are writable by the guest. The network policy is the primary
+    // security boundary. Users who need stronger isolation should use a
+    // redan.toml with explicit --mount entries.
     if let Some(home) = home {
         let gitconfig = Path::new(home).join(".gitconfig");
         if gitconfig.exists() {
@@ -145,6 +156,52 @@ fn image_exists(name: &str) -> bool {
 
 fn home_dir() -> Option<String> {
     std::env::var("HOME").ok()
+}
+
+/// Extract hostnames from git remote URLs in the current directory.
+/// Parses `git remote -v` output; returns empty vec if git isn't available
+/// or we're not in a repo.
+fn git_remote_hosts() -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "-v"])
+        .stderr(std::process::Stdio::null())
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut hosts: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| {
+            // Lines look like: origin	git@github.com:user/repo.git (fetch)
+            // or: origin	https://github.com/user/repo.git (fetch)
+            let url = line.split_whitespace().nth(1)?;
+            host_from_remote_url(url)
+        })
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// Extract hostname from a git remote URL (SSH or HTTPS).
+fn host_from_remote_url(url: &str) -> Option<String> {
+    // HTTPS: https://github.com/user/repo.git
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        return rest.split('/').next().map(|h| {
+            // Strip port if present: github.com:8443 -> github.com
+            h.split(':').next().unwrap_or(h).to_string()
+        });
+    }
+    // SSH: git@github.com:user/repo.git
+    if let Some((_user, host_and_path)) = url.split_once('@') {
+        return host_and_path.split(':').next().map(String::from);
+    }
+    None
 }
 
 /// Config-level fields from CLI that indicate the user wants manual control
@@ -272,5 +329,42 @@ mod tests {
             discover: true,
             ..empty_flags()
         }));
+    }
+
+    #[test]
+    fn host_from_https_url() {
+        assert_eq!(
+            host_from_remote_url("https://github.com/user/repo.git"),
+            Some("github.com".into())
+        );
+    }
+
+    #[test]
+    fn host_from_ssh_url() {
+        assert_eq!(
+            host_from_remote_url("git@github.com:user/repo.git"),
+            Some("github.com".into())
+        );
+    }
+
+    #[test]
+    fn host_from_https_with_port() {
+        assert_eq!(
+            host_from_remote_url("https://gitlab.example.com:8443/group/repo.git"),
+            Some("gitlab.example.com".into())
+        );
+    }
+
+    #[test]
+    fn host_from_ssh_custom_host() {
+        assert_eq!(
+            host_from_remote_url("git@gitlab.internal.corp:team/project.git"),
+            Some("gitlab.internal.corp".into())
+        );
+    }
+
+    #[test]
+    fn host_from_nonsense_returns_none() {
+        assert_eq!(host_from_remote_url("not-a-url"), None);
     }
 }
