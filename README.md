@@ -83,15 +83,15 @@ It prints what it chose so nothing is silent:
 ```text
   Using image: claude-code
   Injecting ANTHROPIC_API_KEY for api.anthropic.com
-  Mounting ~/.gitconfig
-  Mounting ~/.ssh
   Mounting current directory → /workspace
 ```
 
 Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
-flags. Your `~/.gitconfig` and `~/.ssh` are mounted into the VM
-automatically, and git remote hosts are added to the network allowlist
-so git works out of the box.
+flags. Git remote hosts are added to the network allowlist so git works
+out of the box. Host files like `~/.ssh` and `~/.gitconfig` are not
+mounted by default (they'd be writable by the guest). Add them via
+`redan.toml` if you need them -- `redan init` generates commented-out
+examples.
 
 ### With redan.toml
 

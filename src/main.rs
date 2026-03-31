@@ -791,7 +791,23 @@ fn run_daemon(session_id: &str) {
     let session_dir = session::session_dir(session_id);
     let config_path = session_dir.join("daemon_config.json");
 
-    let config_json = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+    // Open the file, then unlink it before reading. The fd keeps the
+    // data accessible but the directory entry is gone, so a crash
+    // between here and process exit can't leave secrets on disk.
+    // Fail closed: if we can't unlink, don't proceed with secrets.
+    let mut config_file = std::fs::File::open(&config_path).unwrap_or_else(|e| {
+        eprintln!("cannot open daemon config: {e}");
+        std::process::exit(1);
+    });
+    if let Err(e) = std::fs::remove_file(&config_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("cannot remove daemon config: {e}");
+        std::process::exit(1);
+    }
+
+    let mut config_json = String::new();
+    std::io::Read::read_to_string(&mut config_file, &mut config_json).unwrap_or_else(|e| {
         eprintln!("cannot read daemon config: {e}");
         std::process::exit(1);
     });
@@ -799,9 +815,6 @@ fn run_daemon(session_id: &str) {
         eprintln!("invalid daemon config: {e}");
         std::process::exit(1);
     });
-
-    // Clean up the config file — it contains secret specs
-    let _ = std::fs::remove_file(&config_path);
 
     // Run the VM+proxy (non-interactive: daemon has no terminal)
     cmd::exec::run(&cmd::exec::ExecConfig {

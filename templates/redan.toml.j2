@@ -34,6 +34,19 @@ source = "{{ mount.source }}"
 target = "{{ mount.target }}"
 {%- endif %}
 {%- endfor %}
+
+# Git and SSH identity (not mounted by default).
+# These are writable by the guest because virtio-fs via libkrun
+# doesn't support read-only mounts. Only uncomment if you trust
+# the commands running inside the VM.
+#
+# [mount.gitconfig]
+# source = "~/.gitconfig"
+# target = "/home/dev/.gitconfig"
+#
+# [mount.ssh]
+# source = "~/.ssh"
+# target = "/home/dev/.ssh"
 {%- if env %}
 
 [env]
