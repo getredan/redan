@@ -16,14 +16,14 @@ path = "src/main.rs"
 
 [dependencies]
 smoltcp = { version = "0.12.0", features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "log"] }
-rustls = "0.23.36"
+rustls = "0.23.37"
 rustls-pemfile = "2.2"
 rcgen = "0.14.7"
 webpki-roots = "1.0"
 log = "0.4.29"
-env_logger = "0.11.8"
-clap = { version = "4.5", features = ["derive"] }
-libc = "0.2.180"
+env_logger = "0.11.10"
+clap = { version = "4.6", features = ["derive"] }
+libc = "0.2.183"
 walkdir = "2.5.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -31,8 +31,8 @@ ureq = "3"
 httparse = "1.10.1"
 zeroize = { version = "1.8.2", features = ["derive"] }
 time = { version = "0.3.47", features = ["formatting", "parsing"] }
-toml = "1.0"
-minijinja = "2.15.1"
+toml = "1.1"
+minijinja = "2.18.0"
 thiserror = "2.0.18"
 shell-words = "1.1.1"
 getrandom = "0.4"
