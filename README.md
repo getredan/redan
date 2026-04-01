@@ -35,11 +35,15 @@ injection, it has no secret to steal and nowhere to send it.
 
 # What's Redan?
 
-Redan runs AI coding agents inside [libkrun] microVMs with network-layer
-secret injection. Agents get a real dev environment -- node, git, python,
-your project files -- but can't see host credentials and never observe
-the real values of injected secrets. Secrets are only injected for hosts
-you explicitly allow.
+Redan uses [libkrun] microVMs (sub-second boot) and a userspace TCP/IP
+stack to sandbox AI agents. The agent gets a full Linux environment with
+your project files mounted in, but runs in its own VM with its own
+filesystem and a network proxy that enforces a host allowlist. Secrets
+are injected into HTTPS request headers by the proxy on the host side,
+so they never exist inside the VM.
+
+Works with Claude Code, Codex, Copilot, Cursor, or any command-line AI
+agent.
 
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
