@@ -3,6 +3,13 @@
   <p align="center">Your agents run free. Your secrets stay put.</p>
 </p>
 
+<p align="center">
+  <a href="https://github.com/getredan/redan/actions/workflows/ci.yml"><img src="https://github.com/getredan/redan/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/getredan/redan/actions/workflows/security-audit.yml"><img src="https://github.com/getredan/redan/actions/workflows/security-audit.yml/badge.svg" alt="Security Audit"></a>
+  <a href="https://github.com/getredan/redan/releases"><img src="https://img.shields.io/github/v/release/getredan/redan" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-blue.svg" alt="License: BSD-3-Clause"></a>
+</p>
+
 # What's Redan?
 
 Redan runs AI coding agents inside [libkrun] microVMs with network-layer
