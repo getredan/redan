@@ -10,6 +10,29 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-blue.svg" alt="License: BSD-3-Clause"></a>
 </p>
 
+## Why redan?
+
+AI coding agents have your shell, your filesystem, your API keys, and
+full network access. That's fine until:
+
+- A prompt injection hidden in a dependency's README or issue comment
+  tells the agent to exfiltrate your API keys
+- The agent modifies `~/.ssh/authorized_keys`, `~/.gitconfig`, or
+  installs packages on your host
+- Malicious instructions in code the agent reads make it open
+  connections to hosts you never approved
+
+These aren't hypothetical. Every file the agent reads is a potential
+injection vector, and LLM prompt injection is an open problem with no
+general solution.
+
+Redan puts the agent in a microVM that boots in under a second. The
+agent gets a real dev environment, but it's isolated from your host.
+Own filesystem, own network, only the hosts you allow. Your API keys
+never enter the VM. Redan injects them at the network layer, only for
+the hosts you permit. Even if the agent is compromised by a prompt
+injection, it has no secret to steal and nowhere to send it.
+
 # What's Redan?
 
 Redan runs AI coding agents inside [libkrun] microVMs with network-layer
