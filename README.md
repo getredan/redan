@@ -3,13 +3,47 @@
   <p align="center">Your agents run free. Your secrets stay put.</p>
 </p>
 
+<p align="center">
+  <a href="https://github.com/getredan/redan/actions/workflows/ci.yml"><img src="https://github.com/getredan/redan/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/getredan/redan/actions/workflows/security-audit.yml"><img src="https://github.com/getredan/redan/actions/workflows/security-audit.yml/badge.svg" alt="Security Audit"></a>
+  <a href="https://github.com/getredan/redan/releases"><img src="https://img.shields.io/github/v/release/getredan/redan" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-blue.svg" alt="License: BSD-3-Clause"></a>
+</p>
+
+## Why redan?
+
+AI coding agents have your shell, your filesystem, your API keys, and
+full network access. That's fine until:
+
+- A prompt injection hidden in a dependency's README or issue comment
+  tells the agent to exfiltrate your API keys
+- The agent modifies `~/.ssh/authorized_keys`, `~/.gitconfig`, or
+  installs packages on your host
+- Malicious instructions in code the agent reads make it open
+  connections to hosts you never approved
+
+These aren't hypothetical. Every file the agent reads is a potential
+injection vector, and LLM prompt injection is an open problem with no
+general solution.
+
+Redan puts the agent in a microVM that boots in under a second. The
+agent gets a real dev environment, but it's isolated from your host.
+Own filesystem, own network, only the hosts you allow. Your API keys
+never enter the VM. Redan injects them at the network layer, only for
+the hosts you permit. Even if the agent is compromised by a prompt
+injection, it has no secret to steal and nowhere to send it.
+
 # What's Redan?
 
-Redan runs AI coding agents inside [libkrun] microVMs with network-layer
-secret injection. Agents get a real dev environment -- node, git, python,
-your project files -- but can't see host credentials and never observe
-the real values of injected secrets. Secrets are only injected for hosts
-you explicitly allow.
+Redan uses [libkrun] microVMs (sub-second boot) and a userspace TCP/IP
+stack to sandbox AI agents. The agent gets a full Linux environment with
+your project files mounted in, but runs in its own VM with its own
+filesystem and a network proxy that enforces a host allowlist. Secrets
+are injected into HTTPS request headers by the proxy on the host side,
+so they never exist inside the VM.
+
+Works with Claude Code, Codex, Copilot, Cursor, or any command-line AI
+agent.
 
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
@@ -83,15 +117,15 @@ It prints what it chose so nothing is silent:
 ```text
   Using image: claude-code
   Injecting ANTHROPIC_API_KEY for api.anthropic.com
-  Mounting ~/.gitconfig
-  Mounting ~/.ssh
   Mounting current directory → /workspace
 ```
 
 Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
-flags. Your `~/.gitconfig` and `~/.ssh` are mounted into the VM
-automatically, and git remote hosts are added to the network allowlist
-so git works out of the box.
+flags. Git remote hosts are added to the network allowlist so git works
+out of the box. Host files like `~/.ssh` and `~/.gitconfig` are not
+mounted by default (they'd be writable by the guest). Add them via
+`redan.toml` if you need them -- `redan init` generates commented-out
+examples.
 
 ### With redan.toml
 

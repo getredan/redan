@@ -5,8 +5,6 @@
 //! setups: if the `claude-code` image exists and `ANTHROPIC_API_KEY` is set,
 //! redan runs Claude Code with smart defaults.
 
-use std::path::Path;
-
 use crate::config::{Config, MountConfig, NetworkConfig, SecretConfig};
 use crate::image;
 
@@ -33,11 +31,9 @@ pub struct AutoDetected {
 /// Returns `None` if auto-detection can't produce a usable config
 /// (e.g., no known image, no API key).
 pub fn detect() -> Option<AutoDetected> {
-    let home = home_dir();
     detect_with_env(
         std::env::var("ANTHROPIC_API_KEY").ok(),
         image_exists("claude-code"),
-        home.as_deref(),
     )
 }
 
@@ -45,7 +41,6 @@ pub fn detect() -> Option<AutoDetected> {
 fn detect_with_env(
     anthropic_key: Option<String>,
     claude_image_exists: bool,
-    home: Option<&str>,
 ) -> Option<AutoDetected> {
     // For now, we only auto-detect Claude Code setups.
     // Future: detect other agent types (Codex, etc.)
@@ -108,36 +103,12 @@ fn detect_with_env(
         .env
         .insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
 
-    // Git/SSH identity mounts.
-    // NOTE: virtio-fs via libkrun does not currently support read-only mounts,
-    // so these are writable by the guest. The network policy is the primary
-    // security boundary. Users who need stronger isolation should use a
-    // redan.toml with explicit --mount entries.
-    if let Some(home) = home {
-        let gitconfig = Path::new(home).join(".gitconfig");
-        if gitconfig.exists() {
-            config.mount.insert(
-                "gitconfig".into(),
-                MountConfig {
-                    source: gitconfig.to_string_lossy().into_owned(),
-                    target: Some("/home/dev/.gitconfig".into()),
-                },
-            );
-            messages.push("Mounting ~/.gitconfig".into());
-        }
-
-        let ssh_dir = Path::new(home).join(".ssh");
-        if ssh_dir.is_dir() {
-            config.mount.insert(
-                "ssh".into(),
-                MountConfig {
-                    source: ssh_dir.to_string_lossy().into_owned(),
-                    target: Some("/home/dev/.ssh".into()),
-                },
-            );
-            messages.push("Mounting ~/.ssh".into());
-        }
-    }
+    // Neither ~/.gitconfig nor ~/.ssh is mounted by auto-detect.
+    // virtio-fs via libkrun doesn't support read-only mounts, so
+    // both would be writable by the guest. A compromised agent could:
+    //   ~/.ssh: modify authorized_keys, SSH config
+    //   ~/.gitconfig: inject malicious aliases, core.pager, core.hookPath
+    // Users who need these can opt in via redan.toml (see `redan init`).
 
     // Summarize mount
     messages.push("Mounting current directory → /workspace".into());
@@ -152,10 +123,6 @@ fn detect_with_env(
 /// Check if a named image exists.
 fn image_exists(name: &str) -> bool {
     image::image_path(name).map(|p| p.exists()).unwrap_or(false)
-}
-
-fn home_dir() -> Option<String> {
-    std::env::var("HOME").ok()
 }
 
 /// Extract hostnames from git remote URLs in the current directory.
@@ -244,7 +211,7 @@ mod tests {
 
     #[test]
     fn detect_claude_code_with_key_and_image() {
-        let result = detect_with_env(Some("sk-ant-test123".into()), true, Some("/home/testuser"));
+        let result = detect_with_env(Some("sk-ant-test123".into()), true);
         let auto = result.expect("should detect");
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
         assert!(auto.config.command.as_deref().unwrap().contains("claude"));
@@ -279,7 +246,7 @@ mod tests {
 
     #[test]
     fn detect_needs_image_build_when_missing() {
-        let result = detect_with_env(Some("sk-ant-test123".into()), false, Some("/home/testuser"));
+        let result = detect_with_env(Some("sk-ant-test123".into()), false);
         let auto = result.expect("should detect");
         assert!(auto.needs_image_build);
         assert!(auto.messages.iter().any(|m| m.contains("will build")));
@@ -287,12 +254,12 @@ mod tests {
 
     #[test]
     fn detect_returns_none_without_api_key() {
-        assert!(detect_with_env(None, true, Some("/home/testuser")).is_none());
+        assert!(detect_with_env(None, true).is_none());
     }
 
     #[test]
     fn detect_returns_none_with_empty_api_key() {
-        assert!(detect_with_env(Some(String::new()), true, Some("/home/testuser")).is_none());
+        assert!(detect_with_env(Some(String::new()), true).is_none());
     }
 
     fn empty_flags() -> ExecFlags<'static> {
