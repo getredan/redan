@@ -52,6 +52,9 @@ pub struct Config {
 pub struct NetworkConfig {
     #[serde(default)]
     pub allow: Vec<String>,
+    /// TCP port forwards: `"9222"` or `"9222:3000"` (`guest_port:host_port`).
+    #[serde(default)]
+    pub forward: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +67,8 @@ pub struct SecretConfig {
 pub struct MountConfig {
     pub source: String,
     pub target: Option<String>,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl Config {
@@ -82,9 +87,15 @@ impl Config {
         self.mount
             .values()
             .map(|m| {
-                m.target
+                let base = m
+                    .target
                     .as_ref()
-                    .map_or_else(|| m.source.clone(), |t| format!("{}:{t}", m.source))
+                    .map_or_else(|| m.source.clone(), |t| format!("{}:{t}", m.source));
+                if m.read_only {
+                    format!("{base}:ro")
+                } else {
+                    base
+                }
             })
             .collect()
     }

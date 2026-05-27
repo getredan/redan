@@ -132,6 +132,13 @@ enum Cli {
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
 
+        /// Forward a guest TCP port to host localhost.
+        /// Format: PORT (same port both sides) or `GUEST_PORT:HOST_PORT`.
+        /// The guest connects to the gateway IP on `GUEST_PORT`; redan
+        /// relays to `127.0.0.1:HOST_PORT`.
+        #[arg(long = "forward", value_name = "SPEC")]
+        forwards: Vec<String>,
+
         /// Mount a host directory into the guest via virtio-fs.
         /// Format: /host/path:/guest/path (default guest path: /workspace)
         #[arg(long = "mount", short = 'm', value_name = "HOST:GUEST")]
@@ -285,6 +292,7 @@ fn main() {
             secrets,
             secret_file,
             allow_hosts,
+            forwards,
             mounts,
             audit_log,
             log_file: _,
@@ -303,6 +311,7 @@ fn main() {
                 allow_hosts,
                 mounts,
                 audit_log,
+                forwards,
                 discover,
                 detach,
                 name,
@@ -479,6 +488,7 @@ struct ExecArgs {
     allow_hosts: Vec<String>,
     mounts: Vec<String>,
     audit_log: Option<String>,
+    forwards: Vec<String>,
     discover: bool,
     detach: bool,
     name: Option<String>,
@@ -526,11 +536,10 @@ fn exec_command(args: ExecArgs) {
         } else {
             eprintln!("no redan.toml found and auto-detect failed.");
             eprintln!();
-            if std::env::var("ANTHROPIC_API_KEY").is_err() {
-                eprintln!("  Set ANTHROPIC_API_KEY to auto-detect Claude Code:");
-                eprintln!("    export ANTHROPIC_API_KEY=sk-ant-...");
-                eprintln!();
-            }
+            eprintln!("  Auto-detect needs one of:");
+            eprintln!("    export ANTHROPIC_API_KEY=sk-ant-...    (API key)");
+            eprintln!("    claude login                           (OAuth/Pro/Max/Team)");
+            eprintln!();
             eprintln!("  Or create a config:");
             eprintln!("    redan init          generate a redan.toml");
             eprintln!("    redan init --claude  generate config + devcontainer for Claude Code");
@@ -572,6 +581,9 @@ fn exec_command(args: ExecArgs) {
         );
         allow_hosts.extend(claude_domains);
     }
+
+    let mut forwards = args.forwards;
+    forwards.extend(cfg.network.forward.clone());
 
     let mut mounts = args.mounts;
     mounts.extend(cfg.mount_specs());
@@ -622,6 +634,7 @@ fn exec_command(args: ExecArgs) {
             timeout,
             &secrets,
             &allow_hosts,
+            &forwards,
             &mounts,
             audit_log.as_deref(),
             image_name.as_deref(),
@@ -637,6 +650,7 @@ fn exec_command(args: ExecArgs) {
             timeout_secs: timeout,
             secret_specs: &secrets,
             allow_host_specs: &allow_hosts,
+            forward_specs: &forwards,
             mount_specs: &mounts,
             audit_log_path: audit_log.as_deref(),
             image_name: image_name.as_deref(),
@@ -656,6 +670,7 @@ struct DaemonConfig {
     timeout_secs: u64,
     secrets: Vec<String>,
     allow_hosts: Vec<String>,
+    forwards: Vec<String>,
     mounts: Vec<String>,
     audit_log: Option<String>,
     image_name: Option<String>,
@@ -671,6 +686,7 @@ fn exec_detached(
     timeout: u64,
     secrets: &[String],
     allow_hosts: &[String],
+    forwards: &[String],
     mounts: &[String],
     audit_log: Option<&str>,
     image_name: Option<&str>,
@@ -700,6 +716,7 @@ fn exec_detached(
         timeout_secs: timeout,
         secrets: secrets.to_vec(),
         allow_hosts: allow_hosts.to_vec(),
+        forwards: forwards.to_vec(),
         mounts: mounts.to_vec(),
         audit_log: audit_log.map(Into::into),
         image_name: image_name.map(Into::into),
@@ -824,6 +841,7 @@ fn run_daemon(session_id: &str) {
         timeout_secs: cfg.timeout_secs,
         secret_specs: &cfg.secrets,
         allow_host_specs: &cfg.allow_hosts,
+        forward_specs: &cfg.forwards,
         mount_specs: &cfg.mounts,
         audit_log_path: cfg.audit_log.as_deref(),
         image_name: cfg.image_name.as_deref(),

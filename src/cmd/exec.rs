@@ -16,6 +16,7 @@ pub(crate) struct ExecConfig<'a> {
     pub timeout_secs: u64,
     pub secret_specs: &'a [String],
     pub allow_host_specs: &'a [String],
+    pub forward_specs: &'a [String],
     pub mount_specs: &'a [String],
     pub audit_log_path: Option<&'a str>,
     pub image_name: Option<&'a str>,
@@ -141,22 +142,24 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     };
 
     // Parse mounts
-    let mut virtiofs_mounts: Vec<(String, String)> = Vec::new();
+    let mut virtiofs_mounts: Vec<(String, String, bool)> = Vec::new();
     let mut mount_commands: Vec<String> = Vec::new();
     for (i, spec) in cfg.mount_specs.iter().enumerate() {
-        let (host_path, guest_path) = parse_mount(spec);
+        let (host_path, guest_path, read_only) = parse_mount(spec);
         if !Path::new(&host_path).exists() {
             eprintln!("mount source does not exist: {host_path}");
             std::process::exit(1);
         }
         let tag = format!("fs{i}");
-        log::info!("mount: {host_path} -> {guest_path} (tag={tag})");
+        let ro_label = if read_only { " (ro)" } else { "" };
+        log::info!("mount: {host_path} -> {guest_path}{ro_label} (tag={tag})");
 
         let mp = Path::new(cfg.rootfs).join(guest_path.trim_start_matches('/'));
         std::fs::create_dir_all(&mp).ok();
 
-        virtiofs_mounts.push((tag.clone(), host_path));
-        mount_commands.push(format!("mount -t virtiofs {tag} {guest_path}"));
+        virtiofs_mounts.push((tag.clone(), host_path, read_only));
+        let mount_opts = if read_only { " -o ro" } else { "" };
+        mount_commands.push(format!("mount -t virtiofs{mount_opts} {tag} {guest_path}"));
     }
 
     // Build guest command: network setup + CA trust + mounts + user command
@@ -238,6 +241,28 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         }
     };
 
+    let mut forwards: Vec<proxy::ForwardSpec> = Vec::new();
+    for spec in cfg.forward_specs {
+        match proxy::parse_forward_spec(spec) {
+            Ok(fwd) => {
+                if forwards.iter().any(|f| f.guest_port == fwd.guest_port) {
+                    eprintln!("duplicate forward guest port: {}", fwd.guest_port);
+                    std::process::exit(1);
+                }
+                log::info!(
+                    "forward: :{} -> 127.0.0.1:{}",
+                    fwd.guest_port,
+                    fwd.host_port
+                );
+                forwards.push(fwd);
+            }
+            Err(e) => {
+                eprintln!("invalid --forward spec '{spec}': {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let discovered = proxy::run(proxy::ProxyConfig {
         host_sock: net_sock,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
@@ -246,6 +271,7 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         allowed_hosts,
         audit_log_path,
         discover: cfg.discover,
+        forwards: &forwards,
     });
 
     if cfg.discover && !discovered.is_empty() {
@@ -367,11 +393,15 @@ pub(crate) fn collect_secret_specs(
 }
 
 /// Parse mount spec: `/host/path:/guest/path` or `/host/path` (defaults to `/workspace`)
-pub(crate) fn parse_mount(spec: &str) -> (String, String) {
-    spec.split_once(':').map_or_else(
-        || (spec.to_string(), "/workspace".to_string()),
-        |(host, guest)| (host.to_string(), guest.to_string()),
-    )
+/// Parse a mount spec: `host_path[:guest_path[:ro]]`.
+/// Returns `(host_path, guest_path, read_only)`.
+pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
+    let parts: Vec<&str> = spec.splitn(3, ':').collect();
+    match parts.as_slice() {
+        [host, guest, "ro"] => (host.to_string(), guest.to_string(), true),
+        [host, guest] => (host.to_string(), guest.to_string(), false),
+        _ => (spec.to_string(), "/workspace".to_string(), false),
+    }
 }
 
 fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
@@ -453,16 +483,26 @@ mod tests {
 
     #[test]
     fn parse_mount_with_guest_path() {
-        let (host, guest) = parse_mount("/home/chris/project:/workspace");
+        let (host, guest, ro) = parse_mount("/home/chris/project:/workspace");
         assert_eq!(host, "/home/chris/project");
         assert_eq!(guest, "/workspace");
+        assert!(!ro);
     }
 
     #[test]
     fn parse_mount_default_guest_path() {
-        let (host, guest) = parse_mount("/home/chris/project");
+        let (host, guest, ro) = parse_mount("/home/chris/project");
         assert_eq!(host, "/home/chris/project");
         assert_eq!(guest, "/workspace");
+        assert!(!ro);
+    }
+
+    #[test]
+    fn parse_mount_read_only() {
+        let (host, guest, ro) = parse_mount("/home/chris/.claude:/claude-config:ro");
+        assert_eq!(host, "/home/chris/.claude");
+        assert_eq!(guest, "/claude-config");
+        assert!(ro);
     }
 
     #[test]

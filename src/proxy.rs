@@ -36,6 +36,57 @@ pub const GATEWAY_IP: Ipv4Address = Ipv4Address::new(192, 168, 127, 1);
 pub const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
 pub const GUEST_IP: &str = "192.168.127.2";
 
+// --- TCP port forwarding ---
+
+/// Ports reserved by the proxy for internal services.
+const RESERVED_PORTS: &[u16] = &[22, 53, 80, 443];
+
+/// A TCP port forwarding specification.
+///
+/// Guest connects to `gateway:guest_port`, redan relays to
+/// `127.0.0.1:host_port` on the host. Target is always localhost;
+/// the guest cannot influence the destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardSpec {
+    pub guest_port: u16,
+    pub host_port: u16,
+}
+
+/// Parse a forward spec string.
+///
+/// Accepted formats:
+/// - `"9222"` -- same port on both sides
+/// - `"9222:3000"` -- `guest_port:host_port`
+///
+/// Rejects reserved ports (22, 53, 80, 443) and port 0.
+pub fn parse_forward_spec(spec: &str) -> Result<ForwardSpec, String> {
+    let (guest_str, host_str) = spec.split_once(':').map_or((spec, spec), |(g, h)| (g, h));
+
+    let guest_port: u16 = guest_str
+        .parse()
+        .map_err(|_| format!("invalid guest port: {guest_str}"))?;
+    let host_port: u16 = host_str
+        .parse()
+        .map_err(|_| format!("invalid host port: {host_str}"))?;
+
+    if guest_port == 0 {
+        return Err("guest port cannot be 0".into());
+    }
+    if host_port == 0 {
+        return Err("host port cannot be 0".into());
+    }
+    if RESERVED_PORTS.contains(&guest_port) {
+        return Err(format!(
+            "guest port {guest_port} is reserved (used by redan internally)"
+        ));
+    }
+
+    Ok(ForwardSpec {
+        guest_port,
+        host_port,
+    })
+}
+
 /// IP assigned to DNS queries for "localhost".
 #[allow(clippy::ip_constant)] // smoltcp type, not std
 const LOOPBACK_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
@@ -148,6 +199,9 @@ pub struct ProxyConfig<'a> {
     pub audit_log_path: Option<&'a str>,
     /// Discover mode: allow all connections, collect hostnames.
     pub discover: bool,
+    /// TCP port forwards: guest connects to `gateway:guest_port`,
+    /// redan relays to `127.0.0.1:host_port`.
+    pub forwards: &'a [ForwardSpec],
 }
 
 /// Hosts observed during a discover-mode run.
@@ -164,6 +218,7 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
         allowed_hosts,
         audit_log_path,
         discover,
+        forwards,
     } = cfg;
     let resolver = Arc::new(MitmCertResolver {
         ca: Arc::clone(&ca),
@@ -228,6 +283,23 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
         },
     ];
 
+    for fwd in forwards {
+        backlogs.push(ListenBacklog {
+            port: fwd.guest_port,
+            kind: BacklogKind::TcpForward {
+                host_port: fwd.host_port,
+            },
+            handles: (0..LISTEN_BACKLOG)
+                .map(|_| add_tcp_listener(&mut sockets, fwd.guest_port))
+                .collect(),
+        });
+        log::info!(
+            "TCP forward: :{} -> 127.0.0.1:{}",
+            fwd.guest_port,
+            fwd.host_port,
+        );
+    }
+
     log::info!("proxy listening on :22 (ssh), :53 (dns), :80, :443");
     let start = Instant::now();
 
@@ -282,6 +354,9 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
                         let conn_kind = match backlog.kind {
                             BacklogKind::Http => ConnKind::Http,
                             BacklogKind::Tls => ConnKind::TlsMitm,
+                            BacklogKind::TcpForward { host_port } => {
+                                ConnKind::TcpForward { host_port }
+                            }
                             BacklogKind::Ssh => {
                                 let dest_ip = sock.local_endpoint().and_then(|ep| {
                                     if let smoltcp::wire::IpAddress::Ipv4(ip) = ep.addr {
@@ -383,6 +458,8 @@ enum BacklogKind {
     Tls,
     /// TCP/22: transparent relay, no inspection.
     Ssh,
+    /// Forwarded port: transparent relay to host localhost.
+    TcpForward { host_port: u16 },
 }
 
 struct ListenBacklog {
@@ -471,6 +548,8 @@ enum ConnKind {
         /// thread for the private-IP check (same logic as TLS path).
         allow_private: bool,
     },
+    /// Forwarded port: transparent relay to `127.0.0.1:host_port`.
+    TcpForward { host_port: u16 },
 }
 
 struct ProxyConn {
@@ -550,6 +629,20 @@ impl ProxyConn {
                         &disc,
                     ) {
                         log::warn!("TLS connection thread error: {e}");
+                    }
+                });
+            }
+            ConnKind::TcpForward { host_port } => {
+                let (to_tx, to_rx) = mpsc::channel::<Vec<u8>>();
+                let (from_tx, from_rx) = mpsc::sync_channel::<Vec<u8>>(64);
+                conn.to_thread = Some(to_tx);
+                conn.from_thread = Some(from_rx);
+                conn.state = ConnState::Shuttling;
+
+                let alog = audit_log.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = tcp_forward_thread(to_rx, from_tx, host_port, &alog) {
+                        log::warn!("TCP forward thread error for port {host_port}: {e}");
                     }
                 });
             }
@@ -1229,6 +1322,80 @@ fn ssh_relay_thread(
     Ok(())
 }
 
+/// Transparent TCP relay for port-forwarded connections.
+///
+/// Forwards raw bytes between the guest (via smoltcp channels) and
+/// `127.0.0.1:host_port` on the host. No inspection, no injection,
+/// no scrubbing. Target is always localhost; the guest cannot
+/// influence the destination.
+#[allow(dead_code)] // wired up once TcpForward match arms are implemented
+fn tcp_forward_thread(
+    rx: mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::SyncSender<Vec<u8>>,
+    host_port: u16,
+    audit_log: &AuditLog,
+) -> Result<(), crate::error::Error> {
+    use std::net::{Shutdown, SocketAddr, TcpStream};
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], host_port));
+    let upstream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("TCP forward connect to 127.0.0.1:{host_port}: {e}"))?;
+    upstream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    upstream.set_write_timeout(Some(Duration::from_secs(30)))?;
+
+    audit(
+        audit_log,
+        "forward_connect",
+        &[("host_port", &host_port.to_string())],
+    );
+    log::info!("TCP forward: connected to 127.0.0.1:{host_port}");
+
+    let mut upstream_r = upstream
+        .try_clone()
+        .map_err(|e| format!("TCP forward stream clone: {e}"))?;
+    let mut upstream_w = upstream;
+
+    // Upstream -> guest
+    let port_copy = host_port;
+    let read_thread = std::thread::spawn(move || {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match upstream_r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(e) => {
+                    log::debug!("TCP forward upstream read error for port {port_copy}: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Guest -> upstream
+    for data in rx {
+        if upstream_w.write_all(&data).is_err() {
+            break;
+        }
+    }
+
+    upstream_w.shutdown(Shutdown::Write).ok();
+    read_thread.join().ok();
+
+    audit(
+        audit_log,
+        "forward_disconnect",
+        &[("host_port", &host_port.to_string())],
+    );
+    log::info!("TCP forward: disconnected from 127.0.0.1:{host_port}");
+
+    Ok(())
+}
+
 /// Write a body chunk with secret scrubbing. Maintains an overlap
 /// buffer to catch secrets spanning chunk boundaries.
 fn write_scrubbed_chunk(
@@ -1369,7 +1536,7 @@ fn request_has_upgrade(data: &[u8]) -> bool {
 /// - `"api.example.com"` matches `"api.example.com"` and `"API.EXAMPLE.COM"`
 /// - `"*.example.com"` matches `"api.example.com"` and `"foo.bar.example.com"`
 /// - `"*.example.com"` does NOT match `"example.com"` (must have a subdomain)
-pub(crate) fn host_matches(pattern: &str, hostname: &str) -> bool {
+pub fn host_matches(pattern: &str, hostname: &str) -> bool {
     pattern.strip_prefix("*.").map_or_else(
         || pattern.eq_ignore_ascii_case(hostname),
         |suffix| {
@@ -1587,6 +1754,73 @@ mod tests {
     fn chunked_te_absent() {
         let req = b"POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
         assert!(!request_has_chunked_te(req));
+    }
+
+    // --- ForwardSpec parsing ---
+
+    #[test]
+    fn parse_forward_spec_single_port() {
+        let spec = parse_forward_spec("9222").unwrap();
+        assert_eq!(
+            spec,
+            ForwardSpec {
+                guest_port: 9222,
+                host_port: 9222
+            }
+        );
+    }
+
+    #[test]
+    fn parse_forward_spec_guest_host_pair() {
+        let spec = parse_forward_spec("8080:3000").unwrap();
+        assert_eq!(
+            spec,
+            ForwardSpec {
+                guest_port: 8080,
+                host_port: 3000
+            }
+        );
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_reserved_port_22() {
+        assert!(parse_forward_spec("22").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_reserved_port_53() {
+        assert!(parse_forward_spec("53").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_reserved_port_80() {
+        assert!(parse_forward_spec("80:8080").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_reserved_port_443() {
+        assert!(parse_forward_spec("443").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_zero_guest() {
+        assert!(parse_forward_spec("0:8080").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_zero_host() {
+        assert!(parse_forward_spec("8080:0").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_non_numeric() {
+        assert!(parse_forward_spec("abc").is_err());
+        assert!(parse_forward_spec("9222:abc").is_err());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_overflow() {
+        assert!(parse_forward_spec("99999").is_err());
     }
 
     // --- write_scrubbed_chunk overlap tests ---

@@ -107,6 +107,7 @@ mod tests {
             interactive: Some(true),
             network: NetworkConfig {
                 allow: vec!["api.anthropic.com".into(), "pypi.org".into()],
+                ..NetworkConfig::default()
             },
             ..Config::default()
         };
@@ -115,6 +116,7 @@ mod tests {
             MountConfig {
                 source: ".".into(),
                 target: Some("/workspace".into()),
+                read_only: false,
             },
         );
         cfg.env
@@ -135,6 +137,7 @@ mod tests {
             command: Some("/bin/sh".into()),
             network: NetworkConfig {
                 allow: vec!["registry.npmjs.org".into()],
+                ..NetworkConfig::default()
             },
             ..Config::default()
         };
@@ -143,6 +146,7 @@ mod tests {
             MountConfig {
                 source: ".".into(),
                 target: Some("/workspace".into()),
+                read_only: false,
             },
         );
 

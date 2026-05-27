@@ -94,6 +94,7 @@ fn end_to_end_secret_injection() {
         allowed_hosts: None,
         audit_log_path: None,
         discover: false,
+        forwards: &[],
     });
 }
 
@@ -146,5 +147,6 @@ fn synthetic_dns_resolution() {
         allowed_hosts: None,
         audit_log_path: None,
         discover: false,
+        forwards: &[],
     });
 }
