@@ -10,5 +10,6 @@ int krun_set_exec(void) { return 0; }
 int krun_start_enter(void) { return 0; }
 int krun_add_net_unixstream(void) { return 0; }
 int krun_add_virtiofs(void) { return 0; }
+int krun_add_virtiofs3(void) { return 0; }
 int krun_set_console_output(void) { return 0; }
 int krun_set_rlimits(void) { return 0; }
