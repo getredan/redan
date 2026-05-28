@@ -470,12 +470,15 @@ pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
 
 /// Shell command that creates the target user if it doesn't exist.
 /// Runs as root in the init script, before `runuser` drops privileges.
-/// Handles both Alpine (adduser) and Debian/Ubuntu (useradd).
+/// Tries useradd (shadow-utils), Debian adduser, then Alpine/BusyBox
+/// adduser. Stderr suppressed so failed attempts don't spew into the
+/// terminal.
 fn ensure_user_command(user: &str) -> String {
     format!(
         "id -u {user} >/dev/null 2>&1 || \
-         {{ command -v adduser >/dev/null 2>&1 && adduser -D -h /home/{user} {user} || \
-         useradd -m -s /bin/sh {user}; }}"
+         useradd -m -s /bin/sh {user} 2>/dev/null || \
+         adduser --disabled-password --gecos '' {user} 2>/dev/null || \
+         adduser -D -h /home/{user} {user} 2>/dev/null"
     )
 }
 
@@ -634,8 +637,10 @@ mod tests {
     fn ensure_user_command_creates_user() {
         let cmd = ensure_user_command("dev");
         assert!(cmd.starts_with("id -u dev"));
-        assert!(cmd.contains("adduser -D -h /home/dev dev"));
+        // useradd tried first, then Debian adduser, then Alpine adduser
         assert!(cmd.contains("useradd -m -s /bin/sh dev"));
+        assert!(cmd.contains("adduser --disabled-password --gecos '' dev"));
+        assert!(cmd.contains("adduser -D -h /home/dev dev"));
     }
 
     #[test]
