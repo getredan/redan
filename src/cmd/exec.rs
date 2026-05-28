@@ -166,6 +166,14 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         mount_commands.push(format!("mount -t virtiofs{mount_opts} {tag} {guest_path}"));
     }
 
+    // Validate run_as username before interpolating into shell commands
+    if let Some(user) = cfg.run_as
+        && let Err(msg) = validate_username(user)
+    {
+        eprintln!("invalid --run-as username: {msg}");
+        std::process::exit(1);
+    }
+
     // Build guest command: network setup + CA trust + mounts + user command
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
     let ca_update = vm::ca_update_commands();
@@ -468,6 +476,22 @@ pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
     }
 }
 
+fn validate_username(user: &str) -> Result<(), String> {
+    if user.is_empty() {
+        return Err("username must not be empty".into());
+    }
+    if user.len() > 32 {
+        return Err(format!("username too long ({} chars, max 32)", user.len()));
+    }
+    if !user
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("username contains invalid characters: {user:?}"));
+    }
+    Ok(())
+}
+
 /// Shell command that creates the target user if it doesn't exist.
 /// Runs as root in the init script, before `runuser` drops privileges.
 /// Tries useradd (shadow-utils), Debian adduser, then Alpine/BusyBox
@@ -630,6 +654,32 @@ mod tests {
         assert!(cmd.contains("useradd -m -s /bin/sh dev"));
         assert!(cmd.contains("adduser --disabled-password --gecos '' dev"));
         assert!(cmd.contains("adduser -D -h /home/dev dev"));
+    }
+
+    #[test]
+    fn validate_username_accepts_valid() {
+        assert!(validate_username("dev").is_ok());
+        assert!(validate_username("claude-code").is_ok());
+        assert!(validate_username("user_123").is_ok());
+        assert!(validate_username("a").is_ok());
+    }
+
+    #[test]
+    fn validate_username_rejects_empty() {
+        assert!(validate_username("").is_err());
+    }
+
+    #[test]
+    fn validate_username_rejects_shell_injection() {
+        assert!(validate_username("dev; rm -rf /").is_err());
+        assert!(validate_username("$(whoami)").is_err());
+        assert!(validate_username("dev\nroot").is_err());
+    }
+
+    #[test]
+    fn validate_username_rejects_too_long() {
+        let long = "a".repeat(33);
+        assert!(validate_username(&long).is_err());
     }
 
     #[test]
