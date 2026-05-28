@@ -482,14 +482,15 @@ fn ensure_user_command(user: &str) -> String {
     )
 }
 
-/// Wrap a command with `runuser -u {user} -- sh -c '...'` when `run_as` is set.
+/// Wrap a command with `runuser -u {user} -- {command}` when `run_as` is set.
 /// Network, CA, and mount setup run as root; only the user command drops privileges.
+/// Uses `--` to separate runuser flags from the command; no extra sh -c layer
+/// so the guest TTY passes through for interactive agents.
 fn wrap_run_as(command: &str, run_as: Option<&str>) -> String {
     let Some(user) = run_as else {
         return command.to_string();
     };
-    let escaped = command.replace('\'', "'\\''");
-    format!("runuser -u {user} -- sh -c '{escaped}'")
+    format!("runuser -u {user} -- {command}")
 }
 
 fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
@@ -611,26 +612,14 @@ mod tests {
         let result = wrap_run_as("claude --dangerously-skip-permissions", Some("dev"));
         assert_eq!(
             result,
-            "runuser -u dev -- sh -c 'claude --dangerously-skip-permissions'"
+            "runuser -u dev -- claude --dangerously-skip-permissions"
         );
     }
 
     #[test]
-    fn wrap_run_as_escapes_single_quotes() {
+    fn wrap_run_as_preserves_command_verbatim() {
         let result = wrap_run_as("echo 'hello world'", Some("dev"));
-        assert_eq!(
-            result,
-            "runuser -u dev -- sh -c 'echo '\\''hello world'\\'''"
-        );
-    }
-
-    #[test]
-    fn wrap_run_as_with_setup_command() {
-        let cmd = "mkdir -p /tmp/.claude && cp /redan/host-claude-config/.credentials.json /tmp/.claude/.credentials.json && chmod 600 /tmp/.claude/.credentials.json && claude --dangerously-skip-permissions";
-        let result = wrap_run_as(cmd, Some("dev"));
-        assert!(result.starts_with("runuser -u dev -- sh -c '"));
-        assert!(result.contains("mkdir -p /tmp/.claude"));
-        assert!(result.ends_with("claude --dangerously-skip-permissions'"));
+        assert_eq!(result, "runuser -u dev -- echo 'hello world'");
     }
 
     #[test]
