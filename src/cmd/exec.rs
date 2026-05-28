@@ -27,6 +27,8 @@ pub(crate) struct ExecConfig<'a> {
     pub session_id: Option<&'a str>,
     /// Run the user command as this OS user (via `runuser`).
     pub run_as: Option<&'a str>,
+    /// Launch headless Chrome with CDP and an allowlist proxy.
+    pub browser: bool,
 }
 
 pub(crate) fn run(cfg: &ExecConfig<'_>) {
@@ -211,6 +213,15 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         env.push(format!("{name}={value}"));
     }
 
+    if cfg.browser {
+        env.push("REDAN_BROWSER=1".into());
+        env.push(format!("REDAN_BROWSER_HOST={}", proxy::GATEWAY_IP));
+        env.push(format!(
+            "REDAN_BROWSER_CDP_PORT={}",
+            redan::browser::CDP_PORT
+        ));
+    }
+
     let vm_config = vm::VmConfig {
         rootfs: cfg.rootfs.into(),
         vcpus: 1,
@@ -265,6 +276,36 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
             }
         }
     }
+
+    // Launch headless Chrome if requested. Held until proxy::run returns.
+    let _browser = if cfg.browser {
+        match redan::browser::Browser::launch(redan::browser::BrowserConfig {
+            allowed_hosts: allowed_hosts.clone(),
+        }) {
+            Ok(b) => {
+                // Add CDP forward so the guest can reach Chrome
+                let cdp_fwd = proxy::ForwardSpec {
+                    guest_port: redan::browser::CDP_PORT,
+                    host_port: redan::browser::CDP_PORT,
+                };
+                if !forwards.iter().any(|f| f.guest_port == cdp_fwd.guest_port) {
+                    log::info!(
+                        "forward: :{} -> 127.0.0.1:{} (CDP)",
+                        cdp_fwd.guest_port,
+                        cdp_fwd.host_port
+                    );
+                    forwards.push(cdp_fwd);
+                }
+                Some(b)
+            }
+            Err(e) => {
+                eprintln!("error: failed to launch browser: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
     let discovered = proxy::run(proxy::ProxyConfig {
         host_sock: net_sock,

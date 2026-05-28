@@ -159,6 +159,13 @@ enum Cli {
         #[arg(long)]
         discover: bool,
 
+        /// Launch headless Chrome on the host with CDP access from the guest.
+        /// Chrome's outbound traffic goes through an allowlist proxy (same
+        /// hosts as `--allow-host`). The guest sees `REDAN_BROWSER=1`,
+        /// `REDAN_BROWSER_HOST`, and `REDAN_BROWSER_CDP_PORT` env vars.
+        #[arg(long)]
+        browser: bool,
+
         /// Run session in the background. Use `redan attach` to reconnect.
         #[arg(long, short = 'd')]
         detach: bool,
@@ -296,6 +303,7 @@ fn main() {
             mounts,
             audit_log,
             log_file: _,
+            browser,
             discover,
             detach,
             name,
@@ -316,6 +324,7 @@ fn main() {
                 detach,
                 name,
                 run_as: None,
+                browser,
             });
         }
         Cli::Attach { session } => attach_session(session.as_deref()),
@@ -478,6 +487,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // CLI flags map naturally to bools
 struct ExecArgs {
     image_name: Option<String>,
     rootfs: Option<String>,
@@ -494,6 +504,7 @@ struct ExecArgs {
     detach: bool,
     name: Option<String>,
     run_as: Option<String>,
+    browser: bool,
 }
 
 fn exec_command(args: ExecArgs) {
@@ -646,6 +657,7 @@ fn exec_command(args: ExecArgs) {
             args.discover,
             args.name.as_deref(),
             run_as.as_deref(),
+            args.browser,
         );
     } else {
         cmd::exec::run(&cmd::exec::ExecConfig {
@@ -664,6 +676,7 @@ fn exec_command(args: ExecArgs) {
             session_name: args.name.as_deref(),
             session_id: None,
             run_as: run_as.as_deref(),
+            browser: args.browser,
         });
     }
 }
@@ -684,6 +697,7 @@ struct DaemonConfig {
     discover: bool,
     session_name: Option<String>,
     run_as: Option<String>,
+    browser: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -701,6 +715,7 @@ fn exec_detached(
     discover: bool,
     session_name: Option<&str>,
     run_as: Option<&str>,
+    browser: bool,
 ) {
     // Create session directory and write daemon config.
     // Directory is 0o700 and config file is 0o600 because the config
@@ -732,6 +747,7 @@ fn exec_detached(
         discover,
         session_name: session_name.map(Into::into),
         run_as: run_as.map(Into::into),
+        browser,
     };
 
     let config_path = session_dir.join("daemon_config.json");
@@ -859,6 +875,7 @@ fn run_daemon(session_id: &str) {
         session_name: cfg.session_name.as_deref(),
         session_id: Some(session_id),
         run_as: cfg.run_as.as_deref(),
+        browser: cfg.browser,
     });
 }
 

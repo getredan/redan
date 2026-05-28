@@ -336,6 +336,10 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
     );
     messages.push("Mounting current directory → /workspace".into());
 
+    if crate::browser::find_chrome().is_some() {
+        messages.push("Chrome found: use --browser to enable headless browser access".into());
+    }
+
     AutoDetected {
         config,
         messages,
