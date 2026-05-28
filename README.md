@@ -26,82 +26,51 @@ These aren't hypothetical. Every file the agent reads is a potential
 injection vector, and LLM prompt injection is an open problem with no
 general solution.
 
-Redan puts the agent in a microVM that boots in under a second. The
-agent gets a real dev environment, but it's isolated from your host.
-Own filesystem, own network, only the hosts you allow. Your API keys
-never enter the VM. Redan injects them at the network layer, only for
-the hosts you permit. Even if the agent is compromised by a prompt
-injection, it has no secret to steal and nowhere to send it.
-
-# What's Redan?
-
-Redan uses [libkrun] microVMs (sub-second boot) and a userspace TCP/IP
-stack to sandbox AI agents. The agent gets a full Linux environment with
-your project files mounted in, but runs in its own VM with its own
-filesystem and a network proxy that enforces a host allowlist. Secrets
-are injected into HTTPS request headers by the proxy on the host side,
-so they never exist inside the VM.
-
-Works with Claude Code, Codex, Copilot, Cursor, or any command-line AI
-agent.
+Redan puts the agent in a [libkrun] microVM that boots in under a second.
+The agent gets a real Linux dev environment with your project mounted in,
+but it's isolated from your host: own filesystem, own network, only the
+hosts you allow. Your API keys never enter the VM. Redan injects them at
+the network layer, only for the hosts you permit. Even if the agent is
+fully compromised, it has no secret to steal and nowhere to send it.
 
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
 
-## Installation
+## Getting started
 
-Redan requires Linux with KVM (`/dev/kvm`) and libkrun.
+Redan requires Linux with KVM (`/dev/kvm`) and [libkrun].
 
-### Arch Linux
+**Install libkrun:**
 
 ```bash
+# Arch
 pacman -S libkrun
-```
 
-### Fedora
-
-```bash
+# Fedora
 dnf install libkrun-devel
-```
 
-### Ubuntu / Debian
-
-libkrun is not yet in the Ubuntu/Debian repositories. Build from source:
-
-```bash
+# Ubuntu/Debian (not yet in repos, build from source)
 apt install build-essential libkrunfw-dev
 git clone https://github.com/containers/libkrun
 cd libkrun && make && sudo make install
 ```
 
-### Then install redan
+**Install redan:**
 
-[Pre-built binaries for Linux x86_64 and aarch64 are available on the
-releases page.](https://github.com/getredan/redan/releases) Download,
-extract, and move to your `$PATH`:
-
-```bash
-tar xzf redan-*.tar.gz
-sudo mv redan /usr/local/bin/
-```
-
-Or build from source (requires Rust 1.85+, edition 2024):
+[Pre-built binaries](https://github.com/getredan/redan/releases) for
+Linux x86_64 and aarch64, or build from source (Rust 1.92+):
 
 ```bash
 cargo install --git https://github.com/getredan/redan.git
 ```
 
-Verify everything works:
+**Verify:**
 
 ```bash
 redan doctor
 ```
 
-## Setup with Claude Code
-
-### Zero-config (recommended)
-
-Set your API key and run:
+## Claude Code (zero-config)
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -120,238 +89,170 @@ It prints what it chose so nothing is silent:
   Mounting current directory → /workspace
 ```
 
+Git remote hosts are added to the network allowlist automatically so
+git push/pull works out of the box. The agent runs as an unprivileged
+user inside the VM (not root), matching how Claude Code expects to
+operate.
+
 Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
-flags. Git remote hosts are added to the network allowlist so git works
-out of the box. Host files like `~/.ssh` and `~/.gitconfig` are not
-mounted by default (they'd be writable by the guest). Add them via
-`redan.toml` if you need them -- `redan init` generates commented-out
-examples.
+flags. For OAuth-based auth (Claude Max/Team/Enterprise), redan detects
+your `~/.claude` credentials and mounts them read-only instead.
 
-### With redan.toml
+## Any agent
 
-For repeatable setups, use `redan init`:
+Redan works with any command-line AI agent. Build an image, tell redan
+what to run and what hosts to allow:
 
 ```bash
-redan init --claude
-redan image import myproject --devcontainer .devcontainer/redan
-redan exec
+redan image create myimage --packages "python3 nodejs npm"
+redan exec --image myimage \
+  --secret "API_KEY=env://MY_API_KEY:api.example.com" \
+  --mount ./my-project \
+  -- my-agent --some-flag
 ```
 
-`redan init --claude` generates a devcontainer with Claude Code, Node.js,
-and project-appropriate tooling (Python/uv, Rust, Go, etc.) plus a
-`redan.toml` with Anthropic API hosts pre-configured.
-
-### Manual
-
-```bash
-redan image import claude-code --dockerfile dockerfiles/claude-code.dockerfile
-redan exec --image claude-code -i \
-  --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
-  --mount ./my-project
-```
-
-## Configuration
-
-Use `redan.toml` instead of long CLI invocations. `redan init` generates
-one from project detection:
-
-```bash
-redan init          # detect project type, generate config
-redan init --claude # generate config + devcontainer for Claude Code
-```
-
-Example `redan.toml`:
+Or use `redan.toml` for repeatable setups:
 
 ```toml
-image = "myproject"
-command = "claude --dangerously-skip-permissions"
+image = "myimage"
+command = "my-agent --some-flag"
 interactive = true
 
 [network]
-allow = ["api.anthropic.com", "pypi.org"]
+allow = ["api.example.com", "registry.npmjs.org"]
 
-[secrets.ANTHROPIC_API_KEY]
-value = "sk-ant-..."
-hosts = ["api.anthropic.com"]
+[secrets.API_KEY]
+value = "env://MY_API_KEY"
+hosts = ["api.example.com"]
 
 [mount.workspace]
 source = "."
 target = "/workspace"
 
 [env]
-CLAUDE_CONFIG_DIR = "/workspace/.claude"
+MY_SETTING = "value"
 ```
 
-Looks for `redan.toml` in the current directory, then
-`~/.config/redan/config.toml`. CLI flags override file values.
-
-Redan also reads `sandbox.network.allowedDomains` from Claude Code
-settings (`.claude/settings.json` and `~/.claude/settings.json`) and
-merges them into the network allowlist automatically.
-
-## Quick start
-
-### Run an agent (zero-config)
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-redan exec
-```
-
-The agent sees `$ANTHROPIC_API_KEY` as a placeholder token. The proxy
-injects the real key only in HTTPS requests to `api.anthropic.com`.
-Responses are scrubbed of the real value before the agent sees them.
-
-### Run in the background
-
-```bash
-redan exec -d --name my-agent
-redan logs my-agent -f           # tail the logs
-redan stop my-agent              # stop when done
-```
-
-### Run with explicit config
-
-```bash
-redan exec --image claude-code \
-  --secret "ANTHROPIC_API_KEY=sk-ant-...:api.anthropic.com" \
-  --mount ./my-project \
-  -- claude --print "review this project"
-```
-
-**Note:** `--secret` literal values are visible in process listings (`ps`).
-For production use, prefer `env://`, `vault://`, or `--secret-file`,
-which keep secrets out of process listings by having redan read them
-internally.
-
-### Check prerequisites
-
-```bash
-redan doctor                         # system checks
-redan doctor --image myimage         # check a specific image exists
-redan doctor --secret "KEY=val:host" # validate secret syntax + providers
-```
-
-Checks for /dev/kvm, libkrun, libkrunfw, available images, and
-whether `ANTHROPIC_API_KEY` is set (for zero-config Claude Code).
-
-## How it works
-
-```
-Guest VM (libkrun, <1s boot)
-  |
-  |  virtio-fs (project dir read-write)
-  |  virtio-net (ethernet frames over unix socket)
-  v
-smoltcp (userspace TCP/IP on host)
-  |
-  |-- UDP :53  -> synthetic DNS (per-host IP allocation)
-  |-- TCP :22  -> transparent relay (allowlist checked, no injection)
-  |-- TCP :80  -> rejected (HTTPS only)
-  |-- TCP :443 -> TLS MITM proxy
-        |
-        |-- SNI extraction
-        |-- ephemeral cert (signed by per-session CA)
-        |-- secret injection (headers only, host-allowlisted)
-        |-- request forwarded to real upstream
-        |-- response scrubbed of secret values
-        |-- streamed back to guest
-```
-
-**Key properties:**
-- Guest never sees real secret values (only placeholders)
-- Secrets are injected only for explicitly allowed hosts
-- Injection is restricted to HTTP headers (not URLs, not bodies)
-- DNS is synthetic -- each hostname gets a unique IP, no queries leave the host
-- All traffic routes through the gateway IP (no direct IP access)
-- Default-deny outbound networking
-- Response scrubbing is best-effort (literal byte match)
+`redan init` generates a config from project detection. `redan init --claude`
+adds a devcontainer with Claude Code, Node.js, and project-appropriate
+tooling.
 
 ## Secrets
 
-Format: `ENV_VAR=value:allowed_host1,allowed_host2`
-
-The value can be a literal or a provider URI:
+Secrets are injected into HTTPS request headers by the proxy on the host
+side. The agent only sees placeholder tokens. Format:
+`ENV_VAR=value:allowed_hosts`
 
 ```bash
-# Literal value
+# Literal
 --secret "GITHUB_TOKEN=ghp_abc123:api.github.com"
 
-# From host environment variable
+# From host env var (read at startup, never passed to VM)
 --secret "GITHUB_TOKEN=env://GITHUB_TOKEN:api.github.com"
 
-# From HashiCorp Vault (KV v2)
---secret "GITHUB_TOKEN=vault://secret/myapp#github_token:api.github.com"
+# From HashiCorp Vault KV v2
+--secret "API_KEY=vault://secret/myapp#api_key:api.example.com"
 
 # Multiple hosts
 --secret "API_KEY=sk-abc:api.example.com,cdn.example.com"
 
 # From a file (one spec per line, # comments)
 --secret-file .redan-secrets
+```
 
-# Multiple secrets
---secret "GITHUB_TOKEN=env://GITHUB_TOKEN:api.github.com" \
---secret "NPM_TOKEN=vault://secret/myapp#npm_token:registry.npmjs.org"
+`env://` and `vault://` keep secrets out of process listings. Vault
+falls back to `~/.vault-token` if `VAULT_TOKEN` is not set.
+
+**Note:** Redan injects into HTTP headers only. Auth patterns that need
+secrets in request bodies (OAuth token exchanges, AWS SigV4), TLS
+handshakes (mTLS), or cookies are not supported for injection. Redan
+still provides VM isolation and network restriction for those cases,
+you just pass the credential via environment variable.
+
+## Network policy
+
+Default-deny outbound. You must explicitly allow hosts:
+
+```bash
+redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
+```
+
+Wildcard patterns work: `"*.amazonaws.com"` matches any subdomain.
+Hosts required by secrets are included automatically. Connections to
+private IP ranges (RFC 1918, link-local, cloud metadata) are blocked
+even in allow-all mode. Domain fronting is blocked: HTTP Host must
+match TLS SNI.
+
+**Discover mode** lets you figure out what hosts the agent needs:
+
+```bash
+redan exec --discover -- my-agent --some-flag
+```
+
+Redan allows all connections, prints the observed hosts at exit, and
+generates a `[network]` config block you can paste into `redan.toml`.
+
+## Browser support
+
+For agents that need web access (research, testing, scraping), redan
+can launch headless Chrome on the host with CDP (Chrome DevTools
+Protocol) access from the guest:
+
+```bash
+redan exec --browser --allow-host "*.example.com"
+```
+
+Chrome runs on the host, not in the VM. Its outbound traffic goes
+through an allowlist proxy that enforces the same host restrictions
+as the main proxy, including SSRF protection for private IPs. The
+agent controls Chrome via CDP through port forwarding.
+
+The guest gets these env vars:
+- `REDAN_BROWSER=1`
+- `REDAN_BROWSER_HOST` (gateway IP to connect to)
+- `REDAN_BROWSER_CDP_PORT` (CDP port, default 9222)
+
+Chrome's sandbox stays enabled. The VM isolates the agent, Chrome's
+sandbox protects the host.
+
+Requires Chromium or Google Chrome installed on the host.
+`redan doctor` checks for it.
+
+## Port forwarding
+
+Forward TCP ports from guest to host, useful for dev servers, databases,
+or services running on the host that the agent needs to reach:
+
+```bash
+# Same port both sides
+redan exec --forward 8080
+
+# Different ports: guest connects to 3000, redan relays to host 8080
+redan exec --forward 3000:8080
 ```
 
 In `redan.toml`:
 
 ```toml
-[secrets.GITHUB_TOKEN]
-value = "env://GITHUB_TOKEN"
-hosts = ["api.github.com"]
+[network]
+forward = ["8080", "3000:8080"]
 ```
 
-### Environment variable provider
-
-`env://VAR_NAME` reads the secret from a host environment variable at
-session start. The variable is read on the host and never passed into
-the VM.
-
-```bash
-export GITHUB_TOKEN=ghp_abc123
-redan exec --secret "GITHUB_TOKEN=env://GITHUB_TOKEN:api.github.com"
-```
-
-Fails loudly if the variable is not set or is empty.
-
-### Vault integration
-
-Redan reads secrets from HashiCorp Vault KV v2 via `vault://path#field`.
-Configure with standard Vault environment variables:
-
-```bash
-export VAULT_ADDR='https://vault.example.com:8200'
-export VAULT_TOKEN='hvs.xxx'
-
-redan exec --image claude-code \
-  --secret "API_KEY=vault://myapp/prod#api_key:api.example.com"
-```
-
-Falls back to `~/.vault-token` if `VAULT_TOKEN` is not set.
-
-### Provider architecture
-
-Secret resolution is pluggable via the `SecretProvider` trait. The open
-core ships with `Literal`, `Env`, and `Vault` providers. The trait is
-designed for extension -- additional backends (AWS Secrets Manager,
-1Password, etc.) can be added in the future.
-
-The value can contain colons (splits on the last `:`). The guest
-receives a `redan_ph_<name>_<hex>` placeholder via environment variable.
+The guest connects to the gateway IP on the guest port; redan relays
+to `127.0.0.1` on the host port.
 
 ## Mounts
 
 ```bash
-# Mount to /workspace (default)
---mount /home/chris/project
-
-# Mount to specific guest path
---mount /home/chris/project:/code
+--mount /home/chris/project              # mounts to /workspace
+--mount /home/chris/project:/code        # custom guest path
+--mount /home/chris/.config/tool:ro      # read-only
+--mount /home/chris/.ssh:/ssh-keys:ro    # host config, read-only
 ```
 
 Uses virtio-fs for host directory sharing. The guest has read-write
-access, and git is your safety net for recovering from unwanted changes.
+access by default. Append `:ro` for read-only. Git is your safety net
+for recovering from unwanted changes to mounted directories.
 
 ## Image management
 
@@ -361,240 +262,105 @@ redan image import myimage --from ubuntu:24.04
 redan image import myimage --dockerfile path/to/Dockerfile
 redan image import myimage --devcontainer .devcontainer
 redan image list
-redan image update myimage
+redan image update myimage    # rebuild from original source
 redan image remove myimage
 ```
 
-`create` builds Alpine-based images with apk packages. `import` pulls
-from Docker images, builds from Dockerfiles, or reads devcontainer
-configs (`build.dockerfile`, `image`, and `dockerComposeFile` are all
-supported).
-
-Images are rootfs directories stored at `~/.local/share/redan/images/`
-and base tarballs are cached at `~/.cache/redan/`.
-
-### Image freshness
-
-Redan tracks when images were built and from what source. `redan image
-list` shows the age of each image, `redan doctor` warns about images
-older than 30 days, and `redan exec` prints a non-blocking warning
-before launching.
-
-```bash
-redan image update claude-code   # rebuild from the original Dockerfile
-```
-
-`redan image update` remembers how the image was built (Dockerfile,
-Docker image, devcontainer, or `create` args) and rebuilds from
-the same source.
-
-## Network policy
-
-Redan defaults to **deny-all** outbound networking. You must explicitly
-allow hosts:
-
-```toml
-[network]
-allow = ["api.anthropic.com", "registry.npmjs.org"]
-```
-
-Or on the CLI:
-
-```bash
-redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
-```
-
-Wildcard patterns are supported: `"*.amazonaws.com"` matches any
-subdomain. Hosts required by secrets are automatically included.
-Use `"*"` to allow all outbound connections (not recommended).
-
-Connections to private IP ranges (RFC 1918, link-local, cloud metadata
-endpoints) are blocked by default, even in allow-all mode. Hosts
-explicitly in the allowlist may resolve to private IPs -- add
-`"localhost"` if you need local services.
-
-Domain fronting is blocked: requests where the HTTP Host header doesn't
-match the TLS SNI hostname are rejected (HTTP 421).
-
-### Discover mode
-
-Don't know what hosts your agent needs? Run once in discover mode:
-
-```bash
-redan exec --image myimage --discover -- claude --print "build this project"
-```
-
-Redan allows all connections and prints the observed hosts at exit:
-
-```
---- discovered hosts ---
-The agent connected to these hosts:
-
-  api.anthropic.com
-  registry.npmjs.org
-
-Suggested redan.toml:
-
-[network]
-allow = [
-    "api.anthropic.com",
-    "registry.npmjs.org",
-]
-```
-
-Copy the output into your `redan.toml` and subsequent runs enforce it.
+`create` builds Alpine-based images. `import` pulls from Docker images,
+Dockerfiles, or devcontainer configs. `update` remembers how the image
+was built and rebuilds from the same source. `redan doctor` warns about
+images older than 30 days.
 
 ## Sessions
 
-Each `redan exec` creates a session with a unique ID. Session metadata,
-logs, and audit events are stored at `~/.local/state/redan/sessions/`.
-
-### Detached sessions
-
-Run agents in the background:
-
 ```bash
-redan exec -d                    # detach, auto-generated ID
-redan exec -d --name my-agent    # detach with a name
-```
+redan exec -d --name my-agent    # run in background
+redan logs my-agent -f           # tail the logs
+redan attach my-agent            # reconnect
+redan stop my-agent              # SIGTERM, wait 3s, SIGKILL
 
-### Session management
-
-```bash
-redan sessions                # list all sessions
-redan sessions show <id>      # session details
-redan sessions remove         # remove all exited sessions
-redan sessions remove <id>    # remove a specific session
-```
-
-### Attach and stop
-
-```bash
-redan attach                  # attach to most recent running session
-redan attach my-agent         # attach by name or ID prefix
-redan stop                    # stop most recent running session
-redan stop my-agent           # stop by name or ID prefix
-```
-
-`redan stop` sends SIGTERM, waits 3 seconds, then SIGKILL.
-
-### Logs
-
-```bash
-redan logs                    # logs from most recent session
-redan logs -f                 # tail -f
-redan logs my-agent           # logs by name or session ID
+redan sessions                   # list all
+redan sessions show <id>         # details
+redan sessions remove            # clean up exited sessions
 ```
 
 ## Audit log
 
 ```bash
-redan exec --audit-log events.jsonl ...
+redan exec --audit-log events.jsonl
 ```
 
-Structured JSON-lines event log for security audit and debugging:
-
-```jsonl
-{"ts":"...","event":"connect","host":"api.github.com"}
-{"ts":"...","event":"inject","host":"api.github.com","env":"API_KEY"}
-{"ts":"...","event":"scrub","host":"api.github.com"}
-{"ts":"...","event":"reject","host":"evil.com","reason":"not_allowed"}
-```
-
-Audit logs are also stored per-session automatically.
+JSON-lines event log: connections, injections, scrubs, rejections.
+Also stored per-session automatically.
 
 ## Agent awareness
 
-Redan exposes network policy to the guest so AI agents can understand
-their environment instead of guessing "the internet is broken":
+Redan tells the guest about its environment so agents can adapt
+instead of hitting mysterious "connection failed" errors:
 
-**Environment variables:**
-- `REDAN=1` -- running inside a redan sandbox
-- `REDAN_NETWORK=restrict|deny-all|allow-all` -- policy mode
-- `REDAN_ALLOWED_HOSTS=host1,host2,...` -- permitted outbound hosts
+- `REDAN=1` (running in a redan sandbox)
+- `REDAN_NETWORK=restrict|deny-all|allow-all` (policy mode)
+- `REDAN_ALLOWED_HOSTS=host1,host2,...` (permitted hosts)
+- `/etc/redan/policy` (human-readable policy file)
 
-**Policy file:** `/etc/redan/policy` -- human-readable description of
-what's allowed and what's blocked.
+## How it works
 
-Agents that check `$REDAN` can adapt their behavior: skip web searches,
-avoid fetching URLs outside the allowlist, and give users clear error
-messages instead of "connection failed".
+```
+Guest VM (libkrun, <1s boot)
+  |
+  |  virtio-fs (project dir)
+  |  virtio-net (ethernet frames over unix socket)
+  v
+smoltcp (userspace TCP/IP on host)
+  |
+  |-- UDP :53  -> synthetic DNS (per-host IP allocation)
+  |-- TCP :22  -> transparent relay (allowlist checked)
+  |-- TCP :80  -> rejected (HTTPS only)
+  |-- TCP :443 -> TLS MITM proxy
+  |     |-- SNI extraction, ephemeral cert
+  |     |-- secret injection (headers, host-scoped)
+  |     |-- response scrubbing (literal byte match)
+  |     '-- forwarded to real upstream
+  |-- TCP fwd -> port forwarding to host localhost
+  v
+internet (allowed hosts only)
+```
+
+DNS is synthetic (no queries leave the host), all traffic routes through
+the gateway (no direct IP access), and HTTP/1.1 only (HTTP/2 binary
+framing would bypass header parsing). SSH on port 22 is forwarded as-is
+with allowlist enforcement but no injection/scrubbing.
 
 ## Security model
 
-Redan's threat model: a compromised or malicious AI agent running inside
-the VM tries to exfiltrate secrets or access unauthorized resources.
+Redan's threat model: a compromised or malicious AI agent inside the VM
+tries to exfiltrate secrets or access unauthorized resources.
 
-**What redan prevents:**
-- Agent reading real secret values from environment
-- Agent sending secrets to unauthorized hosts
-- Agent making DNS queries to the internet
-- Agent connecting directly to IP addresses (all traffic goes through proxy)
-- Agent reaching hosts not in the allowlist (default-deny networking)
+**What redan prevents:** agent reading real secret values, sending
+secrets to unauthorized hosts, making DNS queries to the internet,
+connecting directly to IP addresses, reaching hosts not in the
+allowlist.
 
-**Known limitations:**
-- Scrubbing doesn't catch encoded secrets (base64, URL-encoding, etc.)
-- No HTTP request body inspection (secrets in headers only)
-
+**Known limitations:** scrubbing is literal byte match (doesn't catch
+base64/URL-encoded secrets), no request body inspection, HTTP/1.1 only.
 Primary defense is the host allowlist, not scrubbing. Scrubbing reduces
 accidental exposure; it's not a hard security boundary.
 
 See [docs/security-model.md](docs/security-model.md) for the full
-threat model, side-channel analysis, and known limitations.
+threat model and side-channel analysis.
 
-## Limitations
+## Platform
 
-Be aware of what redan does and doesn't support before deploying it.
+Linux only. Requires KVM (`/dev/kvm`). x86_64 and aarch64.
 
-### Supported auth patterns
-
-- `Authorization: Bearer <token>` -- standard API key injection
-- Custom headers (`X-Api-Key`, etc.) -- any header-based auth
-- Multiple secrets to multiple hosts in one session
-
-### Unsupported auth patterns
-
-These patterns require secrets in places redan currently can't inject:
-
-- **OAuth flows** -- token exchanges happen in request/response bodies
-- **AWS SigV4** -- request signing requires the secret at the call site
-  to compute HMAC over headers and body
-- **Client certificates** -- mTLS requires the cert in the TLS handshake,
-  which redan terminates
-- **Body-embedded tokens** -- GraphQL variables, form fields, JSON bodies
-  carrying auth tokens
-- **Cookie-based auth** -- `Set-Cookie` from login flows, session tokens
-
-If your API requires one of these, redan can still provide VM isolation
-and network restriction, but can't inject or scrub the credential.
-Pass it via environment variable (the guest sees the real value).
-
-### Protocol constraints
-
-- **HTTP/1.1 only.** Redan forces ALPN to `http/1.1`. All major APIs
-  (Anthropic, OpenAI, GitHub, npm) support HTTP/1.1. If a server
-  requires HTTP/2, it won't work through redan.
-- **No WebSocket.** Upgrade requests return 501. Binary framing after
-  the upgrade would bypass scrubbing.
-- **SSH is transparent.** Port 22 connections are forwarded as-is to
-  the real upstream server. No secret injection or scrubbing -- SSH
-  handles its own authentication. The allowlist still applies.
-- **No other raw TCP/UDP.** Database connections, gRPC (over H2), and
-  other protocols are not currently supported.
-- **HTTPS only.** Plain HTTP on port 80 is rejected.
-
-### Platform
-
-- **Linux only.** Requires KVM (`/dev/kvm`). libkrun supports macOS
-  via Hypervisor.framework but this is untested.
-- **x86_64 and aarch64.** Other architectures are untested.
-- **No Windows.** WSL2 with KVM passthrough may work but is untested.
+libkrun supports macOS via Hypervisor.framework but this is untested.
+No Windows support (WSL2 with KVM passthrough may work, untested).
 
 ## Status
 
-**Alpha.** The full chain works end-to-end: `redan init --claude` through
+Alpha. The full chain works end-to-end: `redan init --claude` through
 interactive Claude Code sessions with network policy enforcement.
-Pre-built binaries for Linux x86_64 and aarch64 on
+Pre-built binaries on
 [GitHub Releases](https://github.com/getredan/redan/releases).
 
 This code has not been through an independent security audit. Use at
@@ -606,10 +372,10 @@ If redan is useful to you, consider [buying me a coffee](https://buymeacoffee.co
 
 ## Acknowledgments
 
-- [libkrun] and [libkrunfw] -- microVM engine and guest firmware
-- [smoltcp] -- userspace TCP/IP stack
-- [rustls] and [rcgen] -- TLS implementation and certificate generation
-- [Gondolin] -- network-layer secret injection pattern for agent sandboxes
+- [libkrun] and [libkrunfw] for the microVM engine and guest firmware
+- [smoltcp] for the userspace TCP/IP stack
+- [rustls] and [rcgen] for TLS and certificate generation
+- [Gondolin] for the network-layer secret injection pattern
 
 ## License
 
