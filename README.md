@@ -305,7 +305,7 @@ instead of hitting mysterious "connection failed" errors:
 
 ## How it works
 
-```
+```text
 Guest VM (libkrun, <1s boot)
   |
   |  virtio-fs (project dir)

@@ -288,13 +288,24 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
                     guest_port: redan::browser::CDP_PORT,
                     host_port: redan::browser::CDP_PORT,
                 };
-                if !forwards.iter().any(|f| f.guest_port == cdp_fwd.guest_port) {
-                    log::info!(
-                        "forward: :{} -> 127.0.0.1:{} (CDP)",
-                        cdp_fwd.guest_port,
-                        cdp_fwd.host_port
-                    );
-                    forwards.push(cdp_fwd);
+                match forwards.iter().find(|f| f.guest_port == cdp_fwd.guest_port) {
+                    Some(existing) if existing.host_port != cdp_fwd.host_port => {
+                        eprintln!(
+                            "error: --browser reserves guest port {} for Chrome CDP, \
+                             but it is already forwarded to host port {}",
+                            cdp_fwd.guest_port, existing.host_port
+                        );
+                        std::process::exit(1);
+                    }
+                    Some(_) => {}
+                    None => {
+                        log::info!(
+                            "forward: :{} -> 127.0.0.1:{} (CDP)",
+                            cdp_fwd.guest_port,
+                            cdp_fwd.host_port
+                        );
+                        forwards.push(cdp_fwd);
+                    }
                 }
                 Some(b)
             }

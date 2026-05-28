@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -71,8 +71,13 @@ impl Browser {
             .map_err(|e| format!("failed to generate random bytes: {e}"))?;
         let hex = rng_buf.map(|b| format!("{b:02x}")).join("");
         let profile_dir = std::env::temp_dir().join(format!("redan-chrome-{hex}"));
-        std::fs::create_dir_all(&profile_dir)
-            .map_err(|e| format!("failed to create profile dir: {e}"))?;
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&profile_dir)
+                .map_err(|e| format!("failed to create profile dir: {e}"))?;
+        }
 
         // Bind the allowlist proxy
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -95,7 +100,9 @@ impl Browser {
             .spawn(move || run_allowlist_proxy(listener, allowed_hosts, shutdown_clone))
             .map_err(|e| format!("failed to spawn proxy thread: {e}"))?;
 
-        let mut child = std::process::Command::new(&chrome)
+        // From this point, any early return must tear down the proxy thread
+        // and profile dir since Drop won't run on an unconstructed Self.
+        let mut child = match std::process::Command::new(&chrome)
             .args([
                 "--headless=new",
                 &format!("--remote-debugging-port={CDP_PORT}"),
@@ -113,27 +120,35 @@ impl Browser {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("failed to launch Chrome at {}: {e}", chrome.display()))?;
+        {
+            Ok(child) => child,
+            Err(e) => {
+                cleanup_proxy(&shutdown, proxy_thread, &profile_dir);
+                return Err(format!(
+                    "failed to launch Chrome at {}: {e}",
+                    chrome.display()
+                ));
+            }
+        };
 
         if !poll_cdp_ready(10) {
-            if let Some(status) = child.try_wait().ok().flatten() {
+            let msg = if let Some(status) = child.try_wait().ok().flatten() {
                 let mut stderr_buf = String::new();
                 if let Some(ref mut pipe) = child.stderr {
                     let _ = pipe.read_to_string(&mut stderr_buf);
                 }
-                shutdown.store(true, Ordering::Relaxed);
-                let _ = std::fs::remove_dir_all(&profile_dir);
-                return Err(if stderr_buf.is_empty() {
+                if stderr_buf.is_empty() {
                     format!("Chrome exited with {status} before CDP was ready")
                 } else {
                     format!("Chrome exited with {status}: {}", stderr_buf.trim())
-                });
-            }
-            shutdown.store(true, Ordering::Relaxed);
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = std::fs::remove_dir_all(&profile_dir);
-            return Err("Chrome started but CDP endpoint did not respond within 10s".into());
+                }
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+                "Chrome started but CDP endpoint did not respond within 10s".into()
+            };
+            cleanup_proxy(&shutdown, proxy_thread, &profile_dir);
+            return Err(msg);
         }
 
         log::info!("Chrome launched (pid {}, proxy :{proxy_port})", child.id());
@@ -183,6 +198,12 @@ impl Drop for Browser {
     }
 }
 
+fn cleanup_proxy(shutdown: &AtomicBool, thread: JoinHandle<()>, profile_dir: &std::path::Path) {
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = thread.join();
+    let _ = std::fs::remove_dir_all(profile_dir);
+}
+
 fn poll_cdp_ready(timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
     let url = format!("http://127.0.0.1:{CDP_PORT}/json/version");
@@ -203,19 +224,32 @@ fn poll_cdp_ready(timeout_secs: u64) -> bool {
 // Allowlist proxy
 // ---------------------------------------------------------------------------
 
+const MAX_PROXY_WORKERS: usize = 32;
+
 #[allow(clippy::needless_pass_by_value)] // Owned values needed: moved into thread
 fn run_allowlist_proxy(
     listener: TcpListener,
     allowed_hosts: Option<Arc<[String]>>,
     shutdown: Arc<AtomicBool>,
 ) {
+    let active = Arc::new(AtomicUsize::new(0));
+
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
+                if active.load(Ordering::Relaxed) >= MAX_PROXY_WORKERS {
+                    drop(stream);
+                    continue;
+                }
                 let hosts = allowed_hosts.clone();
+                let active = active.clone();
+                active.fetch_add(1, Ordering::Relaxed);
                 let _ = std::thread::Builder::new()
                     .name("browser-proxy-conn".into())
-                    .spawn(move || handle_proxy_connection(stream, hosts.as_deref()));
+                    .spawn(move || {
+                        handle_proxy_connection(stream, hosts.as_deref());
+                        active.fetch_sub(1, Ordering::Relaxed);
+                    });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -391,9 +425,14 @@ fn resolve_and_connect(host: &str, port: u16) -> Result<TcpStream, String> {
         }
     }
 
-    let sock_addrs: Vec<SocketAddr> = addrs.into_iter().map(SocketAddr::V4).collect();
-    TcpStream::connect(&sock_addrs[..])
-        .map_err(|e| format!("connection to {host}:{port} failed: {e}"))
+    let mut last_err = String::new();
+    for addr in addrs {
+        match TcpStream::connect_timeout(&SocketAddr::V4(addr), Duration::from_secs(10)) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(format!("connection to {host}:{port} failed: {last_err}"))
 }
 
 fn relay_bidirectional(a: TcpStream, b: TcpStream) {
