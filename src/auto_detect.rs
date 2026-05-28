@@ -35,7 +35,8 @@ static CLAUDE_CODE: AgentDef = AgentDef {
     ],
     interactive: true,
     timeout_secs: 3600,
-    guest_env: &[],
+    run_as: Some("dev"),
+    guest_env: &[("HOME", "/home/dev")],
     api_key: Some(ApiKeyDef {
         env_var: "ANTHROPIC_API_KEY",
         inject_hosts: &["api.anthropic.com"],
@@ -68,6 +69,9 @@ pub struct AgentDef {
     pub hosts: &'static [&'static str],
     pub interactive: bool,
     pub timeout_secs: u64,
+    /// Run the user command as this OS user (via `runuser`).
+    /// None means run as root (libkrun default).
+    pub run_as: Option<&'static str>,
     /// Extra guest env vars (set regardless of auth method).
     pub guest_env: &'static [(&'static str, &'static str)],
     /// API-key-based auth (tried first).
@@ -115,6 +119,8 @@ pub struct AutoDetected {
     pub messages: Vec<String>,
     /// Whether the agent's image needs to be built first.
     pub needs_image_build: bool,
+    /// Run the user command as this OS user (via `runuser`).
+    pub run_as: Option<&'static str>,
 }
 
 /// A detected agent with its resolved auth method.
@@ -334,6 +340,7 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
         config,
         messages,
         needs_image_build,
+        run_as: agent.run_as,
     }
 }
 
@@ -406,6 +413,11 @@ mod tests {
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
         assert!(auto.config.command.as_deref().unwrap().contains("claude"));
         assert_eq!(auto.config.interactive, Some(true));
+        assert_eq!(auto.run_as, Some("dev"));
+        assert_eq!(
+            auto.config.env.get("HOME").map(String::as_str),
+            Some("/home/dev")
+        );
 
         let secret = auto.config.secrets.get("ANTHROPIC_API_KEY").unwrap();
         assert_eq!(secret.value, "env://ANTHROPIC_API_KEY");

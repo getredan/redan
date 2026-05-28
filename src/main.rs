@@ -315,6 +315,7 @@ fn main() {
                 discover,
                 detach,
                 name,
+                run_as: None,
             });
         }
         Cli::Attach { session } => attach_session(session.as_deref()),
@@ -492,6 +493,7 @@ struct ExecArgs {
     discover: bool,
     detach: bool,
     name: Option<String>,
+    run_as: Option<String>,
 }
 
 fn exec_command(args: ExecArgs) {
@@ -514,8 +516,8 @@ fn exec_command(args: ExecArgs) {
     // 1. Config file exists → use it (existing behavior)
     // 2. Explicit CLI flags → use them (existing behavior)
     // 3. Neither → try auto-detect
-    let cfg = if let Some((_, cfg)) = config_file {
-        cfg
+    let (cfg, run_as) = if let Some((_, cfg)) = config_file {
+        (cfg, None)
     } else if !explicit {
         // No config, no explicit flags: try auto-detect
         if let Some(auto) = redan::auto_detect::detect() {
@@ -532,7 +534,8 @@ fn exec_command(args: ExecArgs) {
             for msg in &auto.messages {
                 eprintln!("  {msg}");
             }
-            auto.config
+            let run_as = auto.run_as.map(Into::into);
+            (auto.config, run_as)
         } else {
             eprintln!("no redan.toml found and auto-detect failed.");
             eprintln!();
@@ -550,8 +553,9 @@ fn exec_command(args: ExecArgs) {
             std::process::exit(1);
         }
     } else {
-        config::Config::default()
+        (config::Config::default(), None)
     };
+    let run_as = args.run_as.or(run_as);
 
     let mut all_secrets =
         cmd::exec::collect_secret_specs(&args.secrets, args.secret_file.as_deref());
@@ -641,6 +645,7 @@ fn exec_command(args: ExecArgs) {
             &cfg.env,
             args.discover,
             args.name.as_deref(),
+            run_as.as_deref(),
         );
     } else {
         cmd::exec::run(&cmd::exec::ExecConfig {
@@ -658,6 +663,7 @@ fn exec_command(args: ExecArgs) {
             discover: args.discover,
             session_name: args.name.as_deref(),
             session_id: None,
+            run_as: run_as.as_deref(),
         });
     }
 }
@@ -677,6 +683,7 @@ struct DaemonConfig {
     env: std::collections::BTreeMap<String, String>,
     discover: bool,
     session_name: Option<String>,
+    run_as: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -693,6 +700,7 @@ fn exec_detached(
     env: &std::collections::BTreeMap<String, String>,
     discover: bool,
     session_name: Option<&str>,
+    run_as: Option<&str>,
 ) {
     // Create session directory and write daemon config.
     // Directory is 0o700 and config file is 0o600 because the config
@@ -723,6 +731,7 @@ fn exec_detached(
         env: env.clone(),
         discover,
         session_name: session_name.map(Into::into),
+        run_as: run_as.map(Into::into),
     };
 
     let config_path = session_dir.join("daemon_config.json");
@@ -849,6 +858,7 @@ fn run_daemon(session_id: &str) {
         discover: cfg.discover,
         session_name: cfg.session_name.as_deref(),
         session_id: Some(session_id),
+        run_as: cfg.run_as.as_deref(),
     });
 }
 

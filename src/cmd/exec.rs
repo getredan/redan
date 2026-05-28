@@ -25,6 +25,8 @@ pub(crate) struct ExecConfig<'a> {
     pub session_name: Option<&'a str>,
     /// Pre-existing session ID (for daemon mode). If None, creates a new session.
     pub session_id: Option<&'a str>,
+    /// Run the user command as this OS user (via `runuser`).
+    pub run_as: Option<&'a str>,
 }
 
 pub(crate) fn run(cfg: &ExecConfig<'_>) {
@@ -166,10 +168,11 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
     let ca_update = vm::ca_update_commands();
     let mount_setup = mount_commands.join("; ");
+    let user_command = wrap_run_as(cfg.command, cfg.run_as);
     let full_command = if mount_setup.is_empty() {
-        format!("{net_setup}; {ca_update}; {}", cfg.command)
+        format!("{net_setup}; {ca_update}; {user_command}")
     } else {
-        format!("{net_setup}; {ca_update}; {mount_setup}; {}", cfg.command)
+        format!("{net_setup}; {ca_update}; {mount_setup}; {user_command}")
     };
 
     let mut env: Vec<String> = vec![
@@ -407,6 +410,16 @@ pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
     }
 }
 
+/// Wrap a command with `runuser -u {user} -- sh -c '...'` when `run_as` is set.
+/// Network, CA, and mount setup run as root; only the user command drops privileges.
+fn wrap_run_as(command: &str, run_as: Option<&str>) -> String {
+    let Some(user) = run_as else {
+        return command.to_string();
+    };
+    let escaped = command.replace('\'', "'\\''");
+    format!("runuser -u {user} -- sh -c '{escaped}'")
+}
+
 fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
     let dir = rootfs.join("etc/redan");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -514,6 +527,38 @@ mod tests {
         assert_eq!(host, "/home/chris/.claude");
         assert_eq!(guest, "/workspace");
         assert!(ro);
+    }
+
+    #[test]
+    fn wrap_run_as_none_passthrough() {
+        assert_eq!(wrap_run_as("echo hello", None), "echo hello");
+    }
+
+    #[test]
+    fn wrap_run_as_wraps_with_runuser() {
+        let result = wrap_run_as("claude --dangerously-skip-permissions", Some("dev"));
+        assert_eq!(
+            result,
+            "runuser -u dev -- sh -c 'claude --dangerously-skip-permissions'"
+        );
+    }
+
+    #[test]
+    fn wrap_run_as_escapes_single_quotes() {
+        let result = wrap_run_as("echo 'hello world'", Some("dev"));
+        assert_eq!(
+            result,
+            "runuser -u dev -- sh -c 'echo '\\''hello world'\\'''"
+        );
+    }
+
+    #[test]
+    fn wrap_run_as_with_setup_command() {
+        let cmd = "mkdir -p /tmp/.claude && cp /redan/host-claude-config/.credentials.json /tmp/.claude/.credentials.json && chmod 600 /tmp/.claude/.credentials.json && claude --dangerously-skip-permissions";
+        let result = wrap_run_as(cmd, Some("dev"));
+        assert!(result.starts_with("runuser -u dev -- sh -c '"));
+        assert!(result.contains("mkdir -p /tmp/.claude"));
+        assert!(result.ends_with("claude --dangerously-skip-permissions'"));
     }
 
     #[test]
