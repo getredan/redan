@@ -30,5 +30,12 @@ unsafe extern "C" {
         flags: u32,
     ) -> i32;
     pub fn krun_add_virtiofs(ctx_id: u32, c_tag: *const c_char, c_path: *const c_char) -> i32;
+    pub fn krun_add_virtiofs3(
+        ctx_id: u32,
+        c_tag: *const c_char,
+        c_path: *const c_char,
+        shm_size: u64,
+        read_only: bool,
+    ) -> i32;
     pub fn krun_set_rlimits(ctx_id: u32, rlimits: *const *const c_char) -> i32;
 }

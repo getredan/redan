@@ -47,6 +47,7 @@ pub fn redan_toml(cfg: &Config, claude: bool) -> String {
             timeout => cfg.timeout,
             claude,
             allow_hosts => cfg.network.allow,
+            forwards => cfg.network.forward,
             mounts,
             env => env_vars,
         })
@@ -107,6 +108,7 @@ mod tests {
             interactive: Some(true),
             network: NetworkConfig {
                 allow: vec!["api.anthropic.com".into(), "pypi.org".into()],
+                ..NetworkConfig::default()
             },
             ..Config::default()
         };
@@ -115,6 +117,7 @@ mod tests {
             MountConfig {
                 source: ".".into(),
                 target: Some("/workspace".into()),
+                read_only: false,
             },
         );
         cfg.env
@@ -135,6 +138,7 @@ mod tests {
             command: Some("/bin/sh".into()),
             network: NetworkConfig {
                 allow: vec!["registry.npmjs.org".into()],
+                ..NetworkConfig::default()
             },
             ..Config::default()
         };
@@ -143,6 +147,7 @@ mod tests {
             MountConfig {
                 source: ".".into(),
                 target: Some("/workspace".into()),
+                read_only: false,
             },
         );
 
@@ -151,6 +156,24 @@ mod tests {
         assert!(out.contains("# Allowed outbound hosts"));
         assert!(!out.contains("dangerously"));
         assert!(!out.contains("CLAUDE_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn redan_toml_with_forwards() {
+        let cfg = Config {
+            image: Some("myapp".into()),
+            command: Some("/bin/sh".into()),
+            network: NetworkConfig {
+                allow: vec![],
+                forward: vec!["9222".into(), "8080:3000".into()],
+            },
+            ..Config::default()
+        };
+
+        let out = redan_toml(&cfg, false);
+        assert!(out.contains("\"9222\""));
+        assert!(out.contains("\"8080:3000\""));
+        assert!(out.contains("forward = ["));
     }
 
     #[test]

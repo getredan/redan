@@ -40,8 +40,8 @@ pub struct VmConfig {
     pub command: String,
     /// Environment variables for the guest process.
     pub env: Vec<String>,
-    /// Host directories to mount via virtio-fs: `(tag, host_path)`.
-    pub virtiofs_mounts: Vec<(String, String)>,
+    /// Host directories to mount via virtio-fs: `(tag, host_path, read_only)`.
+    pub virtiofs_mounts: Vec<(String, String, bool)>,
     /// Interactive mode: attach host terminal to guest console.
     /// When true, stdin/stdout/stderr are passed to the VM via
     /// virtio-console so the user gets an interactive shell.
@@ -143,11 +143,13 @@ impl Vm {
         krun_check!(ret >= 0, "krun_add_net_unixstream failed: {ret}");
 
         // virtio-fs mounts
-        for (tag, path) in &config.virtiofs_mounts {
+        for (tag, path, read_only) in &config.virtiofs_mounts {
             let c_tag = CString::new(tag.as_str()).unwrap();
             let c_path = CString::new(path.as_str()).unwrap();
-            let ret = unsafe { ffi::krun_add_virtiofs(ctx_id, c_tag.as_ptr(), c_path.as_ptr()) };
-            krun_check!(ret >= 0, "krun_add_virtiofs({tag}, {path}) failed: {ret}");
+            let ret = unsafe {
+                ffi::krun_add_virtiofs3(ctx_id, c_tag.as_ptr(), c_path.as_ptr(), 0, *read_only)
+            };
+            krun_check!(ret >= 0, "krun_add_virtiofs3({tag}, {path}) failed: {ret}");
         }
 
         // The implicit console uses the host process's stdio.

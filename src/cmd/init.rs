@@ -81,6 +81,7 @@ pub(crate) fn run(claude: bool) {
         config::MountConfig {
             source: ".".into(),
             target: Some("/workspace".into()),
+            read_only: false,
         },
     );
 
@@ -249,6 +250,45 @@ pub(crate) fn detect_project() -> Vec<ProjectDetection> {
             "PHP (composer.json)",
             &["repo.packagist.org"],
             &["php", "composer"],
+        ),
+        (
+            "pubspec.yaml",
+            "Flutter/Dart (pubspec.yaml)",
+            &["pub.dev", "storage.googleapis.com"],
+            &[],
+        ),
+        (
+            "pom.xml",
+            "Java (pom.xml)",
+            &["repo1.maven.org"],
+            &["openjdk21-jdk", "maven"],
+        ),
+        (
+            "build.gradle",
+            "Java/Kotlin (build.gradle)",
+            &[
+                "services.gradle.org",
+                "plugins.gradle.org",
+                "repo1.maven.org",
+            ],
+            &["openjdk21-jdk"],
+        ),
+        (
+            "build.gradle.kts",
+            "Kotlin (build.gradle.kts)",
+            &[
+                "services.gradle.org",
+                "plugins.gradle.org",
+                "repo1.maven.org",
+            ],
+            &["openjdk21-jdk"],
+        ),
+        ("Package.swift", "Swift (Package.swift)", &[], &[]),
+        (
+            "mix.exs",
+            "Elixir (mix.exs)",
+            &["hex.pm", "repo.hex.pm"],
+            &["elixir"],
         ),
     ];
 

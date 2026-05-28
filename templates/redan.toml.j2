@@ -26,6 +26,15 @@ allow = [
     "{{ host }}",
 {%- endfor %}
 ]
+{%- if forwards %}
+# TCP port forwards (guest -> host localhost).
+# Format: "PORT" or "GUEST_PORT:HOST_PORT"
+forward = [
+{%- for fwd in forwards %}
+    "{{ fwd }}",
+{%- endfor %}
+]
+{%- endif %}
 {%- for tag, mount in mounts %}
 
 [mount.{{ tag }}]

@@ -195,9 +195,11 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         let pkg_list = packages.join(" ");
         // apk exits non-zero on chown failures (guest UID != root on host).
         // The packages install fine, just with host-user ownership.
-        // Use || true so subsequent --run commands still execute.
+        // Filter the "Failed to set ownership" stderr noise so the
+        // terminal stays readable, and || true so subsequent commands
+        // still execute regardless of apk's exit code.
         setup_parts.push(format!(
-            "apk update && (apk add --no-cache {pkg_list} || true)"
+            "apk update && (apk add --no-cache {pkg_list} 2>&1 | grep -v 'Failed to set ownership' || true)"
         ));
     }
 
@@ -245,6 +247,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         allowed_hosts: None,               // unrestricted during build
         audit_log_path: None,
         discover: false,
+        forwards: &[],
     });
 
     // Verify the build completed successfully by checking for the
