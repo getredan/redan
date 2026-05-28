@@ -45,11 +45,12 @@ static CLAUDE_CODE: AgentDef = AgentDef {
         home_dir: ".claude",
         credentials_file: ".credentials.json",
         guest_mount: "/redan/host-claude-config",
-        guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
+        guest_env: &[("CLAUDE_CONFIG_DIR", "/tmp/.claude")],
         extra_hosts: &["auth.anthropic.com", "console.anthropic.com"],
         setup_command: Some(
-            "mkdir -p /workspace/.claude && \
-             cp /redan/host-claude-config/.credentials.json /workspace/.claude/.credentials.json",
+            "mkdir -p /tmp/.claude && \
+             cp /redan/host-claude-config/.credentials.json /tmp/.claude/.credentials.json && \
+             chmod 600 /tmp/.claude/.credentials.json",
         ),
     }),
 };
@@ -456,15 +457,15 @@ mod tests {
         assert_eq!(mount.source, tmp.to_string_lossy());
         assert_eq!(mount.target.as_deref(), Some("/redan/host-claude-config"));
 
-        // CLAUDE_CONFIG_DIR points to writable workspace, not the read-only mount
+        // CLAUDE_CONFIG_DIR points to guest-only tmp dir, not the host workspace
         assert_eq!(
             auto.config.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
-            Some("/workspace/.claude")
+            Some("/tmp/.claude")
         );
 
-        // Command includes setup to copy credentials before launching
+        // Command copies credentials to guest-only dir before launching
         let cmd = auto.config.command.as_deref().unwrap();
-        assert!(cmd.contains("cp /redan/host-claude-config/.credentials.json"));
+        assert!(cmd.contains("cp /redan/host-claude-config/.credentials.json /tmp/.claude/"));
         assert!(cmd.ends_with("claude --dangerously-skip-permissions"));
 
         assert!(

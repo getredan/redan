@@ -392,15 +392,18 @@ pub(crate) fn collect_secret_specs(
     specs
 }
 
-/// Parse mount spec: `/host/path:/guest/path` or `/host/path` (defaults to `/workspace`)
-/// Parse a mount spec: `host_path[:guest_path[:ro]]`.
+/// Parse a mount spec: `host[:guest[:ro]]`.
 /// Returns `(host_path, guest_path, read_only)`.
 pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
-    let parts: Vec<&str> = spec.splitn(3, ':').collect();
-    match parts.as_slice() {
-        [host, guest, "ro"] => (host.to_string(), guest.to_string(), true),
-        [host, guest] => (host.to_string(), guest.to_string(), false),
-        _ => (spec.to_string(), "/workspace".to_string(), false),
+    let (base, read_only) = spec
+        .strip_suffix(":ro")
+        .map_or((spec, false), |s| (s, true));
+
+    match base.split_once(':') {
+        Some((host, guest)) if !guest.is_empty() => {
+            (host.to_string(), guest.to_string(), read_only)
+        }
+        _ => (base.to_string(), "/workspace".to_string(), read_only),
     }
 }
 
@@ -502,6 +505,14 @@ mod tests {
         let (host, guest, ro) = parse_mount("/home/chris/.claude:/claude-config:ro");
         assert_eq!(host, "/home/chris/.claude");
         assert_eq!(guest, "/claude-config");
+        assert!(ro);
+    }
+
+    #[test]
+    fn parse_mount_read_only_no_guest_path() {
+        let (host, guest, ro) = parse_mount("/home/chris/.claude:ro");
+        assert_eq!(host, "/home/chris/.claude");
+        assert_eq!(guest, "/workspace");
         assert!(ro);
     }
 

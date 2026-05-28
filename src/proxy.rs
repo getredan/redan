@@ -81,6 +81,13 @@ pub fn parse_forward_spec(spec: &str) -> Result<ForwardSpec, String> {
         ));
     }
 
+    if host_port < 1024 {
+        log::warn!(
+            "forwarding to privileged host port {host_port}; \
+             make sure this is intentional"
+        );
+    }
+
     Ok(ForwardSpec {
         guest_port,
         host_port,
@@ -1328,7 +1335,6 @@ fn ssh_relay_thread(
 /// `127.0.0.1:host_port` on the host. No inspection, no injection,
 /// no scrubbing. Target is always localhost; the guest cannot
 /// influence the destination.
-#[allow(dead_code)] // wired up once TcpForward match arms are implemented
 fn tcp_forward_thread(
     rx: mpsc::Receiver<Vec<u8>>,
     tx: mpsc::SyncSender<Vec<u8>>,
@@ -1340,8 +1346,6 @@ fn tcp_forward_thread(
     let addr = SocketAddr::from(([127, 0, 0, 1], host_port));
     let upstream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("TCP forward connect to 127.0.0.1:{host_port}: {e}"))?;
-    upstream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    upstream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     audit(
         audit_log,
