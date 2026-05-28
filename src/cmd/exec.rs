@@ -170,12 +170,18 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
     let ca_update = vm::ca_update_commands();
     let mount_setup = mount_commands.join("; ");
+    let ensure_user = cfg.run_as.map(ensure_user_command);
     let user_command = wrap_run_as(cfg.command, cfg.run_as);
-    let full_command = if mount_setup.is_empty() {
-        format!("{net_setup}; {ca_update}; {user_command}")
-    } else {
-        format!("{net_setup}; {ca_update}; {mount_setup}; {user_command}")
-    };
+
+    let mut parts = vec![net_setup, ca_update.to_string()];
+    if !mount_setup.is_empty() {
+        parts.push(mount_setup);
+    }
+    if let Some(cmd) = ensure_user {
+        parts.push(cmd);
+    }
+    parts.push(user_command);
+    let full_command = parts.join("; ");
 
     let mut env: Vec<String> = vec![
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
@@ -462,6 +468,17 @@ pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
     }
 }
 
+/// Shell command that creates the target user if it doesn't exist.
+/// Runs as root in the init script, before `runuser` drops privileges.
+/// Handles both Alpine (adduser) and Debian/Ubuntu (useradd).
+fn ensure_user_command(user: &str) -> String {
+    format!(
+        "id -u {user} >/dev/null 2>&1 || \
+         {{ command -v adduser >/dev/null 2>&1 && adduser -D -h /home/{user} {user} || \
+         useradd -m -s /bin/sh {user}; }}"
+    )
+}
+
 /// Wrap a command with `runuser -u {user} -- sh -c '...'` when `run_as` is set.
 /// Network, CA, and mount setup run as root; only the user command drops privileges.
 fn wrap_run_as(command: &str, run_as: Option<&str>) -> String {
@@ -611,6 +628,14 @@ mod tests {
         assert!(result.starts_with("runuser -u dev -- sh -c '"));
         assert!(result.contains("mkdir -p /tmp/.claude"));
         assert!(result.ends_with("claude --dangerously-skip-permissions'"));
+    }
+
+    #[test]
+    fn ensure_user_command_creates_user() {
+        let cmd = ensure_user_command("dev");
+        assert!(cmd.starts_with("id -u dev"));
+        assert!(cmd.contains("adduser -D -h /home/dev dev"));
+        assert!(cmd.contains("useradd -m -s /bin/sh dev"));
     }
 
     #[test]
