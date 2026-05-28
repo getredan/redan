@@ -527,8 +527,8 @@ fn exec_command(args: ExecArgs) {
     // 1. Config file exists → use it (existing behavior)
     // 2. Explicit CLI flags → use them (existing behavior)
     // 3. Neither → try auto-detect
-    let (cfg, run_as) = if let Some((_, cfg)) = config_file {
-        (cfg, None)
+    let (cfg, run_as, stage_credentials) = if let Some((_, cfg)) = config_file {
+        (cfg, None, None)
     } else if !explicit {
         // No config, no explicit flags: try auto-detect
         if let Some(auto) = redan::auto_detect::detect() {
@@ -546,7 +546,7 @@ fn exec_command(args: ExecArgs) {
                 eprintln!("  {msg}");
             }
             let run_as = auto.run_as.map(Into::into);
-            (auto.config, run_as)
+            (auto.config, run_as, auto.stage_credentials)
         } else {
             eprintln!("no redan.toml found and auto-detect failed.");
             eprintln!();
@@ -564,7 +564,7 @@ fn exec_command(args: ExecArgs) {
             std::process::exit(1);
         }
     } else {
-        (config::Config::default(), None)
+        (config::Config::default(), None, None)
     };
     let run_as = args.run_as.or(run_as);
 
@@ -635,6 +635,31 @@ fn exec_command(args: ExecArgs) {
             std::process::exit(1);
         }
     };
+    // Stage credentials into the rootfs before boot (like CA cert install).
+    // Runs on the host, no mount or runtime copy needed.
+    if let Some((host_path, guest_dir, filename)) = &stage_credentials {
+        let target_dir = std::path::Path::new(&rootfs_path)
+            .join(guest_dir.strip_prefix('/').unwrap_or(guest_dir));
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            eprintln!("error: cannot create {}: {e}", target_dir.display());
+            std::process::exit(1);
+        }
+        let target_file = target_dir.join(filename);
+        if let Err(e) = std::fs::copy(host_path, &target_file) {
+            eprintln!(
+                "error: cannot stage credentials {} → {}: {e}",
+                host_path.display(),
+                target_file.display()
+            );
+            std::process::exit(1);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o644));
+        }
+    }
+
     let command = command.unwrap_or_else(|| {
         if interactive {
             "/bin/sh".to_string()

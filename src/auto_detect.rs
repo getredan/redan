@@ -45,14 +45,9 @@ static CLAUDE_CODE: AgentDef = AgentDef {
     oauth: Some(OAuthDef {
         home_dir: ".claude",
         credentials_file: ".credentials.json",
-        guest_mount: "/redan/host-claude-config",
+        guest_credentials_dir: "/tmp/.claude",
         guest_env: &[("CLAUDE_CONFIG_DIR", "/tmp/.claude")],
         extra_hosts: &["auth.anthropic.com", "console.anthropic.com"],
-        setup_command: Some(
-            "mkdir -p /tmp/.claude && \
-             cp /redan/host-claude-config/.credentials.json /tmp/.claude/.credentials.json && \
-             chmod 600 /tmp/.claude/.credentials.json",
-        ),
     }),
 };
 
@@ -90,22 +85,22 @@ pub struct ApiKeyDef {
     pub guest_env: &'static [(&'static str, &'static str)],
 }
 
-/// Auth via credentials stored in a config directory on the host,
-/// mounted read-only into the guest.
+/// Auth via credentials stored in a config directory on the host.
+///
+/// The credentials file is staged into the guest rootfs before boot
+/// (same pattern as CA cert installation), so no mount or runtime
+/// copy is needed.
 pub struct OAuthDef {
     /// Config directory relative to `$HOME` (e.g., `.claude`).
     pub home_dir: &'static str,
     /// File that signals credentials exist (e.g., `.credentials.json`).
     pub credentials_file: &'static str,
-    /// Where to mount the config dir read-only in the guest.
-    pub guest_mount: &'static str,
+    /// Guest directory to stage the credentials file into.
+    pub guest_credentials_dir: &'static str,
     /// Guest env vars to set when using this auth path.
     pub guest_env: &'static [(&'static str, &'static str)],
     /// Extra network hosts for token exchange.
     pub extra_hosts: &'static [&'static str],
-    /// Shell command to run before the agent command, e.g., copying
-    /// credentials from the read-only mount to a writable config dir.
-    pub setup_command: Option<&'static str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +116,9 @@ pub struct AutoDetected {
     pub needs_image_build: bool,
     /// Run the user command as this OS user (via `runuser`).
     pub run_as: Option<&'static str>,
+    /// Credentials file to stage into the guest rootfs before boot.
+    /// (`host_path`, `guest_dir`, `filename`)
+    pub stage_credentials: Option<(PathBuf, String, String)>,
 }
 
 /// A detected agent with its resolved auth method.
@@ -240,6 +238,7 @@ fn probe_with_env(
 fn build_config(detected: &DetectedAgent) -> AutoDetected {
     let agent = detected.agent;
     let mut messages = Vec::new();
+    let mut stage_credentials: Option<(PathBuf, String, String)> = None;
     let needs_image_build = !detected.image_exists;
 
     if detected.image_exists {
@@ -287,27 +286,23 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
         }
         ResolvedAuth::OAuth { host_config_dir } => {
             if let Some(oauth) = agent.oauth.as_ref() {
+                let cred_file = host_config_dir.join(oauth.credentials_file);
                 messages.push(format!(
-                    "Mounting {} → {} (read-only, OAuth credentials)",
-                    host_config_dir.display(),
-                    oauth.guest_mount
+                    "Staging {} → {}/{}",
+                    cred_file.display(),
+                    oauth.guest_credentials_dir,
+                    oauth.credentials_file
                 ));
-                config.mount.insert(
-                    format!("{}-config", agent.image),
-                    MountConfig {
-                        source: host_config_dir.to_string_lossy().into_owned(),
-                        target: Some(oauth.guest_mount.into()),
-                        read_only: true,
-                    },
-                );
+                stage_credentials = Some((
+                    cred_file,
+                    oauth.guest_credentials_dir.into(),
+                    oauth.credentials_file.into(),
+                ));
                 for &(key, val) in oauth.guest_env {
                     config.env.insert(key.into(), val.into());
                 }
                 for &host in oauth.extra_hosts {
                     allow.push(host.to_string());
-                }
-                if let Some(setup) = oauth.setup_command {
-                    config.command = Some(format!("{setup} && {}", agent.command));
                 }
             }
         }
@@ -345,6 +340,7 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
         messages,
         needs_image_build,
         run_as: agent.run_as,
+        stage_credentials,
     }
 }
 
@@ -468,21 +464,20 @@ mod tests {
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
         assert!(auto.config.secrets.is_empty());
 
-        let mount = auto.config.mount.get("claude-code-config").unwrap();
-        assert!(mount.read_only);
-        assert_eq!(mount.source, tmp.to_string_lossy());
-        assert_eq!(mount.target.as_deref(), Some("/redan/host-claude-config"));
-
-        // CLAUDE_CONFIG_DIR points to guest-only tmp dir, not the host workspace
+        // CLAUDE_CONFIG_DIR points to guest-only tmp dir
         assert_eq!(
             auto.config.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("/tmp/.claude")
         );
 
-        // Command copies credentials to guest-only dir before launching
-        let cmd = auto.config.command.as_deref().unwrap();
-        assert!(cmd.contains("cp /redan/host-claude-config/.credentials.json /tmp/.claude/"));
-        assert!(cmd.ends_with("claude --dangerously-skip-permissions"));
+        // Credentials staged into rootfs before boot (no mount, no runtime copy)
+        let (host_path, guest_dir, filename) = auto.stage_credentials.as_ref().unwrap();
+        assert_eq!(host_path, &creds);
+        assert_eq!(guest_dir, "/tmp/.claude");
+        assert_eq!(filename, ".credentials.json");
+
+        // No config-dir mount (credentials are pre-staged)
+        assert!(!auto.config.mount.contains_key("claude-code-config"));
 
         assert!(
             auto.config
@@ -490,7 +485,7 @@ mod tests {
                 .allow
                 .contains(&"auth.anthropic.com".to_string())
         );
-        assert!(auto.messages.iter().any(|m| m.contains("read-only")));
+        assert!(auto.messages.iter().any(|m| m.contains("Staging")));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
