@@ -637,6 +637,7 @@ fn exec_command(args: ExecArgs) {
     };
     // Stage credentials into the rootfs before boot (like CA cert install).
     // Runs on the host, no mount or runtime copy needed.
+    let chown_dir: Option<String> = stage_credentials.as_ref().map(|(_, d, _)| d.clone());
     if let Some((host_path, guest_dir, filename)) = &stage_credentials {
         let target_dir = std::path::Path::new(&rootfs_path)
             .join(guest_dir.strip_prefix('/').unwrap_or(guest_dir));
@@ -656,7 +657,10 @@ fn exec_command(args: ExecArgs) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o644));
+            // World-writable so the run_as user can update credentials.
+            // Single-user VM; the VM itself is the security boundary.
+            let _ = std::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o777));
+            let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o666));
         }
     }
 
@@ -682,6 +686,7 @@ fn exec_command(args: ExecArgs) {
             args.discover,
             args.name.as_deref(),
             run_as.as_deref(),
+            chown_dir.as_deref(),
             args.browser,
         );
     } else {
@@ -701,6 +706,7 @@ fn exec_command(args: ExecArgs) {
             session_name: args.name.as_deref(),
             session_id: None,
             run_as: run_as.as_deref(),
+            chown_dir: chown_dir.as_deref(),
             browser: args.browser,
         });
     }
@@ -722,6 +728,7 @@ struct DaemonConfig {
     discover: bool,
     session_name: Option<String>,
     run_as: Option<String>,
+    chown_dir: Option<String>,
     browser: bool,
 }
 
@@ -740,6 +747,7 @@ fn exec_detached(
     discover: bool,
     session_name: Option<&str>,
     run_as: Option<&str>,
+    chown_dir: Option<&str>,
     browser: bool,
 ) {
     // Create session directory and write daemon config.
@@ -772,6 +780,7 @@ fn exec_detached(
         discover,
         session_name: session_name.map(Into::into),
         run_as: run_as.map(Into::into),
+        chown_dir: chown_dir.map(Into::into),
         browser,
     };
 
@@ -900,6 +909,7 @@ fn run_daemon(session_id: &str) {
         session_name: cfg.session_name.as_deref(),
         session_id: Some(session_id),
         run_as: cfg.run_as.as_deref(),
+        chown_dir: cfg.chown_dir.as_deref(),
         browser: cfg.browser,
     });
 }

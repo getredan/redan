@@ -27,6 +27,9 @@ pub(crate) struct ExecConfig<'a> {
     pub session_id: Option<&'a str>,
     /// Run the user command as this OS user (via `runuser`).
     pub run_as: Option<&'a str>,
+    /// Guest directory to chown to `run_as` user before the user command runs.
+    /// Used for staged credentials that the agent needs to write back to.
+    pub chown_dir: Option<&'a str>,
     /// Launch headless Chrome with CDP and an allowlist proxy.
     pub browser: bool,
 }
@@ -187,6 +190,14 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     }
     if let Some(cmd) = ensure_user {
         parts.push(cmd);
+    }
+    if let (Some(_), Some(dir)) = (cfg.run_as, cfg.chown_dir) {
+        // chown doesn't work through virtiofs (host user != VM root), so
+        // open permissions instead. Single-user VM, so this is safe.
+        // Use find instead of glob: shell `*` skips dotfiles like .credentials.json.
+        parts.push(format!(
+            "chmod 777 {dir} && find {dir} -maxdepth 1 -type f -exec chmod 666 {{}} +; true"
+        ));
     }
     parts.push(user_command);
     let full_command = parts.join("; ");
