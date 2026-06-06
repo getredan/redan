@@ -14,8 +14,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && \
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code
 
-# Non-root user
-RUN groupadd --gid 1000 dev && \
+# Non-root user (ubuntu:24.04 ships with ubuntu:1000, remove it first)
+RUN userdel -r ubuntu 2>/dev/null; \
+    groupdel ubuntu 2>/dev/null; \
+    groupadd --gid 1000 dev && \
     useradd --uid 1000 --gid 1000 -m -s /bin/bash dev && \
     mkdir -p /workspace && chown dev:dev /workspace
 
