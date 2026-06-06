@@ -264,6 +264,9 @@ enum ImageAction {
         /// Devcontainer directory or JSON path
         #[arg(long)]
         devcontainer: Option<String>,
+        /// Replace existing image if it already exists
+        #[arg(long, short = 'f')]
+        force: bool,
     },
 }
 
@@ -382,8 +385,9 @@ fn main() {
                 from,
                 dockerfile,
                 devcontainer,
+                force,
             } => {
-                let result = import_image(&name, from, dockerfile, devcontainer);
+                let result = import_image(&name, from, dockerfile, devcontainer, force);
                 if let Err(e) = result {
                     eprintln!("import failed: {e}");
                     std::process::exit(1);
@@ -527,17 +531,18 @@ fn exec_command(args: ExecArgs) {
     // 1. Config file exists → use it (existing behavior)
     // 2. Explicit CLI flags → use them (existing behavior)
     // 3. Neither → try auto-detect
-    let (cfg, run_as, stage_credentials) = if let Some((_, cfg)) = config_file {
-        (cfg, None, None)
+    let (cfg, run_as, stage_files) = if let Some((_, cfg)) = config_file {
+        (cfg, None, Vec::new())
     } else if !explicit {
         // No config, no explicit flags: try auto-detect
         if let Some(auto) = redan::auto_detect::detect() {
             if auto.needs_image_build {
-                eprintln!("Building claude-code image (this may take a minute)...");
-                match build_bundled_claude_image() {
-                    Ok(_) => eprintln!("Image claude-code built successfully."),
+                let image_name = auto.config.image.as_deref().unwrap_or("unknown");
+                eprintln!("Building {image_name} image (this may take a minute)...");
+                match build_bundled_image(image_name) {
+                    Ok(_) => eprintln!("Image {image_name} built successfully."),
                     Err(e) => {
-                        eprintln!("error: failed to build claude-code image: {e}");
+                        eprintln!("error: failed to build {image_name} image: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -546,7 +551,7 @@ fn exec_command(args: ExecArgs) {
                 eprintln!("  {msg}");
             }
             let run_as = auto.run_as.map(Into::into);
-            (auto.config, run_as, auto.stage_credentials)
+            (auto.config, run_as, auto.stage_files)
         } else {
             eprintln!("no redan.toml found and auto-detect failed.");
             eprintln!();
@@ -564,7 +569,7 @@ fn exec_command(args: ExecArgs) {
             std::process::exit(1);
         }
     } else {
-        (config::Config::default(), None, None)
+        (config::Config::default(), None, Vec::new())
     };
     let run_as = args.run_as.or(run_as);
 
@@ -582,6 +587,7 @@ fn exec_command(args: ExecArgs) {
     };
     let timeout = args.timeout.or(cfg.timeout).unwrap_or(3600);
     let interactive = args.interactive || cfg.interactive.unwrap_or(false);
+    let redirect_logs = interactive || redan::terminal::stdin_is_tty();
     let audit_log = args.audit_log.or_else(|| cfg.audit_log.clone());
 
     let mut allow_hosts = args.allow_hosts;
@@ -637,8 +643,8 @@ fn exec_command(args: ExecArgs) {
     };
     // Stage credentials into the rootfs before boot (like CA cert install).
     // Runs on the host, no mount or runtime copy needed.
-    let chown_dir: Option<String> = stage_credentials.as_ref().map(|(_, d, _)| d.clone());
-    if let Some((host_path, guest_dir, filename)) = &stage_credentials {
+    let chown_dir: Option<String> = stage_files.first().map(|(_, d, _)| d.clone());
+    for (host_path, guest_dir, filename) in &stage_files {
         let target_dir = std::path::Path::new(&rootfs_path)
             .join(guest_dir.strip_prefix('/').unwrap_or(guest_dir));
         if let Err(e) = std::fs::create_dir_all(&target_dir) {
@@ -707,6 +713,7 @@ fn exec_command(args: ExecArgs) {
             session_id: None,
             run_as: run_as.as_deref(),
             chown_dir: chown_dir.as_deref(),
+            redirect_logs,
             browser: args.browser,
         });
     }
@@ -910,6 +917,7 @@ fn run_daemon(session_id: &str) {
         session_id: Some(session_id),
         run_as: cfg.run_as.as_deref(),
         chown_dir: cfg.chown_dir.as_deref(),
+        redirect_logs: false,
         browser: cfg.browser,
     });
 }
@@ -1141,7 +1149,15 @@ fn import_image(
     from: Option<String>,
     dockerfile: Option<String>,
     devcontainer: Option<String>,
+    force: bool,
 ) -> std::io::Result<()> {
+    if force
+        && let Ok(path) = image::image_path(name)
+        && path.exists()
+    {
+        eprintln!("removing existing image '{name}'...");
+        image::remove(name)?;
+    }
     if let Some(docker_image) = from {
         image::import_docker(name, &docker_image)?;
         return Ok(());
@@ -1208,15 +1224,27 @@ fn logs(session_id: Option<&str>, follow: bool) {
     }
 }
 
-/// Build the claude-code image from the Dockerfile embedded in the binary.
-/// This avoids depending on CWD containing the redan source tree.
-fn build_bundled_claude_image() -> std::io::Result<std::path::PathBuf> {
-    static DOCKERFILE: &str = include_str!("../dockerfiles/claude-code.dockerfile");
-    let tmp = std::env::temp_dir().join("redan-claude-code-build");
+/// Build an agent image from a Dockerfile embedded in the binary.
+fn build_bundled_image(name: &str) -> std::io::Result<std::path::PathBuf> {
+    static CLAUDE_CODE_DOCKERFILE: &str = include_str!("../dockerfiles/claude-code.dockerfile");
+    static PI_DOCKERFILE: &str = include_str!("../dockerfiles/pi.dockerfile");
+
+    let dockerfile = match name {
+        "claude-code" => CLAUDE_CODE_DOCKERFILE,
+        "pi" => PI_DOCKERFILE,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no bundled Dockerfile for image '{name}'"),
+            ));
+        }
+    };
+
+    let tmp = std::env::temp_dir().join(format!("redan-{name}-build"));
     std::fs::create_dir_all(&tmp)?;
     let df_path = tmp.join("Dockerfile");
-    std::fs::write(&df_path, DOCKERFILE)?;
-    let result = image::import_dockerfile("claude-code", df_path.to_str().unwrap_or(""));
+    std::fs::write(&df_path, dockerfile)?;
+    let result = image::import_dockerfile(name, df_path.to_str().unwrap_or(""));
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }

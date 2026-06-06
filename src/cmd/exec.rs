@@ -9,6 +9,7 @@ use redan::session;
 use redan::templates;
 use redan::vm;
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ExecConfig<'a> {
     pub rootfs: &'a str,
     pub command: &'a str,
@@ -30,6 +31,9 @@ pub(crate) struct ExecConfig<'a> {
     /// Guest directory to chown to `run_as` user before the user command runs.
     /// Used for staged credentials that the agent needs to write back to.
     pub chown_dir: Option<&'a str>,
+    /// Redirect logs to session file (avoids interleaving with guest output).
+    /// True whenever stdin is a TTY.
+    pub redirect_logs: bool,
     /// Launch headless Chrome with CDP and an allowlist proxy.
     pub browser: bool,
 }
@@ -62,9 +66,8 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     };
     log::info!("session {session_id} started");
 
-    // In interactive mode, redirect logs to a file so they don't
-    // interleave with the guest TUI.
-    if cfg.interactive {
+    // Redirect logs to a file so they don't interleave with guest output.
+    if cfg.redirect_logs {
         let log_path = session::session_dir(&session_id).join("redan.log");
         eprintln!("session: {session_id} (logs: {})", log_path.display());
         crate::redirect_logs_to_file(&log_path);
@@ -249,26 +252,21 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
 
     let vm_config = vm::VmConfig {
         rootfs: cfg.rootfs.into(),
-        vcpus: 1,
-        ram_mib: 256,
+        vcpus: 4,
+        ram_mib: 4096,
         command: full_command,
         env,
         virtiofs_mounts,
         interactive: cfg.interactive,
     };
 
-    // In interactive mode, set the host terminal to raw mode
-    let _raw_guard = if cfg.interactive {
-        match redan::terminal::RawTerminalGuard::enter() {
-            Ok(guard) => Some(guard),
-            Err(e) => {
-                eprintln!("warning: cannot enter raw terminal mode: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // libkrun handles raw terminal mode inside krun_start_enter via its
+    // implicit console setup (setup_terminal_raw_mode). Calling cfmakeraw
+    // here before libkrun breaks console output due to interaction between
+    // the pre-existing raw mode and libkrun's make_non_blocking on dup'd fds.
+    if cfg.interactive {
+        redan::terminal::save_terminal_for_atexit();
+    }
 
     let vm_handle = vm::Vm::boot(vm_config);
 

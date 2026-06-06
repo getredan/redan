@@ -20,7 +20,7 @@ use crate::image;
 /// All known agents, ordered by detection priority.
 /// `detect()` returns the first match; `detect_all()` returns every match
 /// (for a future interactive picker).
-static AGENTS: &[&AgentDef] = &[&CLAUDE_CODE];
+static AGENTS: &[&AgentDef] = &[&CLAUDE_CODE, &PI];
 
 static CLAUDE_CODE: AgentDef = AgentDef {
     name: "Claude Code",
@@ -42,12 +42,37 @@ static CLAUDE_CODE: AgentDef = AgentDef {
         inject_hosts: &["api.anthropic.com"],
         guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
     }),
-    oauth: Some(OAuthDef {
+    stored_credentials: Some(StoredCredentialsDef {
         home_dir: ".claude",
         credentials_file: ".credentials.json",
-        guest_credentials_dir: "/tmp/.claude",
+        stage_files: &[".credentials.json"],
+        guest_dir: "/tmp/.claude",
         guest_env: &[("CLAUDE_CONFIG_DIR", "/tmp/.claude")],
         extra_hosts: &["auth.anthropic.com", "console.anthropic.com"],
+    }),
+};
+
+static PI: AgentDef = AgentDef {
+    name: "Pi",
+    image: "pi",
+    command: "pi",
+    hosts: &["api.anthropic.com"],
+    interactive: true,
+    timeout_secs: 3600,
+    run_as: Some("dev"),
+    guest_env: &[("HOME", "/home/dev")],
+    api_key: Some(ApiKeyDef {
+        env_var: "ANTHROPIC_API_KEY",
+        inject_hosts: &["api.anthropic.com"],
+        guest_env: &[],
+    }),
+    stored_credentials: Some(StoredCredentialsDef {
+        home_dir: ".pi/agent",
+        credentials_file: "auth.json",
+        stage_files: &["auth.json", "settings.json", "models.json"],
+        guest_dir: "/home/dev/.pi/agent",
+        guest_env: &[],
+        extra_hosts: &[],
     }),
 };
 
@@ -71,8 +96,8 @@ pub struct AgentDef {
     pub guest_env: &'static [(&'static str, &'static str)],
     /// API-key-based auth (tried first).
     pub api_key: Option<ApiKeyDef>,
-    /// OAuth/stored-credentials auth (fallback when no API key).
-    pub oauth: Option<OAuthDef>,
+    /// Stored credentials auth (fallback when no API key).
+    pub stored_credentials: Option<StoredCredentialsDef>,
 }
 
 /// Auth via an environment variable injected as a redan secret.
@@ -87,16 +112,18 @@ pub struct ApiKeyDef {
 
 /// Auth via credentials stored in a config directory on the host.
 ///
-/// The credentials file is staged into the guest rootfs before boot
-/// (same pattern as CA cert installation), so no mount or runtime
-/// copy is needed.
-pub struct OAuthDef {
+/// Files are staged into the guest rootfs before boot (same pattern
+/// as CA cert installation), so no mount or runtime copy is needed.
+pub struct StoredCredentialsDef {
     /// Config directory relative to `$HOME` (e.g., `.claude`).
     pub home_dir: &'static str,
     /// File that signals credentials exist (e.g., `.credentials.json`).
     pub credentials_file: &'static str,
-    /// Guest directory to stage the credentials file into.
-    pub guest_credentials_dir: &'static str,
+    /// Files to stage from `home_dir` into the guest.
+    /// If empty, only `credentials_file` is staged.
+    pub stage_files: &'static [&'static str],
+    /// Guest directory to stage files into.
+    pub guest_dir: &'static str,
     /// Guest env vars to set when using this auth path.
     pub guest_env: &'static [(&'static str, &'static str)],
     /// Extra network hosts for token exchange.
@@ -116,9 +143,9 @@ pub struct AutoDetected {
     pub needs_image_build: bool,
     /// Run the user command as this OS user (via `runuser`).
     pub run_as: Option<&'static str>,
-    /// Credentials file to stage into the guest rootfs before boot.
-    /// (`host_path`, `guest_dir`, `filename`)
-    pub stage_credentials: Option<(PathBuf, String, String)>,
+    /// Files to stage into the guest rootfs before boot.
+    /// Each entry: (`host_path`, `guest_dir`, `filename`)
+    pub stage_files: Vec<(PathBuf, String, String)>,
 }
 
 /// A detected agent with its resolved auth method.
@@ -131,7 +158,7 @@ pub struct DetectedAgent {
 /// The auth method that was actually found in the environment.
 pub enum ResolvedAuth {
     ApiKey,
-    OAuth { host_config_dir: PathBuf },
+    StoredCredentials { host_config_dir: PathBuf },
 }
 
 // ---------------------------------------------------------------------------
@@ -155,10 +182,8 @@ pub fn detect_all() -> Vec<DetectedAgent> {
                 .as_ref()
                 .and_then(|a| std::env::var(a.env_var).ok());
             let oauth_creds = home.as_ref().and_then(|h| {
-                let oauth = agent.oauth.as_ref()?;
-                let path = Path::new(h)
-                    .join(oauth.home_dir)
-                    .join(oauth.credentials_file);
+                let sc = agent.stored_credentials.as_ref()?;
+                let path = Path::new(h).join(sc.home_dir).join(sc.credentials_file);
                 path.exists().then_some(path)
             });
             probe_with_env(agent, api_key_val.as_deref(), oauth_creds.as_deref(), None)
@@ -218,13 +243,13 @@ fn probe_with_env(
         });
     }
 
-    if agent.oauth.is_some()
+    if agent.stored_credentials.is_some()
         && let Some(creds_path) = oauth_credentials
     {
         let config_dir = creds_path.parent().unwrap_or(creds_path).to_path_buf();
         return Some(DetectedAgent {
             agent,
-            auth: ResolvedAuth::OAuth {
+            auth: ResolvedAuth::StoredCredentials {
                 host_config_dir: config_dir,
             },
             image_exists,
@@ -234,11 +259,69 @@ fn probe_with_env(
     None
 }
 
+fn apply_auth(
+    agent: &AgentDef,
+    auth: &ResolvedAuth,
+    config: &mut Config,
+    messages: &mut Vec<String>,
+    stage_files: &mut Vec<(PathBuf, String, String)>,
+    allow: &mut Vec<String>,
+) {
+    match auth {
+        ResolvedAuth::ApiKey => {
+            if let Some(api) = agent.api_key.as_ref() {
+                messages.push(format!(
+                    "Injecting {} for {}",
+                    api.env_var,
+                    api.inject_hosts.join(", ")
+                ));
+                config.secrets.insert(
+                    api.env_var.into(),
+                    SecretConfig {
+                        value: format!("env://{}", api.env_var),
+                        hosts: api.inject_hosts.iter().map(|&h| h.into()).collect(),
+                    },
+                );
+                for &(key, val) in api.guest_env {
+                    config.env.insert(key.into(), val.into());
+                }
+            }
+        }
+        ResolvedAuth::StoredCredentials { host_config_dir } => {
+            if let Some(sc) = agent.stored_credentials.as_ref() {
+                let files_to_stage = if sc.stage_files.is_empty() {
+                    vec![sc.credentials_file]
+                } else {
+                    sc.stage_files.to_vec()
+                };
+                for filename in &files_to_stage {
+                    let host_path = host_config_dir.join(filename);
+                    if host_path.exists() {
+                        messages.push(format!(
+                            "Staging {} → {}/{}",
+                            host_path.display(),
+                            sc.guest_dir,
+                            filename
+                        ));
+                        stage_files.push((host_path, sc.guest_dir.into(), (*filename).into()));
+                    }
+                }
+                for &(key, val) in sc.guest_env {
+                    config.env.insert(key.into(), val.into());
+                }
+                for &host in sc.extra_hosts {
+                    allow.push(host.to_string());
+                }
+            }
+        }
+    }
+}
+
 /// Turn a detected agent into a ready-to-use Config.
 fn build_config(detected: &DetectedAgent) -> AutoDetected {
     let agent = detected.agent;
     let mut messages = Vec::new();
-    let mut stage_credentials: Option<(PathBuf, String, String)> = None;
+    let mut stage_files: Vec<(PathBuf, String, String)> = Vec::new();
     let needs_image_build = !detected.image_exists;
 
     if detected.image_exists {
@@ -264,49 +347,14 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
         config.env.insert(key.into(), val.into());
     }
 
-    match &detected.auth {
-        ResolvedAuth::ApiKey => {
-            if let Some(api) = agent.api_key.as_ref() {
-                messages.push(format!(
-                    "Injecting {} for {}",
-                    api.env_var,
-                    api.inject_hosts.join(", ")
-                ));
-                config.secrets.insert(
-                    api.env_var.into(),
-                    SecretConfig {
-                        value: format!("env://{}", api.env_var),
-                        hosts: api.inject_hosts.iter().map(|&h| h.into()).collect(),
-                    },
-                );
-                for &(key, val) in api.guest_env {
-                    config.env.insert(key.into(), val.into());
-                }
-            }
-        }
-        ResolvedAuth::OAuth { host_config_dir } => {
-            if let Some(oauth) = agent.oauth.as_ref() {
-                let cred_file = host_config_dir.join(oauth.credentials_file);
-                messages.push(format!(
-                    "Staging {} → {}/{}",
-                    cred_file.display(),
-                    oauth.guest_credentials_dir,
-                    oauth.credentials_file
-                ));
-                stage_credentials = Some((
-                    cred_file,
-                    oauth.guest_credentials_dir.into(),
-                    oauth.credentials_file.into(),
-                ));
-                for &(key, val) in oauth.guest_env {
-                    config.env.insert(key.into(), val.into());
-                }
-                for &host in oauth.extra_hosts {
-                    allow.push(host.to_string());
-                }
-            }
-        }
-    }
+    apply_auth(
+        agent,
+        &detected.auth,
+        &mut config,
+        &mut messages,
+        &mut stage_files,
+        &mut allow,
+    );
 
     let git_hosts = git_remote_hosts();
     if !git_hosts.is_empty() {
@@ -340,7 +388,7 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
         messages,
         needs_image_build,
         run_as: agent.run_as,
-        stage_credentials,
+        stage_files,
     }
 }
 
@@ -458,7 +506,10 @@ mod tests {
 
         let detected = probe_with_env(&CLAUDE_CODE, None, Some(&creds), Some(true))
             .expect("should detect via OAuth");
-        assert!(matches!(detected.auth, ResolvedAuth::OAuth { .. }));
+        assert!(matches!(
+            detected.auth,
+            ResolvedAuth::StoredCredentials { .. }
+        ));
 
         let auto = build_config(&detected);
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
@@ -471,7 +522,8 @@ mod tests {
         );
 
         // Credentials staged into rootfs before boot (no mount, no runtime copy)
-        let (host_path, guest_dir, filename) = auto.stage_credentials.as_ref().unwrap();
+        assert_eq!(auto.stage_files.len(), 1);
+        let (host_path, guest_dir, filename) = &auto.stage_files[0];
         assert_eq!(host_path, &creds);
         assert_eq!(guest_dir, "/tmp/.claude");
         assert_eq!(filename, ".credentials.json");
@@ -522,7 +574,10 @@ mod tests {
 
         let detected = probe_with_env(&CLAUDE_CODE, Some(""), Some(&creds), Some(true))
             .expect("should fall through to OAuth");
-        assert!(matches!(detected.auth, ResolvedAuth::OAuth { .. }));
+        assert!(matches!(
+            detected.auth,
+            ResolvedAuth::StoredCredentials { .. }
+        ));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -539,6 +594,57 @@ mod tests {
         let auto = build_config(&detected);
         assert!(auto.needs_image_build);
         assert!(auto.messages.iter().any(|m| m.contains("will build")));
+    }
+
+    #[test]
+    fn pi_api_key_produces_correct_config() {
+        let detected = probe_with_env(&PI, Some("sk-ant-test123"), None, Some(true))
+            .expect("should detect Pi via API key");
+        assert!(matches!(detected.auth, ResolvedAuth::ApiKey));
+
+        let auto = build_config(&detected);
+        assert_eq!(auto.config.image.as_deref(), Some("pi"));
+        assert_eq!(auto.config.command.as_deref(), Some("pi"));
+        assert_eq!(auto.run_as, Some("dev"));
+        assert_eq!(
+            auto.config.env.get("HOME").map(String::as_str),
+            Some("/home/dev")
+        );
+
+        let secret = auto.config.secrets.get("ANTHROPIC_API_KEY").unwrap();
+        assert_eq!(secret.value, "env://ANTHROPIC_API_KEY");
+        assert_eq!(secret.hosts, vec!["api.anthropic.com"]);
+    }
+
+    #[test]
+    fn pi_stored_credentials_stages_multiple_files() {
+        let tmp = std::env::temp_dir().join("redan-test-pi-creds");
+        let _ = std::fs::create_dir_all(&tmp);
+        let auth_file = tmp.join("auth.json");
+        let settings = tmp.join("settings.json");
+        std::fs::write(&auth_file, "{}").unwrap();
+        std::fs::write(&settings, "{}").unwrap();
+        // models.json intentionally absent: only existing files get staged
+
+        let detected = probe_with_env(&PI, None, Some(&auth_file), Some(true))
+            .expect("should detect Pi via stored credentials");
+        let auto = build_config(&detected);
+
+        assert_eq!(auto.stage_files.len(), 2);
+        let filenames: Vec<&str> = auto
+            .stage_files
+            .iter()
+            .map(|(_, _, f)| f.as_str())
+            .collect();
+        assert!(filenames.contains(&"auth.json"));
+        assert!(filenames.contains(&"settings.json"));
+        assert!(!filenames.contains(&"models.json"));
+
+        for (_, dir, _) in &auto.stage_files {
+            assert_eq!(dir, "/home/dev/.pi/agent");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn empty_flags() -> ExecFlags<'static> {

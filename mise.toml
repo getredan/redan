@@ -37,6 +37,10 @@ run = "cargo test --test integration -- --ignored"
 description = "Build release binary"
 run = "cargo build --release"
 
+[tasks.install]
+description = "Build and install to ~/.cargo/bin"
+run = "cargo install --path ."
+
 [tasks.bench]
 description = "Boot-to-proxy benchmark (requires KVM + image)"
 run = "./tests/bench_boot.sh"

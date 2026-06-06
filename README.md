@@ -96,7 +96,7 @@ operate.
 
 Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
 flags. For OAuth-based auth (Claude Max/Team/Enterprise), redan detects
-your `~/.claude` credentials and mounts them read-only instead.
+your `~/.claude` credentials and stages them into the VM instead.
 
 ## Any agent
 
@@ -358,9 +358,9 @@ No Windows support (WSL2 with KVM passthrough may work, untested).
 
 ## Status
 
-Alpha. The full chain works end-to-end: `redan init --claude` through
-interactive Claude Code sessions with network policy enforcement.
-Pre-built binaries on
+Alpha. The full chain works end-to-end: zero-config `redan exec` through
+interactive Claude Code sessions with network policy enforcement, credential
+staging, and privilege separation. Pre-built binaries on
 [GitHub Releases](https://github.com/getredan/redan/releases).
 
 This code has not been through an independent security audit. Use at
