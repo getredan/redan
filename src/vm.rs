@@ -101,10 +101,17 @@ impl Vm {
                 libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
             }
         }
+        let krun_log_level = match std::env::var("RUST_LOG").as_deref() {
+            Ok("trace") => ffi::KRUN_LOG_LEVEL_TRACE,
+            Ok("debug") => ffi::KRUN_LOG_LEVEL_DEBUG,
+            Ok(s) if s.contains("trace") => ffi::KRUN_LOG_LEVEL_TRACE,
+            Ok(s) if s.contains("debug") => ffi::KRUN_LOG_LEVEL_DEBUG,
+            _ => ffi::KRUN_LOG_LEVEL_OFF,
+        };
         let ret = unsafe {
             ffi::krun_init_log(
                 ffi::KRUN_LOG_TARGET_DEFAULT,
-                ffi::KRUN_LOG_LEVEL_OFF,
+                krun_log_level,
                 ffi::KRUN_LOG_STYLE_AUTO,
                 0,
             )
