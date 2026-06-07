@@ -31,14 +31,15 @@ extern "C" fn cleanup_browser_atexit() {
     if let Ok(mut guard) = BROWSER_PID.lock()
         && let Some(pid) = guard.take()
     {
-        let pid = pid.cast_signed();
+        // Negative PID = kill the entire process group (Chrome tree).
+        let pgid = -(pid.cast_signed());
         unsafe {
-            libc::kill(pid, libc::SIGTERM);
+            libc::kill(pgid, libc::SIGTERM);
             let mut status: i32 = 0;
-            libc::usleep(200_000);
-            if libc::waitpid(pid, &raw mut status, libc::WNOHANG) == 0 {
-                libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, &raw mut status, 0);
+            libc::usleep(500_000);
+            if libc::waitpid(pid.cast_signed(), &raw mut status, libc::WNOHANG) == 0 {
+                libc::kill(pgid, libc::SIGKILL);
+                libc::waitpid(pid.cast_signed(), &raw mut status, 0);
             }
         }
     }
@@ -124,25 +125,7 @@ impl Browser {
 
         // From this point, any early return must tear down the proxy thread
         // and profile dir since Drop won't run on an unconstructed Self.
-        let mut child = match std::process::Command::new(&chrome)
-            .args([
-                "--headless=new",
-                &format!("--remote-debugging-port={CDP_PORT}"),
-                "--remote-debugging-address=127.0.0.1",
-                &format!("--user-data-dir={}", profile_dir.display()),
-                "--no-first-run",
-                "--disable-extensions",
-                "--disable-sync",
-                "--disable-background-networking",
-                &format!("--proxy-server=http://127.0.0.1:{proxy_port}"),
-                "--proxy-bypass-list=<-loopback>",
-                "about:blank",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+        let mut child = match spawn_chrome(&chrome, &profile_dir, proxy_port) {
             Ok(child) => child,
             Err(e) => {
                 cleanup_proxy(&shutdown, proxy_thread, &profile_dir);
@@ -206,9 +189,10 @@ impl Drop for Browser {
 
         self.proxy_shutdown.store(true, Ordering::Relaxed);
 
-        let pid = self.child.id();
+        // Kill the entire process group (Chrome tree: zygotes, GPU, renderers).
+        let pgid = self.child.id().cast_signed();
         unsafe {
-            libc::kill(pid.cast_signed(), libc::SIGTERM);
+            libc::kill(-pgid, libc::SIGTERM);
         }
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -217,7 +201,7 @@ impl Drop for Browser {
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                let _ = self.child.kill();
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
                 let _ = self.child.wait();
                 break;
             }
@@ -231,6 +215,42 @@ impl Drop for Browser {
         let _ = std::fs::remove_dir_all(&self.profile_dir);
         log::info!("Chrome stopped and profile cleaned up");
     }
+}
+
+fn spawn_chrome(
+    chrome: &std::path::Path,
+    profile_dir: &std::path::Path,
+    proxy_port: u16,
+) -> std::io::Result<std::process::Child> {
+    let mut cmd = std::process::Command::new(chrome);
+    cmd.args([
+        "--headless=new",
+        &format!("--remote-debugging-port={CDP_PORT}"),
+        "--remote-debugging-address=127.0.0.1",
+        &format!("--user-data-dir={}", profile_dir.display()),
+        "--no-first-run",
+        "--disable-extensions",
+        "--disable-sync",
+        "--disable-background-networking",
+        &format!("--proxy-server=http://127.0.0.1:{proxy_port}"),
+        "--proxy-bypass-list=<-loopback>",
+        "about:blank",
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped());
+
+    // Own process group so kill(-pgid) reaches the entire Chrome tree
+    // (zygotes, GPU process, renderers, network service, etc).
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+
+    cmd.spawn()
 }
 
 fn cleanup_proxy(shutdown: &AtomicBool, thread: JoinHandle<()>, profile_dir: &std::path::Path) {
