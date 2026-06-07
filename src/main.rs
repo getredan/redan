@@ -96,10 +96,10 @@ enum Cli {
         #[arg(long)]
         rootfs: Option<String>,
 
-        /// Command to run in the guest (everything after --).
+        /// Shell command to run in the guest.
         /// If omitted in interactive mode, defaults to /bin/sh.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
+        #[arg(long, short = 'c')]
+        command: Option<String>,
 
         /// Interactive mode: attach terminal to guest console.
         #[arg(long, short = 'i')]
@@ -495,7 +495,7 @@ fn main() {
 struct ExecArgs {
     image_name: Option<String>,
     rootfs: Option<String>,
-    command: Vec<String>,
+    command: Option<String>,
     interactive: bool,
     timeout: Option<u64>,
     secrets: Vec<String>,
@@ -580,11 +580,7 @@ fn exec_command(args: ExecArgs) {
 
     let image_name = args.image_name.or_else(|| cfg.image.clone());
     let rootfs = args.rootfs.or_else(|| cfg.rootfs.clone());
-    let command = if args.command.is_empty() {
-        cfg.command.clone()
-    } else {
-        Some(shell_words::join(&args.command))
-    };
+    let command = args.command.or_else(|| cfg.command.clone());
     let timeout = args.timeout.or(cfg.timeout).unwrap_or(3600);
     let interactive = args.interactive || cfg.interactive.unwrap_or(false);
     let redirect_logs = interactive || redan::terminal::stdin_is_tty();

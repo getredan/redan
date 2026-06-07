@@ -201,7 +201,7 @@ pub fn detect_all() -> Vec<DetectedAgent> {
 pub struct ExecFlags<'a> {
     pub image: &'a Option<String>,
     pub rootfs: &'a Option<String>,
-    pub command: &'a [String],
+    pub command: &'a Option<String>,
     pub secrets: &'a [String],
     pub secret_file: &'a Option<String>,
     pub mounts: &'a [String],
@@ -211,7 +211,7 @@ pub struct ExecFlags<'a> {
 pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
     f.image.is_some()
         || f.rootfs.is_some()
-        || !f.command.is_empty()
+        || f.command.is_some()
         || !f.secrets.is_empty()
         || f.secret_file.is_some()
         || !f.mounts.is_empty()
@@ -651,7 +651,7 @@ mod tests {
         ExecFlags {
             image: &None,
             rootfs: &None,
-            command: &[],
+            command: &None,
             secrets: &[],
             secret_file: &None,
             mounts: &[],
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn explicit_flags_detects_command() {
-        let cmd = vec!["echo".into(), "hello".into()];
+        let cmd = Some("echo hello".into());
         assert!(has_explicit_flags(&ExecFlags {
             command: &cmd,
             ..empty_flags()
