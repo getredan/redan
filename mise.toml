@@ -31,11 +31,17 @@ run = "cargo test --lib"
 
 [tasks.test-integration]
 description = "Run integration tests (requires KVM + /tmp/redan-rootfs)"
-run = "cargo test --test integration -- --ignored"
+# Serialized: Vm::boot forks, and forking from a threaded test harness
+# can deadlock the child on locks held by other test threads.
+run = "cargo test --test integration -- --ignored --test-threads=1"
 
 [tasks.build]
 description = "Build release binary"
 run = "cargo build --release"
+
+[tasks.install]
+description = "Build and install to ~/.cargo/bin"
+run = "cargo install --path ."
 
 [tasks.bench]
 description = "Boot-to-proxy benchmark (requires KVM + image)"

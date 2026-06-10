@@ -105,6 +105,13 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
         }
     }
 
+    // Chrome/Chromium (informational, not required)
+    if let Some(path) = redan::browser::find_chrome() {
+        println!("[ok]   chrome: {}", path.display());
+    } else {
+        println!("[info] chrome: not found (optional, needed for --browser)");
+    }
+
     // Validate secrets (never print values)
     for spec in secret_specs {
         let env_label = spec.split_once('=').map_or("(invalid)", |(name, _)| name);

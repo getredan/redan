@@ -67,7 +67,7 @@ pub fn connect_upstream(
 /// Returns true if the IP is in a private, loopback, or link-local range.
 /// Used to block SSRF to cloud metadata endpoints and internal services.
 #[allow(clippy::unnested_or_patterns)] // Nesting destroys per-range comments
-pub(crate) const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
+pub const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
     matches!(
         octets,
@@ -80,7 +80,7 @@ pub(crate) const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
         | [100, 64..=127, ..] // 100.64.0.0/10 (CGN, RFC 6598)
         | [192, 0, 0, ..]     // 192.0.0.0/24 (IETF protocol assignments)
         | [198, 18..=19, ..]  // 198.18.0.0/15 (benchmarking)
-        | [233..=239, ..] // 224.0.0.0/4 (multicast, partial)
+        | [224..=239, ..] // 224.0.0.0/4 (multicast)
     )
 }
 
@@ -256,6 +256,9 @@ mod tests {
         // CGN
         assert!(is_private_ip(Ipv4Addr::new(100, 64, 0, 1)));
         assert!(is_private_ip(Ipv4Addr::new(100, 127, 255, 255)));
+        // Multicast
+        assert!(is_private_ip(Ipv4Addr::new(224, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(239, 255, 255, 255)));
     }
 
     #[test]

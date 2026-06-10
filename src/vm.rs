@@ -1,14 +1,22 @@
 /// libkrun microVM lifecycle.
 ///
 /// Handles VM creation, configuration, and execution. The VM runs in a
-/// separate thread; the caller gets back a unix socket for virtio-net
-/// communication.
+/// forked child process; the caller gets back a unix socket for
+/// virtio-net communication.
+///
+/// Fork, not a thread: libkrun's `krun_start_enter` terminates its
+/// process via `libc::_exit` on guest shutdown (`Vmm::stop` in
+/// libkrun's vmm crate), bypassing Rust Drop impls AND atexit handlers.
+/// Running it in a child confines the `_exit` to that child; the parent
+/// reaps the guest exit code with waitpid and cleans up normally. This
+/// is the pattern smolvm uses and the libkrun maintainer endorses until
+/// the 2.0 API adds a returning entry point.
+/// See <https://github.com/libkrun/libkrun/issues/561>
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::thread::JoinHandle;
 
 use crate::ffi;
 
@@ -48,42 +56,113 @@ pub struct VmConfig {
     pub interactive: bool,
 }
 
-/// A running VM. Owns the host end of the virtio-net socket and the VM thread.
+/// A running VM. Owns the host end of the virtio-net socket and the
+/// child process running libkrun.
 pub struct Vm {
     /// Host-side unix socket for virtio-net frame I/O.
     pub net_sock: UnixStream,
-    /// VM thread handle. Note: `krun_start_enter` blocks until the VM is
-    /// destroyed, which may not happen when the guest process exits.
-    /// Joining this thread may block indefinitely.
-    _thread: JoinHandle<i32>,
+    /// PID of the forked child running `krun_start_enter`. The child
+    /// `_exit`s with the guest's exit code on shutdown.
+    child: libc::pid_t,
+}
+
+/// Exit code libkrun reserves for VMM-level errors (see libkrun.h).
+const EXIT_VMM_ERROR: i32 = 125;
+
+/// Decode a waitpid status into a shell-style exit code:
+/// the exit code for normal exits, 128 + signal for signal deaths.
+const fn exit_code_from_wait_status(status: libc::c_int) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        EXIT_VMM_ERROR
+    }
 }
 
 impl Vm {
     /// Boot a VM with the given configuration.
     ///
-    /// Returns immediately with a `Vm` handle. The VM runs in a background thread.
-    /// Use `net_sock` to communicate via smoltcp.
+    /// Forks a child to host libkrun and returns immediately with a `Vm`
+    /// handle. Use `net_sock` to communicate via smoltcp; when the guest
+    /// exits, the child closes its socket end and the peer sees EOF.
+    /// Call `shutdown()` to reap the child and get the guest exit code.
+    ///
+    /// Must be called before the process spawns any threads: the child
+    /// inherits only the calling thread, and a lock held by another
+    /// thread at fork time would deadlock the child.
     #[must_use]
     #[allow(clippy::expect_used, clippy::unwrap_used)] // FFI setup; failures are unrecoverable
     pub fn boot(config: VmConfig) -> Self {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();
 
-        let thread = std::thread::spawn(move || {
-            // Catch panics to prevent unwinding across the FFI boundary
-            // into libkrun's C code, which would be undefined behavior.
+        // SAFETY: fork + prctl + getppid are async-signal-safe; the
+        // child does allocate afterwards, which is sound because no
+        // other threads exist yet (see doc comment).
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+
+        if pid == 0 {
+            // Child: this process belongs to libkrun now.
+            unsafe {
+                // Die with the parent so VMs are never orphaned.
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // Close the race where the parent died before prctl.
+                if libc::getppid() == 1 {
+                    libc::_exit(EXIT_VMM_ERROR);
+                }
+            }
+            // Close the host end so the parent's proxy sees EOF when
+            // this child dies, not a silently held-open socket.
+            drop(host_sock);
+
+            // Catch panics (krun_check! panics on FFI errors) to avoid
+            // unwinding into the parent's inherited stack frames.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 Self::run_vm(config, guest_sock, guest_fd)
             }));
-            result.unwrap_or_else(|_| {
-                log::error!("VM thread panicked, aborting to prevent UB");
-                std::process::abort();
-            })
-        });
+            // run_vm only returns if krun_start_enter failed pre-boot;
+            // on guest shutdown libkrun _exits this child directly.
+            // _exit, not exit: don't flush stdio buffers inherited from
+            // the parent or run its atexit handlers.
+            let _ = result;
+            unsafe { libc::_exit(EXIT_VMM_ERROR) }
+        }
+
+        // Parent: close the guest end. virtio-net must be the only
+        // holder so EOF propagates when the child exits.
+        drop(guest_sock);
 
         Self {
             net_sock: host_sock,
-            _thread: thread,
+            child: pid,
+        }
+    }
+
+    /// Reap the VM child and return the guest exit code.
+    ///
+    /// If the child is still running (e.g. proxy timeout rather than
+    /// guest exit), kill it first. Blocks until the child is reaped.
+    pub fn shutdown(&self) -> i32 {
+        let mut status: libc::c_int = 0;
+        unsafe {
+            // Fast path: child already exited (the normal case, the
+            // proxy loop breaks on socket EOF after the child dies).
+            let reaped = libc::waitpid(self.child, &raw mut status, libc::WNOHANG);
+            if reaped == self.child {
+                return exit_code_from_wait_status(status);
+            }
+            // Child still alive: kill it. SIGKILL, not SIGTERM; libkrun
+            // has no graceful-shutdown path on Linux and the rootfs is
+            // host-managed, so there's nothing to flush guest-side.
+            libc::kill(self.child, libc::SIGKILL);
+            if libc::waitpid(self.child, &raw mut status, 0) == self.child {
+                exit_code_from_wait_status(status)
+            } else {
+                EXIT_VMM_ERROR
+            }
         }
     }
 
@@ -101,10 +180,17 @@ impl Vm {
                 libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
             }
         }
+        let krun_log_level = match std::env::var("RUST_LOG").as_deref() {
+            Ok("trace") => ffi::KRUN_LOG_LEVEL_TRACE,
+            Ok("debug") => ffi::KRUN_LOG_LEVEL_DEBUG,
+            Ok(s) if s.contains("trace") => ffi::KRUN_LOG_LEVEL_TRACE,
+            Ok(s) if s.contains("debug") => ffi::KRUN_LOG_LEVEL_DEBUG,
+            _ => ffi::KRUN_LOG_LEVEL_OFF,
+        };
         let ret = unsafe {
             ffi::krun_init_log(
                 ffi::KRUN_LOG_TARGET_DEFAULT,
-                ffi::KRUN_LOG_LEVEL_OFF,
+                krun_log_level,
                 ffi::KRUN_LOG_STYLE_AUTO,
                 0,
             )
@@ -260,4 +346,31 @@ pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
 /// the tool doesn't exist.
 pub const fn ca_update_commands() -> &'static str {
     "update-ca-certificates 2>/dev/null; update-ca-trust 2>/dev/null; true"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Linux wait status encoding: normal exit code N is N << 8,
+    // death by signal S is S in the low 7 bits.
+
+    #[test]
+    fn exit_code_zero_from_clean_exit() {
+        assert_eq!(exit_code_from_wait_status(0), 0);
+    }
+
+    #[test]
+    fn exit_code_preserved_from_nonzero_exit() {
+        assert_eq!(exit_code_from_wait_status(42 << 8), 42);
+        assert_eq!(exit_code_from_wait_status(1 << 8), 1);
+        assert_eq!(exit_code_from_wait_status(255 << 8), 255);
+    }
+
+    #[test]
+    fn exit_code_128_plus_signal_when_killed() {
+        assert_eq!(exit_code_from_wait_status(libc::SIGKILL), 137);
+        assert_eq!(exit_code_from_wait_status(libc::SIGTERM), 143);
+        assert_eq!(exit_code_from_wait_status(libc::SIGINT), 130);
+    }
 }

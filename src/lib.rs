@@ -5,6 +5,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod auto_detect;
+pub mod browser;
 pub mod ca;
 pub mod config;
 pub mod dns;

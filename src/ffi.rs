@@ -5,6 +5,11 @@
 use std::os::raw::{c_char, c_int};
 
 pub const KRUN_LOG_LEVEL_OFF: u32 = 0;
+pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
+pub const KRUN_LOG_LEVEL_WARN: u32 = 2;
+pub const KRUN_LOG_LEVEL_INFO: u32 = 3;
+pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
+pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
 pub const KRUN_LOG_TARGET_DEFAULT: c_int = -1;
 

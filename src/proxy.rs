@@ -330,8 +330,11 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
                 iface.update_ip_addrs(|addrs| {
                     // /32 host route: smoltcp responds to ARP only for this IP.
                     let cidr = IpCidr::new(ip.into(), 32);
-                    if !addrs.contains(&cidr) {
-                        addrs.push(cidr).ok();
+                    if !addrs.contains(&cidr) && addrs.push(cidr).is_err() {
+                        log::warn!(
+                            "cannot add {ip} to interface: address table full \
+                             (raise SMOLTCP_IFACE_MAX_ADDR_COUNT)"
+                        );
                     }
                 });
             }

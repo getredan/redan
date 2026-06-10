@@ -250,6 +250,10 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         forwards: &[],
     });
 
+    // Reap the build VM (kills it if the proxy timed out instead).
+    // The sentinel file is the source of truth for build success.
+    let _ = vm_handle.shutdown();
+
     // Verify the build completed successfully by checking for the
     // sentinel file written as the last build step.
     let sentinel = dest.join("tmp/.redan-build-ok");

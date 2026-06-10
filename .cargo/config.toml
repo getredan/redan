@@ -1,0 +1,6 @@
+[env]
+# smoltcp defaults IFACE_MAX_ADDR_COUNT to 2, which only fits the gateway IP
+# plus one mapped host. redan allocates a unique IP per DNS hostname (for
+# reverse-lookup on non-SNI protocols), so we need room for all of them.
+# The host pool range is .10-.254 (245 IPs), so 256 covers the gateway + pool.
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "256"

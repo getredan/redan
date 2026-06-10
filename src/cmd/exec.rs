@@ -9,6 +9,7 @@ use redan::session;
 use redan::templates;
 use redan::vm;
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ExecConfig<'a> {
     pub rootfs: &'a str,
     pub command: &'a str,
@@ -25,9 +26,21 @@ pub(crate) struct ExecConfig<'a> {
     pub session_name: Option<&'a str>,
     /// Pre-existing session ID (for daemon mode). If None, creates a new session.
     pub session_id: Option<&'a str>,
+    /// Run the user command as this OS user (via `runuser`).
+    pub run_as: Option<&'a str>,
+    /// Guest directory to chown to `run_as` user before the user command runs.
+    /// Used for staged credentials that the agent needs to write back to.
+    pub chown_dir: Option<&'a str>,
+    /// Redirect logs to session file (avoids interleaving with guest output).
+    /// True whenever stdin is a TTY.
+    pub redirect_logs: bool,
+    /// Launch headless Chrome with CDP and an allowlist proxy.
+    pub browser: bool,
 }
 
-pub(crate) fn run(cfg: &ExecConfig<'_>) {
+/// Run a sandboxed VM session to completion.
+/// Returns the guest exit code, which the caller should propagate.
+pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // Create or reuse session
     let session_id = cfg.session_id.map_or_else(session::new_id, Into::into);
     if cfg.session_id.is_some() && !session::valid_session_id(&session_id) {
@@ -55,9 +68,8 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     };
     log::info!("session {session_id} started");
 
-    // In interactive mode, redirect logs to a file so they don't
-    // interleave with the guest TUI.
-    if cfg.interactive {
+    // Redirect logs to a file so they don't interleave with guest output.
+    if cfg.redirect_logs {
         let log_path = session::session_dir(&session_id).join("redan.log");
         eprintln!("session: {session_id} (logs: {})", log_path.display());
         crate::redirect_logs_to_file(&log_path);
@@ -162,15 +174,38 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         mount_commands.push(format!("mount -t virtiofs{mount_opts} {tag} {guest_path}"));
     }
 
+    // Validate run_as username before interpolating into shell commands
+    if let Some(user) = cfg.run_as
+        && let Err(msg) = validate_username(user)
+    {
+        eprintln!("invalid --run-as username: {msg}");
+        std::process::exit(1);
+    }
+
     // Build guest command: network setup + CA trust + mounts + user command
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
     let ca_update = vm::ca_update_commands();
     let mount_setup = mount_commands.join("; ");
-    let full_command = if mount_setup.is_empty() {
-        format!("{net_setup}; {ca_update}; {}", cfg.command)
-    } else {
-        format!("{net_setup}; {ca_update}; {mount_setup}; {}", cfg.command)
-    };
+    let ensure_user = cfg.run_as.map(ensure_user_command);
+    let user_command = wrap_run_as(cfg.command, cfg.run_as);
+
+    let mut parts = vec![net_setup, ca_update.to_string()];
+    if !mount_setup.is_empty() {
+        parts.push(mount_setup);
+    }
+    if let Some(cmd) = ensure_user {
+        parts.push(cmd);
+    }
+    if let (Some(_), Some(dir)) = (cfg.run_as, cfg.chown_dir) {
+        // chown doesn't work through virtiofs (host user != VM root), so
+        // open permissions instead. Single-user VM, so this is safe.
+        // Use find instead of glob: shell `*` skips dotfiles like .credentials.json.
+        parts.push(format!(
+            "chmod 777 {dir} && find {dir} -maxdepth 1 -type f -exec chmod 666 {{}} +; true"
+        ));
+    }
+    parts.push(user_command);
+    let full_command = parts.join("; ");
 
     let mut env: Vec<String> = vec![
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
@@ -208,30 +243,45 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         env.push(format!("{name}={value}"));
     }
 
+    if cfg.browser {
+        env.push("REDAN_BROWSER=1".into());
+        env.push(format!("REDAN_BROWSER_HOST={}", proxy::GATEWAY_IP));
+        env.push(format!(
+            "REDAN_BROWSER_CDP_PORT={}",
+            redan::browser::CDP_PORT
+        ));
+    }
+
     let vm_config = vm::VmConfig {
         rootfs: cfg.rootfs.into(),
-        vcpus: 1,
-        ram_mib: 256,
+        vcpus: 4,
+        ram_mib: 4096,
         command: full_command,
         env,
         virtiofs_mounts,
         interactive: cfg.interactive,
     };
 
-    // In interactive mode, set the host terminal to raw mode
-    let _raw_guard = if cfg.interactive {
-        match redan::terminal::RawTerminalGuard::enter() {
-            Ok(guard) => Some(guard),
-            Err(e) => {
-                eprintln!("warning: cannot enter raw terminal mode: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // libkrun handles raw terminal mode inside krun_start_enter via its
+    // implicit console setup (setup_terminal_raw_mode). Calling cfmakeraw
+    // here before libkrun breaks console output due to interaction between
+    // the pre-existing raw mode and libkrun's make_non_blocking on dup'd fds.
+    // Save the state so the parent can restore it after reaping the VM
+    // child; libkrun raw-modes the TTY whenever stdin is one, not just
+    // in interactive mode.
+    redan::terminal::save_terminal();
 
     let vm_handle = vm::Vm::boot(vm_config);
+
+    // Ignore SIGINT in the parent. Ctrl-C must reach the guest, not kill
+    // redan: the terminal delivers SIGINT to the whole foreground process
+    // group, and the VM child (libkrun) forwards it to the guest console.
+    // The guest agent handles it (or its shell exits), the VM child dies,
+    // and the parent cleans up through the normal reap path.
+    // SAFETY: SIG_IGN disposition change, no handler code involved.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+    }
 
     let net_sock = match vm_handle.net_sock.try_clone() {
         Ok(s) => s,
@@ -263,6 +313,57 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         }
     }
 
+    // Launch headless Chrome if requested. Held until proxy::run returns.
+    let _browser = if cfg.browser {
+        match redan::browser::Browser::launch(redan::browser::BrowserConfig {
+            allowed_hosts: allowed_hosts.clone(),
+        }) {
+            Ok(b) => {
+                // Chrome shares the agent's allowlist. Make the scope explicit
+                // so an agent that can't reach a site reads it as policy, not breakage.
+                match &allowed_hosts {
+                    Some(h) if h.is_empty() => log::info!(
+                        "browser: Chrome egress blocked (default-deny); pass --allow-host to let Chrome reach sites"
+                    ),
+                    Some(h) => log::info!("browser: Chrome egress limited to {}", h.join(", ")),
+                    None => log::info!("browser: Chrome egress unrestricted (--allow-host '*')"),
+                }
+
+                // Add CDP forward so the guest can reach Chrome
+                let cdp_fwd = proxy::ForwardSpec {
+                    guest_port: redan::browser::CDP_PORT,
+                    host_port: redan::browser::CDP_PORT,
+                };
+                match forwards.iter().find(|f| f.guest_port == cdp_fwd.guest_port) {
+                    Some(existing) if existing.host_port != cdp_fwd.host_port => {
+                        eprintln!(
+                            "error: --browser reserves guest port {} for Chrome CDP, \
+                             but it is already forwarded to host port {}",
+                            cdp_fwd.guest_port, existing.host_port
+                        );
+                        std::process::exit(1);
+                    }
+                    Some(_) => {}
+                    None => {
+                        log::info!(
+                            "forward: :{} -> 127.0.0.1:{} (CDP)",
+                            cdp_fwd.guest_port,
+                            cdp_fwd.host_port
+                        );
+                        forwards.push(cdp_fwd);
+                    }
+                }
+                Some(b)
+            }
+            Err(e) => {
+                eprintln!("error: failed to launch browser: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let discovered = proxy::run(proxy::ProxyConfig {
         host_sock: net_sock,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
@@ -273,6 +374,12 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         discover: cfg.discover,
         forwards: &forwards,
     });
+
+    // Reap the VM child (kills it first if the proxy hit its timeout
+    // while the guest was still running) and restore the terminal.
+    // libkrun restores it on clean guest shutdown, but not when killed.
+    let guest_code = vm_handle.shutdown();
+    redan::terminal::restore_saved_terminal();
 
     if cfg.discover && !discovered.is_empty() {
         eprintln!("\n--- discovered hosts ---");
@@ -289,8 +396,9 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         eprintln!("]");
     }
 
-    meta.finish(true);
-    log::info!("session {session_id} finished");
+    meta.finish(guest_code == 0);
+    log::info!("session {session_id} finished (guest exit code {guest_code})");
+    guest_code
 }
 
 /// Redact a secret spec for error messages. Shows `ENV_VAR=<redacted>:hosts`.
@@ -407,6 +515,47 @@ pub(crate) fn parse_mount(spec: &str) -> (String, String, bool) {
     }
 }
 
+fn validate_username(user: &str) -> Result<(), String> {
+    if user.is_empty() {
+        return Err("username must not be empty".into());
+    }
+    if user.len() > 32 {
+        return Err(format!("username too long ({} chars, max 32)", user.len()));
+    }
+    if !user
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("username contains invalid characters: {user:?}"));
+    }
+    Ok(())
+}
+
+/// Shell command that creates the target user if it doesn't exist.
+/// Runs as root in the init script, before `runuser` drops privileges.
+/// Tries useradd (shadow-utils), Debian adduser, then Alpine/BusyBox
+/// adduser. Stderr suppressed so failed attempts don't spew into the
+/// terminal.
+fn ensure_user_command(user: &str) -> String {
+    format!(
+        "id -u {user} >/dev/null 2>&1 || \
+         useradd -m -s /bin/sh {user} 2>/dev/null || \
+         adduser --disabled-password --gecos '' {user} 2>/dev/null || \
+         adduser -D -h /home/{user} {user} 2>/dev/null"
+    )
+}
+
+/// Wrap a command with `runuser -u {user} -- {command}` when `run_as` is set.
+/// Network, CA, and mount setup run as root; only the user command drops privileges.
+/// Uses `--` to separate runuser flags from the command; no extra sh -c layer
+/// so the guest TTY passes through for interactive agents.
+fn wrap_run_as(command: &str, run_as: Option<&str>) -> String {
+    let Some(user) = run_as else {
+        return command.to_string();
+    };
+    format!("runuser -u {user} -- {command}")
+}
+
 fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
     let dir = rootfs.join("etc/redan");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -514,6 +663,62 @@ mod tests {
         assert_eq!(host, "/home/chris/.claude");
         assert_eq!(guest, "/workspace");
         assert!(ro);
+    }
+
+    #[test]
+    fn wrap_run_as_none_passthrough() {
+        assert_eq!(wrap_run_as("echo hello", None), "echo hello");
+    }
+
+    #[test]
+    fn wrap_run_as_wraps_with_runuser() {
+        let result = wrap_run_as("claude --dangerously-skip-permissions", Some("dev"));
+        assert_eq!(
+            result,
+            "runuser -u dev -- claude --dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn wrap_run_as_preserves_command_verbatim() {
+        let result = wrap_run_as("echo 'hello world'", Some("dev"));
+        assert_eq!(result, "runuser -u dev -- echo 'hello world'");
+    }
+
+    #[test]
+    fn ensure_user_command_creates_user() {
+        let cmd = ensure_user_command("dev");
+        assert!(cmd.starts_with("id -u dev"));
+        // useradd tried first, then Debian adduser, then Alpine adduser
+        assert!(cmd.contains("useradd -m -s /bin/sh dev"));
+        assert!(cmd.contains("adduser --disabled-password --gecos '' dev"));
+        assert!(cmd.contains("adduser -D -h /home/dev dev"));
+    }
+
+    #[test]
+    fn validate_username_accepts_valid() {
+        assert!(validate_username("dev").is_ok());
+        assert!(validate_username("claude-code").is_ok());
+        assert!(validate_username("user_123").is_ok());
+        assert!(validate_username("a").is_ok());
+    }
+
+    #[test]
+    fn validate_username_rejects_empty() {
+        assert!(validate_username("").is_err());
+    }
+
+    #[test]
+    fn validate_username_rejects_shell_injection() {
+        assert!(validate_username("dev; rm -rf /").is_err());
+        assert!(validate_username("$(whoami)").is_err());
+        assert!(validate_username("dev\nroot").is_err());
+    }
+
+    #[test]
+    fn validate_username_rejects_too_long() {
+        let long = "a".repeat(33);
+        assert!(validate_username(&long).is_err());
     }
 
     #[test]

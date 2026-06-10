@@ -5,14 +5,14 @@ RUN apt-get update -qq && \
       ca-certificates curl git iproute2 && \
     rm -rf /var/lib/apt/lists/*
 
-# Node.js via NodeSource (Ubuntu 24.04 ships Node 18, which is EOL)
+# Node.js via NodeSource
 ARG NODE_MAJOR=22
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && \
     apt-get install -y -qq --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Claude Code
-RUN npm install -g @anthropic-ai/claude-code
+# Pi coding agent
+RUN npm install -g @earendil-works/pi-coding-agent
 
 # Non-root user (ubuntu:24.04 ships with ubuntu:1000, remove it first)
 RUN userdel -r ubuntu 2>/dev/null; \
@@ -23,4 +23,4 @@ RUN userdel -r ubuntu 2>/dev/null; \
 
 USER dev
 WORKDIR /workspace
-CMD ["claude"]
+CMD ["pi"]
