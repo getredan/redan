@@ -70,18 +70,19 @@ cargo install --git https://github.com/getredan/redan.git
 redan doctor
 ```
 
-## Claude Code (zero-config)
+## Run an agent (zero-config)
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 cd ~/my-project
-redan exec
+redan run claude
 ```
 
-That's it. Redan auto-detects Claude Code: picks up your API key,
-builds the `claude-code` image if needed, mounts the current directory,
-allows Anthropic's API hosts, and drops you into an interactive session.
-It prints what it chose so nothing is silent:
+That's it. `redan run claude` picks up your API key, builds the
+`claude-code` image if needed, mounts the current directory, allows
+Anthropic's API hosts, drops privileges to a non-root user, and drops
+you into an interactive Claude Code session. It prints what it chose so
+nothing is silent:
 
 ```text
   Using image: claude-code
@@ -89,14 +90,21 @@ It prints what it chose so nothing is silent:
   Mounting current directory → /workspace
 ```
 
-Git remote hosts are added to the network allowlist automatically so
-git push/pull works out of the box. The agent runs as an unprivileged
-user inside the VM (not root), matching how Claude Code expects to
-operate.
+`redan run pi` does the same for Pi. Run `redan run` with no agent to
+auto-detect from the environment. Pass an initial prompt after `--`:
 
-Auto-detect kicks in when there's no `redan.toml` and no explicit CLI
-flags. For OAuth-based auth (Claude Max/Team/Enterprise), redan detects
-your `~/.claude` credentials and stages them into the VM instead.
+```bash
+redan run claude -- "fix the failing test in api/users.py"
+```
+
+Git remote hosts are added to the network allowlist automatically so
+git push/pull works out of the box. For OAuth auth (Claude Max/Team/
+Enterprise), redan detects your `~/.claude` credentials and stages them
+into the VM instead of reading an API key.
+
+`redan run` is the opinionated path: it knows each agent's image,
+command, auth, and network policy. For full manual control over the
+image and command, use `redan exec` (below).
 
 ## Any agent
 
@@ -108,7 +116,7 @@ redan image create myimage --packages "python3 nodejs npm"
 redan exec --image myimage \
   --secret "API_KEY=env://MY_API_KEY:api.example.com" \
   --mount ./my-project \
-  -- my-agent --some-flag
+  -c "my-agent --some-flag"
 ```
 
 Or use `redan.toml` for repeatable setups:
@@ -186,7 +194,9 @@ match TLS SNI.
 **Discover mode** lets you figure out what hosts the agent needs:
 
 ```bash
-redan exec --discover -- my-agent --some-flag
+redan run claude --discover
+# or, for a custom image:
+redan exec --image myimage --discover -c "my-agent --some-flag"
 ```
 
 Redan allows all connections, prints the observed hosts at exit, and
@@ -358,9 +368,9 @@ No Windows support (WSL2 with KVM passthrough may work, untested).
 
 ## Status
 
-Alpha. The full chain works end-to-end: zero-config `redan exec` through
-interactive Claude Code sessions with network policy enforcement, credential
-staging, and privilege separation. Pre-built binaries on
+Alpha. The full chain works end-to-end: zero-config `redan run claude`
+through interactive Claude Code sessions with network policy enforcement,
+credential staging, and privilege separation. Pre-built binaries on
 [GitHub Releases](https://github.com/getredan/redan/releases).
 
 This code has not been through an independent security audit. Use at
