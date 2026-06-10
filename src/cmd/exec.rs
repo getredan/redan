@@ -319,6 +319,16 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
             allowed_hosts: allowed_hosts.clone(),
         }) {
             Ok(b) => {
+                // Chrome shares the agent's allowlist. Make the scope explicit
+                // so an agent that can't reach a site reads it as policy, not breakage.
+                match &allowed_hosts {
+                    Some(h) if h.is_empty() => log::info!(
+                        "browser: Chrome egress blocked (default-deny); pass --allow-host to let Chrome reach sites"
+                    ),
+                    Some(h) => log::info!("browser: Chrome egress limited to {}", h.join(", ")),
+                    None => log::info!("browser: Chrome egress unrestricted (--allow-host '*')"),
+                }
+
                 // Add CDP forward so the guest can reach Chrome
                 let cdp_fwd = proxy::ForwardSpec {
                     guest_port: redan::browser::CDP_PORT,
