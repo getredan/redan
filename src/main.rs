@@ -692,7 +692,7 @@ fn exec_command(args: ExecArgs) {
             args.browser,
         );
     } else {
-        cmd::exec::run(&cmd::exec::ExecConfig {
+        let guest_code = cmd::exec::run(&cmd::exec::ExecConfig {
             rootfs: &rootfs_path,
             command: &command,
             interactive,
@@ -712,6 +712,7 @@ fn exec_command(args: ExecArgs) {
             redirect_logs,
             browser: args.browser,
         });
+        std::process::exit(guest_code);
     }
 }
 
@@ -896,7 +897,7 @@ fn run_daemon(session_id: &str) {
     });
 
     // Run the VM+proxy (non-interactive: daemon has no terminal)
-    cmd::exec::run(&cmd::exec::ExecConfig {
+    let guest_code = cmd::exec::run(&cmd::exec::ExecConfig {
         rootfs: &cfg.rootfs,
         command: &cfg.command,
         interactive: false,
@@ -916,6 +917,7 @@ fn run_daemon(session_id: &str) {
         redirect_logs: false,
         browser: cfg.browser,
     });
+    std::process::exit(guest_code);
 }
 
 fn attach_session(id_or_name: Option<&str>) {

@@ -27,12 +27,17 @@ pub fn host_terminal_size() -> Option<(u16, u16)> {
     }
 }
 
-/// Saved terminal state for the atexit handler. `krun_start_enter` calls
-/// `exit()`, bypassing Rust Drop impls, so we register a C atexit handler
-/// that restores the terminal from this global.
+/// Terminal state saved before booting the VM. libkrun puts the shared
+/// TTY into raw mode inside the VM child process; the parent restores
+/// from this global after reaping the child.
 static SAVED_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
 
-extern "C" fn restore_terminal() {
+/// Restore the terminal to the state captured by [`save_terminal`].
+///
+/// No-op if nothing was saved. Idempotent: safe to call when the VM
+/// child already restored the terminal itself (libkrun's exit observers
+/// do this on clean guest shutdown, but not when the child is killed).
+pub fn restore_saved_terminal() {
     if let Ok(guard) = SAVED_TERMIOS.lock()
         && let Some(ref original) = *guard
     {
@@ -92,13 +97,10 @@ impl Drop for RawTerminalGuard {
     }
 }
 
-/// Save the current terminal state and register an atexit handler,
-/// without modifying the terminal mode.
-///
-/// libkrun's `setup_terminal_raw_mode` handles entering raw mode inside
-/// `krun_start_enter`. This function provides a safety net: if libkrun's
-/// exit observers fail to restore, the atexit handler will.
-pub fn save_terminal_for_atexit() {
+/// Save the current terminal state for [`restore_saved_terminal`],
+/// without modifying the terminal mode. No-op if stdin is not a TTY
+/// or a state was already saved.
+pub fn save_terminal() {
     unsafe {
         if libc::isatty(libc::STDIN_FILENO) != 1 {
             return;
@@ -112,7 +114,6 @@ pub fn save_terminal_for_atexit() {
             && saved.is_none()
         {
             *saved = Some(current);
-            libc::atexit(restore_terminal);
         }
     }
 }

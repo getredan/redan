@@ -38,7 +38,9 @@ pub(crate) struct ExecConfig<'a> {
     pub browser: bool,
 }
 
-pub(crate) fn run(cfg: &ExecConfig<'_>) {
+/// Run a sandboxed VM session to completion.
+/// Returns the guest exit code, which the caller should propagate.
+pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // Create or reuse session
     let session_id = cfg.session_id.map_or_else(session::new_id, Into::into);
     if cfg.session_id.is_some() && !session::valid_session_id(&session_id) {
@@ -264,11 +266,22 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
     // implicit console setup (setup_terminal_raw_mode). Calling cfmakeraw
     // here before libkrun breaks console output due to interaction between
     // the pre-existing raw mode and libkrun's make_non_blocking on dup'd fds.
-    if cfg.interactive {
-        redan::terminal::save_terminal_for_atexit();
-    }
+    // Save the state so the parent can restore it after reaping the VM
+    // child; libkrun raw-modes the TTY whenever stdin is one, not just
+    // in interactive mode.
+    redan::terminal::save_terminal();
 
     let vm_handle = vm::Vm::boot(vm_config);
+
+    // Ignore SIGINT in the parent. Ctrl-C must reach the guest, not kill
+    // redan: the terminal delivers SIGINT to the whole foreground process
+    // group, and the VM child (libkrun) forwards it to the guest console.
+    // The guest agent handles it (or its shell exits), the VM child dies,
+    // and the parent cleans up through the normal reap path.
+    // SAFETY: SIG_IGN disposition change, no handler code involved.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+    }
 
     let net_sock = match vm_handle.net_sock.try_clone() {
         Ok(s) => s,
@@ -352,6 +365,12 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         forwards: &forwards,
     });
 
+    // Reap the VM child (kills it first if the proxy hit its timeout
+    // while the guest was still running) and restore the terminal.
+    // libkrun restores it on clean guest shutdown, but not when killed.
+    let guest_code = vm_handle.shutdown();
+    redan::terminal::restore_saved_terminal();
+
     if cfg.discover && !discovered.is_empty() {
         eprintln!("\n--- discovered hosts ---");
         eprintln!("The agent connected to these hosts:\n");
@@ -367,8 +386,9 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) {
         eprintln!("]");
     }
 
-    meta.finish(true);
-    log::info!("session {session_id} finished");
+    meta.finish(guest_code == 0);
+    log::info!("session {session_id} finished (guest exit code {guest_code})");
+    guest_code
 }
 
 /// Redact a secret spec for error messages. Shows `ENV_VAR=<redacted>:hosts`.
