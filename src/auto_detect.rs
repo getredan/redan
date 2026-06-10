@@ -23,6 +23,7 @@ use crate::image;
 static AGENTS: &[&AgentDef] = &[&CLAUDE_CODE, &PI];
 
 static CLAUDE_CODE: AgentDef = AgentDef {
+    slug: "claude",
     name: "Claude Code",
     image: "claude-code",
     command: "claude --dangerously-skip-permissions",
@@ -53,6 +54,7 @@ static CLAUDE_CODE: AgentDef = AgentDef {
 };
 
 static PI: AgentDef = AgentDef {
+    slug: "pi",
     name: "Pi",
     image: "pi",
     command: "pi",
@@ -82,6 +84,8 @@ static PI: AgentDef = AgentDef {
 
 /// A coding agent that redan can auto-detect and sandbox.
 pub struct AgentDef {
+    /// Short, stable identifier for `redan run <slug>` (e.g. "claude").
+    pub slug: &'static str,
     pub name: &'static str,
     pub image: &'static str,
     pub command: &'static str,
@@ -173,22 +177,52 @@ pub fn detect() -> Option<AutoDetected> {
 /// Detect all agents whose auth requirements are satisfied.
 /// Returns them in registry order (highest priority first).
 pub fn detect_all() -> Vec<DetectedAgent> {
-    let home = std::env::var("HOME").ok();
     AGENTS
         .iter()
-        .filter_map(|agent| {
-            let api_key_val = agent
-                .api_key
-                .as_ref()
-                .and_then(|a| std::env::var(a.env_var).ok());
-            let oauth_creds = home.as_ref().and_then(|h| {
-                let sc = agent.stored_credentials.as_ref()?;
-                let path = Path::new(h).join(sc.home_dir).join(sc.credentials_file);
-                path.exists().then_some(path)
-            });
-            probe_with_env(agent, api_key_val.as_deref(), oauth_creds.as_deref(), None)
-        })
+        .filter_map(|&agent| detect_one(agent))
         .collect()
+}
+
+/// Look up an agent by its `redan run` slug (e.g. "claude", "pi").
+pub fn agent_by_slug(slug: &str) -> Option<&'static AgentDef> {
+    AGENTS.iter().find(|a| a.slug == slug).copied()
+}
+
+/// All known agent slugs, in registry order.
+pub fn agent_slugs() -> Vec<&'static str> {
+    AGENTS.iter().map(|a| a.slug).collect()
+}
+
+/// Why [`resolve_by_slug`] could not produce a Config.
+pub enum ResolveError {
+    /// No agent registered under that slug.
+    Unknown,
+    /// The agent exists but its auth requirements aren't met.
+    NoAuth(&'static AgentDef),
+}
+
+/// Resolve a single named agent, probing its auth against the environment.
+/// This is the `redan run <slug>` entry point: unlike [`detect`], the agent
+/// is chosen explicitly rather than by registry priority.
+pub fn resolve_by_slug(slug: &str) -> Result<AutoDetected, ResolveError> {
+    let agent = agent_by_slug(slug).ok_or(ResolveError::Unknown)?;
+    let detected = detect_one(agent).ok_or(ResolveError::NoAuth(agent))?;
+    Ok(build_config(&detected))
+}
+
+/// Probe a single agent's auth requirements against the current environment.
+fn detect_one(agent: &'static AgentDef) -> Option<DetectedAgent> {
+    let home = std::env::var("HOME").ok();
+    let api_key_val = agent
+        .api_key
+        .as_ref()
+        .and_then(|a| std::env::var(a.env_var).ok());
+    let oauth_creds = home.as_ref().and_then(|h| {
+        let sc = agent.stored_credentials.as_ref()?;
+        let path = Path::new(h).join(sc.home_dir).join(sc.credentials_file);
+        path.exists().then_some(path)
+    });
+    probe_with_env(agent, api_key_val.as_deref(), oauth_creds.as_deref(), None)
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +679,32 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn agent_by_slug_resolves_known() {
+        assert_eq!(agent_by_slug("claude").map(|a| a.name), Some("Claude Code"));
+        assert_eq!(agent_by_slug("pi").map(|a| a.name), Some("Pi"));
+    }
+
+    #[test]
+    fn agent_by_slug_unknown_is_none() {
+        assert!(agent_by_slug("nope").is_none());
+    }
+
+    #[test]
+    fn agent_slugs_lists_registry() {
+        let slugs = agent_slugs();
+        assert!(slugs.contains(&"claude"));
+        assert!(slugs.contains(&"pi"));
+    }
+
+    #[test]
+    fn resolve_unknown_slug_errors() {
+        assert!(matches!(
+            resolve_by_slug("nope"),
+            Err(ResolveError::Unknown)
+        ));
     }
 
     fn empty_flags() -> ExecFlags<'static> {

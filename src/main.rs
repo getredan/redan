@@ -175,6 +175,65 @@ enum Cli {
         name: Option<String>,
     },
 
+    /// Launch a coding agent in a sandbox (claude, pi). Zero-config.
+    ///
+    /// `redan run` picks the agent's image, command, auth, and network
+    /// policy for you. Omit the agent name to auto-detect. For full manual
+    /// control over image and command, use `redan exec` instead.
+    Run {
+        /// Agent to launch (e.g. `claude`, `pi`). Omit to auto-detect.
+        agent: Option<String>,
+
+        /// Allow outbound HTTPS to a host (in addition to the agent's own).
+        /// Use '*' to allow all outbound connections.
+        #[arg(long = "allow-host", value_name = "HOST")]
+        allow_hosts: Vec<String>,
+
+        /// Launch headless Chrome on the host with CDP access from the guest.
+        #[arg(long)]
+        browser: bool,
+
+        /// Mount a host directory into the guest via virtio-fs.
+        #[arg(long = "mount", short = 'm', value_name = "HOST:GUEST")]
+        mounts: Vec<String>,
+
+        /// Forward a guest TCP port to host localhost (PORT or GUEST:HOST).
+        #[arg(long = "forward", value_name = "SPEC")]
+        forwards: Vec<String>,
+
+        /// Inject a secret: `ENV_VAR=real_value:host1,host2`
+        #[arg(long = "secret", short = 's', value_name = "SPEC")]
+        secrets: Vec<String>,
+
+        /// Read secret specs from a file (one per line).
+        #[arg(long, value_name = "PATH")]
+        secret_file: Option<String>,
+
+        /// Write structured audit events to a JSON-lines file.
+        #[arg(long, value_name = "PATH")]
+        audit_log: Option<String>,
+
+        /// Proxy timeout in seconds (0 = wait for VM exit).
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// Discover mode: allow all connections, print observed hosts at exit.
+        #[arg(long)]
+        discover: bool,
+
+        /// Run session in the background. Use `redan attach` to reconnect.
+        #[arg(long, short = 'd')]
+        detach: bool,
+
+        /// Name this session for easy reference.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Extra arguments appended to the agent command (after `--`).
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+
     /// Attach to a running session
     Attach {
         /// Session ID or name (default: most recent running session)
@@ -328,6 +387,37 @@ fn main() {
                 name,
                 run_as: None,
                 browser,
+            });
+        }
+        Cli::Run {
+            agent,
+            allow_hosts,
+            browser,
+            mounts,
+            forwards,
+            secrets,
+            secret_file,
+            audit_log,
+            timeout,
+            discover,
+            detach,
+            name,
+            extra,
+        } => {
+            run_command(RunArgs {
+                agent,
+                allow_hosts,
+                browser,
+                mounts,
+                forwards,
+                secrets,
+                secret_file,
+                audit_log,
+                timeout,
+                discover,
+                detach,
+                name,
+                extra,
             });
         }
         Cli::Attach { session } => attach_session(session.as_deref()),
@@ -536,17 +626,7 @@ fn exec_command(args: ExecArgs) {
     } else if !explicit {
         // No config, no explicit flags: try auto-detect
         if let Some(auto) = redan::auto_detect::detect() {
-            if auto.needs_image_build {
-                let image_name = auto.config.image.as_deref().unwrap_or("unknown");
-                eprintln!("Building {image_name} image (this may take a minute)...");
-                match build_bundled_image(image_name) {
-                    Ok(_) => eprintln!("Image {image_name} built successfully."),
-                    Err(e) => {
-                        eprintln!("error: failed to build {image_name} image: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
+            build_image_if_needed(&auto);
             for msg in &auto.messages {
                 eprintln!("  {msg}");
             }
@@ -571,7 +651,36 @@ fn exec_command(args: ExecArgs) {
     } else {
         (config::Config::default(), None, Vec::new())
     };
-    let run_as = args.run_as.or(run_as);
+
+    launch(&cfg, run_as, &stage_files, args);
+}
+
+/// Build an agent's image if auto-detect flagged it missing.
+fn build_image_if_needed(auto: &redan::auto_detect::AutoDetected) {
+    if !auto.needs_image_build {
+        return;
+    }
+    let image_name = auto.config.image.as_deref().unwrap_or("unknown");
+    eprintln!("Building {image_name} image (this may take a minute)...");
+    match build_bundled_image(image_name) {
+        Ok(_) => eprintln!("Image {image_name} built successfully."),
+        Err(e) => {
+            eprintln!("error: failed to build {image_name} image: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Resolve final config from a base Config plus CLI overrides, then boot.
+/// Shared by `redan exec` (base from config/flags/auto-detect) and
+/// `redan run` (base from a named agent profile).
+fn launch(
+    cfg: &config::Config,
+    detected_run_as: Option<String>,
+    stage_files: &[(std::path::PathBuf, String, String)],
+    args: ExecArgs,
+) {
+    let run_as = args.run_as.or(detected_run_as);
 
     let mut all_secrets =
         cmd::exec::collect_secret_specs(&args.secrets, args.secret_file.as_deref());
@@ -640,7 +749,7 @@ fn exec_command(args: ExecArgs) {
     // Stage credentials into the rootfs before boot (like CA cert install).
     // Runs on the host, no mount or runtime copy needed.
     let chown_dir: Option<String> = stage_files.first().map(|(_, d, _)| d.clone());
-    for (host_path, guest_dir, filename) in &stage_files {
+    for (host_path, guest_dir, filename) in stage_files {
         let target_dir = std::path::Path::new(&rootfs_path)
             .join(guest_dir.strip_prefix('/').unwrap_or(guest_dir));
         if let Err(e) = std::fs::create_dir_all(&target_dir) {
@@ -714,6 +823,133 @@ fn exec_command(args: ExecArgs) {
         });
         std::process::exit(guest_code);
     }
+}
+
+struct RunArgs {
+    agent: Option<String>,
+    allow_hosts: Vec<String>,
+    browser: bool,
+    mounts: Vec<String>,
+    forwards: Vec<String>,
+    secrets: Vec<String>,
+    secret_file: Option<String>,
+    audit_log: Option<String>,
+    timeout: Option<u64>,
+    discover: bool,
+    detach: bool,
+    name: Option<String>,
+    extra: Vec<String>,
+}
+
+/// Resolve which agent `redan run` should launch. Exits with a helpful
+/// message if the slug is unknown, the agent lacks credentials, or no
+/// agent could be auto-detected.
+fn resolve_run_target(agent: Option<&str>) -> redan::auto_detect::AutoDetected {
+    use redan::auto_detect::{self, ResolveError};
+
+    let Some(slug) = agent else {
+        let Some(auto) = auto_detect::detect() else {
+            eprintln!(
+                "no agent detected. Known agents: {}",
+                auto_detect::agent_slugs().join(", ")
+            );
+            eprintln!();
+            eprintln!("  Authenticate one, then `redan run <agent>`:");
+            eprintln!("    export ANTHROPIC_API_KEY=sk-ant-...   (API key)");
+            eprintln!("    claude login                          (Claude Pro/Max/Team)");
+            std::process::exit(1);
+        };
+        return auto;
+    };
+
+    match auto_detect::resolve_by_slug(slug) {
+        Ok(auto) => auto,
+        Err(ResolveError::Unknown) => {
+            eprintln!(
+                "unknown agent '{slug}'. Available: {}",
+                auto_detect::agent_slugs().join(", ")
+            );
+            eprintln!("  Or run `redan run` with no agent to auto-detect.");
+            std::process::exit(1);
+        }
+        Err(ResolveError::NoAuth(found)) => {
+            eprintln!(
+                "{} found, but no credentials in this environment.",
+                found.name
+            );
+            print_agent_auth_hint(found);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `redan run <agent>`: launch a named agent profile (or auto-detect when
+/// no agent is given), then funnel into the shared `launch` path.
+fn run_command(args: RunArgs) {
+    let auto = resolve_run_target(args.agent.as_deref());
+
+    build_image_if_needed(&auto);
+    for msg in &auto.messages {
+        eprintln!("  {msg}");
+    }
+
+    let run_as = auto.run_as.map(Into::into);
+
+    // Append any post-`--` args to the agent command (e.g. an initial prompt).
+    let command = if args.extra.is_empty() {
+        None
+    } else {
+        let base = auto.config.command.clone().unwrap_or_default();
+        let extra = args
+            .extra
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!("{base} {extra}").trim().to_string())
+    };
+
+    launch(
+        &auto.config,
+        run_as,
+        &auto.stage_files,
+        ExecArgs {
+            image_name: None, // the agent's Config carries the image
+            rootfs: None,
+            command,
+            interactive: false, // the agent's Config carries interactive
+            timeout: args.timeout,
+            secrets: args.secrets,
+            secret_file: args.secret_file,
+            allow_hosts: args.allow_hosts,
+            mounts: args.mounts,
+            audit_log: args.audit_log,
+            forwards: args.forwards,
+            discover: args.discover,
+            detach: args.detach,
+            name: args.name,
+            run_as: None, // the agent's run_as flows via detected_run_as
+            browser: args.browser,
+        },
+    );
+}
+
+/// Print how to authenticate an agent whose creds weren't found.
+fn print_agent_auth_hint(agent: &redan::auto_detect::AgentDef) {
+    if let Some(api) = agent.api_key.as_ref() {
+        eprintln!("  export {}=...   (API key)", api.env_var);
+    }
+    if let Some(sc) = agent.stored_credentials.as_ref() {
+        eprintln!(
+            "  or authenticate so ~/{}/{} exists",
+            sc.home_dir, sc.credentials_file
+        );
+    }
+}
+
+/// Single-quote a shell argument so it survives `/bin/sh -c`.
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 /// Serializable exec config for passing to the daemon process.
@@ -1245,4 +1481,28 @@ fn build_bundled_image(name: &str) -> std::io::Result<std::path::PathBuf> {
     let result = image::import_dockerfile(name, df_path.to_str().unwrap_or(""));
     let _ = std::fs::remove_dir_all(&tmp);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn shell_quote_wraps_plain_arg() {
+        assert_eq!(shell_quote("fix the bug"), "'fix the bug'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quote() {
+        // don't -> 'don'\''t' (close, escaped quote, reopen)
+        assert_eq!(shell_quote("don't"), "'don'\\''t'");
+    }
+
+    #[test]
+    fn shell_quote_neutralizes_shell_metacharacters() {
+        // Passthrough args must not break out of the agent command.
+        assert_eq!(shell_quote("; rm -rf /"), "'; rm -rf /'");
+        assert_eq!(shell_quote("$(whoami)"), "'$(whoami)'");
+        assert_eq!(shell_quote("a && b"), "'a && b'");
+    }
 }
