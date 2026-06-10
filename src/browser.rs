@@ -13,7 +13,6 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -22,28 +21,6 @@ use crate::proxy::host_matches;
 use crate::tls::is_private_ip;
 
 pub const CDP_PORT: u16 = 9222;
-
-/// Chrome PID for the atexit handler. `krun_start_enter` calls `exit()`,
-/// bypassing Rust Drop impls. Without this, Chrome is orphaned.
-static BROWSER_PID: Mutex<Option<u32>> = Mutex::new(None);
-
-extern "C" fn cleanup_browser_atexit() {
-    if let Ok(mut guard) = BROWSER_PID.lock()
-        && let Some(pid) = guard.take()
-    {
-        // Negative PID = kill the entire process group (Chrome tree).
-        let pgid = -(pid.cast_signed());
-        unsafe {
-            libc::kill(pgid, libc::SIGTERM);
-            let mut status: i32 = 0;
-            libc::usleep(500_000);
-            if libc::waitpid(pid.cast_signed(), &raw mut status, libc::WNOHANG) == 0 {
-                libc::kill(pgid, libc::SIGKILL);
-                libc::waitpid(pid.cast_signed(), &raw mut status, 0);
-            }
-        }
-    }
-}
 
 const CHROME_CANDIDATES: &[&str] = &[
     "chromium",
@@ -156,15 +133,7 @@ impl Browser {
             return Err(msg);
         }
 
-        let pid = child.id();
-        log::info!("Chrome launched (pid {pid}, proxy :{proxy_port})");
-
-        if let Ok(mut guard) = BROWSER_PID.lock() {
-            if guard.is_none() {
-                unsafe { libc::atexit(cleanup_browser_atexit) };
-            }
-            *guard = Some(pid);
-        }
+        log::info!("Chrome launched (pid {}, proxy :{proxy_port})", child.id());
 
         Ok(Self {
             child,
@@ -182,11 +151,6 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        // Clear atexit PID so cleanup_browser_atexit doesn't double-kill.
-        if let Ok(mut guard) = BROWSER_PID.lock() {
-            *guard = None;
-        }
-
         self.proxy_shutdown.store(true, Ordering::Relaxed);
 
         // Kill the entire process group (Chrome tree: zygotes, GPU, renderers).
@@ -242,10 +206,14 @@ fn spawn_chrome(
 
     // Own process group so kill(-pgid) reaches the entire Chrome tree
     // (zygotes, GPU process, renderers, network service, etc).
+    // PDEATHSIG is kernel-enforced cleanup for paths no userspace
+    // handler covers (redan SIGKILLed): Chrome gets SIGTERM and shuts
+    // its tree down itself.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
             libc::setpgid(0, 0);
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
             Ok(())
         });
     }
