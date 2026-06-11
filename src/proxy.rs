@@ -315,7 +315,14 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
             log::info!("proxy timeout ({timeout:?}). Use --timeout 0 for no limit.");
             break;
         }
-        if device.peer_closed && connections.is_empty() {
+        // The guest VM is gone once its virtio-net socket closes. It dies
+        // abruptly (libkrun _exit on guest shutdown), so its open TCP
+        // connections never send FIN and their smoltcp sockets would sit
+        // in Established forever -- waiting for `connections` to drain
+        // would hang until the proxy timeout. There's no live peer left to
+        // serve, so break now; dropping the connections on return signals
+        // the relay threads to stop.
+        if device.peer_closed {
             log::info!("guest exited (socket closed)");
             break;
         }
