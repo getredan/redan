@@ -18,9 +18,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - && \
     apt-get install -y -qq --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Pi coding agent, plus a CDP client so `--browser` tasks can drive Chrome
-# without hand-rolling a WebSocket client.
-RUN npm install -g @earendil-works/pi-coding-agent chrome-remote-interface
+# Pi coding agent, plus WebSocket/CDP clients so `--browser` tasks can
+# drive Chrome without reinventing a WebSocket from raw sockets. `ws` is
+# what agents reach for by default; chrome-remote-interface is the
+# higher-level CDP client. NODE_PATH (set by redan) makes them require-able.
+RUN npm install -g @earendil-works/pi-coding-agent ws chrome-remote-interface
 
 # Non-root user (ubuntu:24.04 ships with ubuntu:1000, remove it first)
 RUN userdel -r ubuntu 2>/dev/null; \

@@ -37,7 +37,10 @@ static CLAUDE_CODE: AgentDef = AgentDef {
     interactive: true,
     timeout_secs: 3600,
     run_as: Some("dev"),
-    guest_env: &[("HOME", "/home/dev")],
+    guest_env: &[
+        ("HOME", "/home/dev"),
+        ("NODE_PATH", "/usr/lib/node_modules"),
+    ],
     // ANTHROPIC_API_KEY first to match Claude Code's own auth precedence
     // (API key over OAuth token). CLAUDE_CODE_OAUTH_TOKEN is the reliable
     // subscription path for sandboxes: a 1-year token from `claude
@@ -73,7 +76,10 @@ static PI: AgentDef = AgentDef {
     interactive: true,
     timeout_secs: 3600,
     run_as: Some("dev"),
-    guest_env: &[("HOME", "/home/dev")],
+    guest_env: &[
+        ("HOME", "/home/dev"),
+        ("NODE_PATH", "/usr/lib/node_modules"),
+    ],
     auth: &[
         AuthMethod::EnvSecret {
             env_var: "ANTHROPIC_API_KEY",
