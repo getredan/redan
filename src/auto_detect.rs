@@ -38,11 +38,22 @@ static CLAUDE_CODE: AgentDef = AgentDef {
     timeout_secs: 3600,
     run_as: Some("dev"),
     guest_env: &[("HOME", "/home/dev")],
-    api_key: Some(ApiKeyDef {
-        env_var: "ANTHROPIC_API_KEY",
-        inject_hosts: &["api.anthropic.com"],
-        guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
-    }),
+    // ANTHROPIC_API_KEY first to match Claude Code's own auth precedence
+    // (API key over OAuth token). CLAUDE_CODE_OAUTH_TOKEN is the reliable
+    // subscription path for sandboxes: a 1-year token from `claude
+    // setup-token`. Both beat staging .credentials.json, which goes stale.
+    env_auth: &[
+        EnvAuthDef {
+            env_var: "ANTHROPIC_API_KEY",
+            inject_hosts: &["api.anthropic.com"],
+            guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
+        },
+        EnvAuthDef {
+            env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+            inject_hosts: &["api.anthropic.com"],
+            guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
+        },
+    ],
     stored_credentials: Some(StoredCredentialsDef {
         home_dir: ".claude",
         credentials_file: ".credentials.json",
@@ -63,11 +74,11 @@ static PI: AgentDef = AgentDef {
     timeout_secs: 3600,
     run_as: Some("dev"),
     guest_env: &[("HOME", "/home/dev")],
-    api_key: Some(ApiKeyDef {
+    env_auth: &[EnvAuthDef {
         env_var: "ANTHROPIC_API_KEY",
         inject_hosts: &["api.anthropic.com"],
         guest_env: &[],
-    }),
+    }],
     stored_credentials: Some(StoredCredentialsDef {
         home_dir: ".pi/agent",
         credentials_file: "auth.json",
@@ -98,14 +109,17 @@ pub struct AgentDef {
     pub run_as: Option<&'static str>,
     /// Extra guest env vars (set regardless of auth method).
     pub guest_env: &'static [(&'static str, &'static str)],
-    /// API-key-based auth (tried first).
-    pub api_key: Option<ApiKeyDef>,
-    /// Stored credentials auth (fallback when no API key).
+    /// Env-var auth methods, tried in order (first one set wins).
+    /// Tried before stored-credential staging.
+    pub env_auth: &'static [EnvAuthDef],
+    /// Stored credentials auth (fallback when no env-var auth is set).
     pub stored_credentials: Option<StoredCredentialsDef>,
 }
 
-/// Auth via an environment variable injected as a redan secret.
-pub struct ApiKeyDef {
+/// Auth via a host environment variable injected as a redan secret.
+/// Covers both API keys (`ANTHROPIC_API_KEY`) and long-lived OAuth tokens
+/// (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`).
+pub struct EnvAuthDef {
     /// Host env var to read (e.g., `ANTHROPIC_API_KEY`).
     pub env_var: &'static str,
     /// Hosts the secret is injected into.
@@ -161,8 +175,11 @@ pub struct DetectedAgent {
 
 /// The auth method that was actually found in the environment.
 pub enum ResolvedAuth {
-    ApiKey,
-    StoredCredentials { host_config_dir: PathBuf },
+    /// A host env var (API key or OAuth token) is set and will be injected.
+    EnvVar(&'static EnvAuthDef),
+    StoredCredentials {
+        host_config_dir: PathBuf,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -213,16 +230,25 @@ pub fn resolve_by_slug(slug: &str) -> Result<AutoDetected, ResolveError> {
 /// Probe a single agent's auth requirements against the current environment.
 fn detect_one(agent: &'static AgentDef) -> Option<DetectedAgent> {
     let home = std::env::var("HOME").ok();
-    let api_key_val = agent
-        .api_key
-        .as_ref()
-        .and_then(|a| std::env::var(a.env_var).ok());
+    let env_match = match_env_auth(agent, |var| std::env::var(var).ok());
     let oauth_creds = home.as_ref().and_then(|h| {
         let sc = agent.stored_credentials.as_ref()?;
         let path = Path::new(h).join(sc.home_dir).join(sc.credentials_file);
         path.exists().then_some(path)
     });
-    probe_with_env(agent, api_key_val.as_deref(), oauth_creds.as_deref(), None)
+    probe_with_env(agent, env_match, oauth_creds.as_deref(), None)
+}
+
+/// The first of the agent's env-var auth methods whose variable is set to a
+/// non-empty value. `lookup` reads an env var (injected in tests).
+fn match_env_auth(
+    agent: &'static AgentDef,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<&'static EnvAuthDef> {
+    agent
+        .env_auth
+        .iter()
+        .find(|e| lookup(e.env_var).is_some_and(|v| !v.trim().is_empty()))
 }
 
 // ---------------------------------------------------------------------------
@@ -257,22 +283,20 @@ pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Check whether an agent's auth requirements are met.
-/// API key is tried first; OAuth is the fallback.
+/// Env-var auth (`env_match`) is tried first; stored credentials are the
+/// fallback.
 fn probe_with_env(
     agent: &'static AgentDef,
-    api_key_value: Option<&str>,
+    env_match: Option<&'static EnvAuthDef>,
     oauth_credentials: Option<&Path>,
     has_image: Option<bool>,
 ) -> Option<DetectedAgent> {
     let image_exists = has_image.unwrap_or_else(|| image_exists(agent.image));
 
-    if agent.api_key.is_some()
-        && let Some(key) = api_key_value
-        && !key.trim().is_empty()
-    {
+    if let Some(def) = env_match {
         return Some(DetectedAgent {
             agent,
-            auth: ResolvedAuth::ApiKey,
+            auth: ResolvedAuth::EnvVar(def),
             image_exists,
         });
     }
@@ -302,23 +326,21 @@ fn apply_auth(
     allow: &mut Vec<String>,
 ) {
     match auth {
-        ResolvedAuth::ApiKey => {
-            if let Some(api) = agent.api_key.as_ref() {
-                messages.push(format!(
-                    "Injecting {} for {}",
-                    api.env_var,
-                    api.inject_hosts.join(", ")
-                ));
-                config.secrets.insert(
-                    api.env_var.into(),
-                    SecretConfig {
-                        value: format!("env://{}", api.env_var),
-                        hosts: api.inject_hosts.iter().map(|&h| h.into()).collect(),
-                    },
-                );
-                for &(key, val) in api.guest_env {
-                    config.env.insert(key.into(), val.into());
-                }
+        ResolvedAuth::EnvVar(def) => {
+            messages.push(format!(
+                "Injecting {} for {}",
+                def.env_var,
+                def.inject_hosts.join(", ")
+            ));
+            config.secrets.insert(
+                def.env_var.into(),
+                SecretConfig {
+                    value: format!("env://{}", def.env_var),
+                    hosts: def.inject_hosts.iter().map(|&h| h.into()).collect(),
+                },
+            );
+            for &(key, val) in def.guest_env {
+                config.env.insert(key.into(), val.into());
             }
         }
         ResolvedAuth::StoredCredentials { host_config_dir } => {
@@ -485,11 +507,17 @@ fn host_from_remote_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// One of an agent's env-var auth defs, by variable name (test helper).
+    fn env_def(agent: &'static AgentDef, var: &str) -> Option<&'static EnvAuthDef> {
+        agent.env_auth.iter().find(|e| e.env_var == var)
+    }
+
     #[test]
     fn detect_api_key_produces_correct_config() {
-        let detected = probe_with_env(&CLAUDE_CODE, Some("sk-ant-test123"), None, Some(true))
-            .expect("should detect via API key");
-        assert!(matches!(detected.auth, ResolvedAuth::ApiKey));
+        let api = env_def(&CLAUDE_CODE, "ANTHROPIC_API_KEY");
+        let detected =
+            probe_with_env(&CLAUDE_CODE, api, None, Some(true)).expect("should detect via API key");
+        assert!(matches!(detected.auth, ResolvedAuth::EnvVar(_)));
 
         let auto = build_config(&detected);
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
@@ -583,9 +611,10 @@ mod tests {
         let creds = tmp.join(".credentials.json");
         std::fs::write(&creds, "{}").unwrap();
 
-        let detected = probe_with_env(&CLAUDE_CODE, Some("sk-ant-test"), Some(&creds), Some(true))
-            .expect("should detect");
-        assert!(matches!(detected.auth, ResolvedAuth::ApiKey));
+        let api = env_def(&CLAUDE_CODE, "ANTHROPIC_API_KEY");
+        let detected =
+            probe_with_env(&CLAUDE_CODE, api, Some(&creds), Some(true)).expect("should detect");
+        assert!(matches!(detected.auth, ResolvedAuth::EnvVar(_)));
 
         let auto = build_config(&detected);
         assert!(auto.config.secrets.contains_key("ANTHROPIC_API_KEY"));
@@ -600,13 +629,52 @@ mod tests {
     }
 
     #[test]
+    fn match_env_auth_prefers_api_key_over_oauth_token() {
+        // Both set -> API key wins (matches Claude Code's own precedence).
+        let m = match_env_auth(&CLAUDE_CODE, |_| Some("value".into()));
+        assert_eq!(m.map(|e| e.env_var), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn match_env_auth_falls_to_oauth_token_when_only_it_is_set() {
+        let m = match_env_auth(&CLAUDE_CODE, |var| {
+            (var == "CLAUDE_CODE_OAUTH_TOKEN").then(|| "tok".into())
+        });
+        assert_eq!(m.map(|e| e.env_var), Some("CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    #[test]
+    fn match_env_auth_ignores_empty_values() {
+        let m = match_env_auth(&CLAUDE_CODE, |var| {
+            (var == "ANTHROPIC_API_KEY").then(|| "  ".into())
+        });
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn oauth_token_injects_as_secret() {
+        let oauth = env_def(&CLAUDE_CODE, "CLAUDE_CODE_OAUTH_TOKEN");
+        let detected = probe_with_env(&CLAUDE_CODE, oauth, None, Some(true))
+            .expect("should detect via OAuth token");
+        let auto = build_config(&detected);
+        let secret = auto.config.secrets.get("CLAUDE_CODE_OAUTH_TOKEN").unwrap();
+        assert_eq!(secret.value, "env://CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(secret.hosts, vec!["api.anthropic.com"]);
+        // No credentials file staged when an env token is present.
+        assert!(auto.stage_files.is_empty());
+    }
+
+    #[test]
     fn empty_api_key_falls_through_to_oauth() {
         let tmp = std::env::temp_dir().join("redan-test-empty-key");
         let _ = std::fs::create_dir_all(&tmp);
         let creds = tmp.join(".credentials.json");
         std::fs::write(&creds, "{}").unwrap();
 
-        let detected = probe_with_env(&CLAUDE_CODE, Some(""), Some(&creds), Some(true))
+        // Empty env vars don't match; fall back to staged credentials.
+        let env_match = match_env_auth(&CLAUDE_CODE, |_| Some(String::new()));
+        assert!(env_match.is_none());
+        let detected = probe_with_env(&CLAUDE_CODE, env_match, Some(&creds), Some(true))
             .expect("should fall through to OAuth");
         assert!(matches!(
             detected.auth,
@@ -618,13 +686,14 @@ mod tests {
 
     #[test]
     fn empty_api_key_no_oauth_returns_none() {
-        assert!(probe_with_env(&CLAUDE_CODE, Some("  "), None, Some(true)).is_none());
+        let env_match = match_env_auth(&CLAUDE_CODE, |_| Some("  ".into()));
+        assert!(probe_with_env(&CLAUDE_CODE, env_match, None, Some(true)).is_none());
     }
 
     #[test]
     fn needs_image_build_when_image_missing() {
-        let detected = probe_with_env(&CLAUDE_CODE, Some("sk-ant-test"), None, Some(false))
-            .expect("should detect");
+        let api = env_def(&CLAUDE_CODE, "ANTHROPIC_API_KEY");
+        let detected = probe_with_env(&CLAUDE_CODE, api, None, Some(false)).expect("should detect");
         let auto = build_config(&detected);
         assert!(auto.needs_image_build);
         assert!(auto.messages.iter().any(|m| m.contains("will build")));
@@ -632,9 +701,10 @@ mod tests {
 
     #[test]
     fn pi_api_key_produces_correct_config() {
-        let detected = probe_with_env(&PI, Some("sk-ant-test123"), None, Some(true))
-            .expect("should detect Pi via API key");
-        assert!(matches!(detected.auth, ResolvedAuth::ApiKey));
+        let api = env_def(&PI, "ANTHROPIC_API_KEY");
+        let detected =
+            probe_with_env(&PI, api, None, Some(true)).expect("should detect Pi via API key");
+        assert!(matches!(detected.auth, ResolvedAuth::EnvVar(_)));
 
         let auto = build_config(&detected);
         assert_eq!(auto.config.image.as_deref(), Some("pi"));
