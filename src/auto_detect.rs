@@ -42,26 +42,26 @@ static CLAUDE_CODE: AgentDef = AgentDef {
     // (API key over OAuth token). CLAUDE_CODE_OAUTH_TOKEN is the reliable
     // subscription path for sandboxes: a 1-year token from `claude
     // setup-token`. Both beat staging .credentials.json, which goes stale.
-    env_auth: &[
-        EnvAuthDef {
+    auth: &[
+        AuthMethod::EnvSecret {
             env_var: "ANTHROPIC_API_KEY",
-            inject_hosts: &["api.anthropic.com"],
+            hosts: &["api.anthropic.com"],
             guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
         },
-        EnvAuthDef {
+        AuthMethod::EnvSecret {
             env_var: "CLAUDE_CODE_OAUTH_TOKEN",
-            inject_hosts: &["api.anthropic.com"],
+            hosts: &["api.anthropic.com"],
             guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
+        },
+        AuthMethod::StagedFiles {
+            dir: ".claude",
+            probe: ".credentials.json",
+            files: &[".credentials.json"],
+            guest_dir: "/tmp/.claude",
+            hosts: &["auth.anthropic.com", "console.anthropic.com"],
+            guest_env: &[("CLAUDE_CONFIG_DIR", "/tmp/.claude")],
         },
     ],
-    stored_credentials: Some(StoredCredentialsDef {
-        home_dir: ".claude",
-        credentials_file: ".credentials.json",
-        stage_files: &[".credentials.json"],
-        guest_dir: "/tmp/.claude",
-        guest_env: &[("CLAUDE_CONFIG_DIR", "/tmp/.claude")],
-        extra_hosts: &["auth.anthropic.com", "console.anthropic.com"],
-    }),
 };
 
 static PI: AgentDef = AgentDef {
@@ -74,19 +74,21 @@ static PI: AgentDef = AgentDef {
     timeout_secs: 3600,
     run_as: Some("dev"),
     guest_env: &[("HOME", "/home/dev")],
-    env_auth: &[EnvAuthDef {
-        env_var: "ANTHROPIC_API_KEY",
-        inject_hosts: &["api.anthropic.com"],
-        guest_env: &[],
-    }],
-    stored_credentials: Some(StoredCredentialsDef {
-        home_dir: ".pi/agent",
-        credentials_file: "auth.json",
-        stage_files: &["auth.json", "settings.json", "models.json"],
-        guest_dir: "/home/dev/.pi/agent",
-        guest_env: &[],
-        extra_hosts: &[],
-    }),
+    auth: &[
+        AuthMethod::EnvSecret {
+            env_var: "ANTHROPIC_API_KEY",
+            hosts: &["api.anthropic.com"],
+            guest_env: &[],
+        },
+        AuthMethod::StagedFiles {
+            dir: ".pi/agent",
+            probe: "auth.json",
+            files: &["auth.json", "settings.json", "models.json"],
+            guest_dir: "/home/dev/.pi/agent",
+            hosts: &[],
+            guest_env: &[],
+        },
+    ],
 };
 
 // ---------------------------------------------------------------------------
@@ -109,43 +111,43 @@ pub struct AgentDef {
     pub run_as: Option<&'static str>,
     /// Extra guest env vars (set regardless of auth method).
     pub guest_env: &'static [(&'static str, &'static str)],
-    /// Env-var auth methods, tried in order (first one set wins).
-    /// Tried before stored-credential staging.
-    pub env_auth: &'static [EnvAuthDef],
-    /// Stored credentials auth (fallback when no env-var auth is set).
-    pub stored_credentials: Option<StoredCredentialsDef>,
+    /// Credential supply methods, in priority order. The first method
+    /// whose source is present (env var set, probe file exists) is used.
+    pub auth: &'static [AuthMethod],
 }
 
-/// Auth via a host environment variable injected as a redan secret.
-/// Covers both API keys (`ANTHROPIC_API_KEY`) and long-lived OAuth tokens
-/// (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`).
-pub struct EnvAuthDef {
-    /// Host env var to read (e.g., `ANTHROPIC_API_KEY`).
-    pub env_var: &'static str,
-    /// Hosts the secret is injected into.
-    pub inject_hosts: &'static [&'static str],
-    /// Guest env vars to set when using this auth path.
-    pub guest_env: &'static [(&'static str, &'static str)],
-}
-
-/// Auth via credentials stored in a config directory on the host.
-///
-/// Files are staged into the guest rootfs before boot (same pattern
-/// as CA cert installation), so no mount or runtime copy is needed.
-pub struct StoredCredentialsDef {
-    /// Config directory relative to `$HOME` (e.g., `.claude`).
-    pub home_dir: &'static str,
-    /// File that signals credentials exist (e.g., `.credentials.json`).
-    pub credentials_file: &'static str,
-    /// Files to stage from `home_dir` into the guest.
-    /// If empty, only `credentials_file` is staged.
-    pub stage_files: &'static [&'static str],
-    /// Guest directory to stage files into.
-    pub guest_dir: &'static str,
-    /// Guest env vars to set when using this auth path.
-    pub guest_env: &'static [(&'static str, &'static str)],
-    /// Extra network hosts for token exchange.
-    pub extra_hosts: &'static [&'static str],
+/// One way to supply an agent's credential.
+pub enum AuthMethod {
+    /// A host env var injected as a redan secret. The real value never
+    /// enters the guest: a placeholder is set inside, the proxy swaps in
+    /// the real value for requests to `hosts` and scrubs it from
+    /// responses. Present when the env var is set to a non-empty value.
+    /// Covers API keys (`ANTHROPIC_API_KEY`) and long-lived OAuth tokens
+    /// (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`).
+    EnvSecret {
+        env_var: &'static str,
+        /// Hosts the secret is injected into (and allowed).
+        hosts: &'static [&'static str],
+        /// Guest env vars to set when this method is used.
+        guest_env: &'static [(&'static str, &'static str)],
+    },
+    /// Credential files staged from `$HOME/dir` into the guest rootfs
+    /// (same pattern as CA cert install). The real files enter the guest
+    /// as plaintext. Present when `probe` exists under `$HOME/dir`.
+    StagedFiles {
+        /// Config dir relative to `$HOME` (e.g. `.claude`).
+        dir: &'static str,
+        /// File whose existence signals this method applies.
+        probe: &'static str,
+        /// Files to stage from `dir`. Empty stages just `probe`.
+        files: &'static [&'static str],
+        /// Guest directory to stage files into.
+        guest_dir: &'static str,
+        /// Extra hosts to allow (e.g. token-exchange endpoints).
+        hosts: &'static [&'static str],
+        /// Guest env vars to set when this method is used.
+        guest_env: &'static [(&'static str, &'static str)],
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -173,13 +175,11 @@ pub struct DetectedAgent {
     pub image_exists: bool,
 }
 
-/// The auth method that was actually found in the environment.
-pub enum ResolvedAuth {
-    /// A host env var (API key or OAuth token) is set and will be injected.
-    EnvVar(&'static EnvAuthDef),
-    StoredCredentials {
-        host_config_dir: PathBuf,
-    },
+/// The auth method that resolved against the environment.
+pub struct ResolvedAuth {
+    pub method: &'static AuthMethod,
+    /// For `StagedFiles`, the host dir the probe was found in.
+    pub host_dir: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -230,25 +230,44 @@ pub fn resolve_by_slug(slug: &str) -> Result<AutoDetected, ResolveError> {
 /// Probe a single agent's auth requirements against the current environment.
 fn detect_one(agent: &'static AgentDef) -> Option<DetectedAgent> {
     let home = std::env::var("HOME").ok();
-    let env_match = match_env_auth(agent, |var| std::env::var(var).ok());
-    let oauth_creds = home.as_ref().and_then(|h| {
-        let sc = agent.stored_credentials.as_ref()?;
-        let path = Path::new(h).join(sc.home_dir).join(sc.credentials_file);
-        path.exists().then_some(path)
-    });
-    probe_with_env(agent, env_match, oauth_creds.as_deref(), None)
+    let auth = resolve_auth(
+        agent,
+        |var| std::env::var(var).ok(),
+        home.as_deref().map(Path::new),
+    )?;
+    Some(DetectedAgent {
+        agent,
+        auth,
+        image_exists: image_exists(agent.image),
+    })
 }
 
-/// The first of the agent's env-var auth methods whose variable is set to a
-/// non-empty value. `lookup` reads an env var (injected in tests).
-fn match_env_auth(
+/// The agent's first available auth method: the first `EnvSecret` whose
+/// env var is set to a non-empty value, or the first `StagedFiles` whose
+/// probe file exists under `$HOME`. `env` reads an env var and `home` is
+/// `$HOME` (both injected in tests).
+fn resolve_auth(
     agent: &'static AgentDef,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Option<&'static EnvAuthDef> {
-    agent
-        .env_auth
-        .iter()
-        .find(|e| lookup(e.env_var).is_some_and(|v| !v.trim().is_empty()))
+    env: impl Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Option<ResolvedAuth> {
+    agent.auth.iter().find_map(|method| match method {
+        AuthMethod::EnvSecret { env_var, .. } => {
+            env(env_var)
+                .filter(|v| !v.trim().is_empty())
+                .map(|_| ResolvedAuth {
+                    method,
+                    host_dir: None,
+                })
+        }
+        AuthMethod::StagedFiles { dir, probe, .. } => {
+            let dir = home?.join(dir);
+            dir.join(probe).exists().then_some(ResolvedAuth {
+                method,
+                host_dir: Some(dir),
+            })
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -282,92 +301,63 @@ pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
 // Internal: probing and config building
 // ---------------------------------------------------------------------------
 
-/// Check whether an agent's auth requirements are met.
-/// Env-var auth (`env_match`) is tried first; stored credentials are the
-/// fallback.
-fn probe_with_env(
-    agent: &'static AgentDef,
-    env_match: Option<&'static EnvAuthDef>,
-    oauth_credentials: Option<&Path>,
-    has_image: Option<bool>,
-) -> Option<DetectedAgent> {
-    let image_exists = has_image.unwrap_or_else(|| image_exists(agent.image));
-
-    if let Some(def) = env_match {
-        return Some(DetectedAgent {
-            agent,
-            auth: ResolvedAuth::EnvVar(def),
-            image_exists,
-        });
-    }
-
-    if agent.stored_credentials.is_some()
-        && let Some(creds_path) = oauth_credentials
-    {
-        let config_dir = creds_path.parent().unwrap_or(creds_path).to_path_buf();
-        return Some(DetectedAgent {
-            agent,
-            auth: ResolvedAuth::StoredCredentials {
-                host_config_dir: config_dir,
-            },
-            image_exists,
-        });
-    }
-
-    None
-}
-
 fn apply_auth(
-    agent: &AgentDef,
     auth: &ResolvedAuth,
     config: &mut Config,
     messages: &mut Vec<String>,
     stage_files: &mut Vec<(PathBuf, String, String)>,
     allow: &mut Vec<String>,
 ) {
-    match auth {
-        ResolvedAuth::EnvVar(def) => {
-            messages.push(format!(
-                "Injecting {} for {}",
-                def.env_var,
-                def.inject_hosts.join(", ")
-            ));
+    match auth.method {
+        AuthMethod::EnvSecret {
+            env_var,
+            hosts,
+            guest_env,
+        } => {
+            messages.push(format!("Injecting {env_var} for {}", hosts.join(", ")));
             config.secrets.insert(
-                def.env_var.into(),
+                (*env_var).into(),
                 SecretConfig {
-                    value: format!("env://{}", def.env_var),
-                    hosts: def.inject_hosts.iter().map(|&h| h.into()).collect(),
+                    value: format!("env://{env_var}"),
+                    hosts: hosts.iter().map(|&h| h.into()).collect(),
                 },
             );
-            for &(key, val) in def.guest_env {
+            for &(key, val) in *guest_env {
                 config.env.insert(key.into(), val.into());
             }
         }
-        ResolvedAuth::StoredCredentials { host_config_dir } => {
-            if let Some(sc) = agent.stored_credentials.as_ref() {
-                let files_to_stage = if sc.stage_files.is_empty() {
-                    vec![sc.credentials_file]
-                } else {
-                    sc.stage_files.to_vec()
-                };
-                for filename in &files_to_stage {
-                    let host_path = host_config_dir.join(filename);
-                    if host_path.exists() {
-                        messages.push(format!(
-                            "Staging {} → {}/{}",
-                            host_path.display(),
-                            sc.guest_dir,
-                            filename
-                        ));
-                        stage_files.push((host_path, sc.guest_dir.into(), (*filename).into()));
-                    }
+        AuthMethod::StagedFiles {
+            probe,
+            files,
+            guest_dir,
+            hosts,
+            guest_env,
+            ..
+        } => {
+            // host_dir is set by resolve_auth for StagedFiles.
+            let Some(host_dir) = auth.host_dir.as_ref() else {
+                return;
+            };
+            let to_stage: Vec<&str> = if files.is_empty() {
+                vec![probe]
+            } else {
+                files.to_vec()
+            };
+            for filename in to_stage {
+                let host_path = host_dir.join(filename);
+                if host_path.exists() {
+                    messages.push(format!(
+                        "Staging {} → {guest_dir}/{filename}",
+                        host_path.display()
+                    ));
+                    stage_files.push((host_path, (*guest_dir).into(), filename.into()));
                 }
-                for &(key, val) in sc.guest_env {
-                    config.env.insert(key.into(), val.into());
-                }
-                for &host in sc.extra_hosts {
-                    allow.push(host.to_string());
-                }
+            }
+            for &(key, val) in *guest_env {
+                config.env.insert(key.into(), val.into());
+            }
+            for &host in *hosts {
+                allow.push(host.to_string());
             }
         }
     }
@@ -404,7 +394,6 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
     }
 
     apply_auth(
-        agent,
         &detected.auth,
         &mut config,
         &mut messages,
@@ -507,17 +496,43 @@ fn host_from_remote_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// One of an agent's env-var auth defs, by variable name (test helper).
-    fn env_def(agent: &'static AgentDef, var: &str) -> Option<&'static EnvAuthDef> {
-        agent.env_auth.iter().find(|e| e.env_var == var)
+    /// Build a `DetectedAgent` from a fake env lookup + home (test helper).
+    fn detect(
+        agent: &'static AgentDef,
+        env: impl Fn(&str) -> Option<String>,
+        home: Option<&Path>,
+        image_exists: bool,
+    ) -> Option<DetectedAgent> {
+        resolve_auth(agent, env, home).map(|auth| DetectedAgent {
+            agent,
+            auth,
+            image_exists,
+        })
+    }
+
+    /// An env lookup returning `val` for `name` and nothing else.
+    fn only(name: &'static str, val: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |var| (var == name).then(|| val.to_string())
+    }
+
+    /// The env var of a resolved `EnvSecret` method, if any.
+    fn resolved_env_var(r: &ResolvedAuth) -> Option<&'static str> {
+        match r.method {
+            AuthMethod::EnvSecret { env_var, .. } => Some(env_var),
+            AuthMethod::StagedFiles { .. } => None,
+        }
     }
 
     #[test]
     fn detect_api_key_produces_correct_config() {
-        let api = env_def(&CLAUDE_CODE, "ANTHROPIC_API_KEY");
-        let detected =
-            probe_with_env(&CLAUDE_CODE, api, None, Some(true)).expect("should detect via API key");
-        assert!(matches!(detected.auth, ResolvedAuth::EnvVar(_)));
+        let detected = detect(
+            &CLAUDE_CODE,
+            only("ANTHROPIC_API_KEY", "sk-ant-test123"),
+            None,
+            true,
+        )
+        .expect("should detect via API key");
+        assert!(matches!(detected.auth.method, AuthMethod::EnvSecret { .. }));
 
         let auto = build_config(&detected);
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
@@ -561,16 +576,17 @@ mod tests {
 
     #[test]
     fn detect_oauth_produces_correct_config() {
-        let tmp = std::env::temp_dir().join("redan-test-oauth-refactor");
-        let _ = std::fs::create_dir_all(&tmp);
-        let creds = tmp.join(".credentials.json");
+        let home = std::env::temp_dir().join("redan-test-oauth-refactor");
+        let claude = home.join(".claude");
+        let _ = std::fs::create_dir_all(&claude);
+        let creds = claude.join(".credentials.json");
         std::fs::write(&creds, "{}").unwrap();
 
-        let detected = probe_with_env(&CLAUDE_CODE, None, Some(&creds), Some(true))
-            .expect("should detect via OAuth");
+        let detected =
+            detect(&CLAUDE_CODE, |_| None, Some(&home), true).expect("should detect via OAuth");
         assert!(matches!(
-            detected.auth,
-            ResolvedAuth::StoredCredentials { .. }
+            detected.auth.method,
+            AuthMethod::StagedFiles { .. }
         ));
 
         let auto = build_config(&detected);
@@ -590,9 +606,6 @@ mod tests {
         assert_eq!(guest_dir, "/tmp/.claude");
         assert_eq!(filename, ".credentials.json");
 
-        // No config-dir mount (credentials are pre-staged)
-        assert!(!auto.config.mount.contains_key("claude-code-config"));
-
         assert!(
             auto.config
                 .network
@@ -601,61 +614,67 @@ mod tests {
         );
         assert!(auto.messages.iter().any(|m| m.contains("Staging")));
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn api_key_takes_precedence_over_oauth() {
-        let tmp = std::env::temp_dir().join("redan-test-precedence-refactor");
-        let _ = std::fs::create_dir_all(&tmp);
-        let creds = tmp.join(".credentials.json");
-        std::fs::write(&creds, "{}").unwrap();
+    fn api_key_takes_precedence_over_staged_files() {
+        // Env var is earlier in the auth list than StagedFiles, so it wins
+        // even when the credentials file also exists.
+        let home = std::env::temp_dir().join("redan-test-precedence-refactor");
+        let claude = home.join(".claude");
+        let _ = std::fs::create_dir_all(&claude);
+        std::fs::write(claude.join(".credentials.json"), "{}").unwrap();
 
-        let api = env_def(&CLAUDE_CODE, "ANTHROPIC_API_KEY");
-        let detected =
-            probe_with_env(&CLAUDE_CODE, api, Some(&creds), Some(true)).expect("should detect");
-        assert!(matches!(detected.auth, ResolvedAuth::EnvVar(_)));
+        let detected = detect(
+            &CLAUDE_CODE,
+            only("ANTHROPIC_API_KEY", "sk"),
+            Some(&home),
+            true,
+        )
+        .expect("should detect");
+        assert!(matches!(detected.auth.method, AuthMethod::EnvSecret { .. }));
 
         let auto = build_config(&detected);
         assert!(auto.config.secrets.contains_key("ANTHROPIC_API_KEY"));
-        assert!(!auto.config.mount.contains_key("claude-code-config"));
+        assert!(auto.stage_files.is_empty());
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn no_auth_returns_none() {
-        assert!(probe_with_env(&CLAUDE_CODE, None, None, Some(true)).is_none());
+        assert!(detect(&CLAUDE_CODE, |_| None, None, true).is_none());
     }
 
     #[test]
-    fn match_env_auth_prefers_api_key_over_oauth_token() {
-        // Both set -> API key wins (matches Claude Code's own precedence).
-        let m = match_env_auth(&CLAUDE_CODE, |_| Some("value".into()));
-        assert_eq!(m.map(|e| e.env_var), Some("ANTHROPIC_API_KEY"));
+    fn resolve_prefers_api_key_over_oauth_token() {
+        // Both env vars set -> API key wins (it's first in the auth list,
+        // matching Claude Code's own precedence).
+        let r = resolve_auth(&CLAUDE_CODE, |_| Some("value".into()), None).unwrap();
+        assert_eq!(resolved_env_var(&r), Some("ANTHROPIC_API_KEY"));
     }
 
     #[test]
-    fn match_env_auth_falls_to_oauth_token_when_only_it_is_set() {
-        let m = match_env_auth(&CLAUDE_CODE, |var| {
-            (var == "CLAUDE_CODE_OAUTH_TOKEN").then(|| "tok".into())
-        });
-        assert_eq!(m.map(|e| e.env_var), Some("CLAUDE_CODE_OAUTH_TOKEN"));
+    fn resolve_falls_to_oauth_token_when_only_it_is_set() {
+        let r = resolve_auth(&CLAUDE_CODE, only("CLAUDE_CODE_OAUTH_TOKEN", "tok"), None).unwrap();
+        assert_eq!(resolved_env_var(&r), Some("CLAUDE_CODE_OAUTH_TOKEN"));
     }
 
     #[test]
-    fn match_env_auth_ignores_empty_values() {
-        let m = match_env_auth(&CLAUDE_CODE, |var| {
-            (var == "ANTHROPIC_API_KEY").then(|| "  ".into())
-        });
-        assert!(m.is_none());
+    fn resolve_ignores_empty_env_values() {
+        assert!(resolve_auth(&CLAUDE_CODE, only("ANTHROPIC_API_KEY", "  "), None).is_none());
     }
 
     #[test]
     fn oauth_token_injects_as_secret() {
-        let oauth = env_def(&CLAUDE_CODE, "CLAUDE_CODE_OAUTH_TOKEN");
-        let detected = probe_with_env(&CLAUDE_CODE, oauth, None, Some(true))
-            .expect("should detect via OAuth token");
+        let detected = detect(
+            &CLAUDE_CODE,
+            only("CLAUDE_CODE_OAUTH_TOKEN", "tok"),
+            None,
+            true,
+        )
+        .unwrap();
         let auto = build_config(&detected);
         let secret = auto.config.secrets.get("CLAUDE_CODE_OAUTH_TOKEN").unwrap();
         assert_eq!(secret.value, "env://CLAUDE_CODE_OAUTH_TOKEN");
@@ -665,35 +684,32 @@ mod tests {
     }
 
     #[test]
-    fn empty_api_key_falls_through_to_oauth() {
-        let tmp = std::env::temp_dir().join("redan-test-empty-key");
-        let _ = std::fs::create_dir_all(&tmp);
-        let creds = tmp.join(".credentials.json");
-        std::fs::write(&creds, "{}").unwrap();
+    fn empty_api_key_falls_through_to_staged_files() {
+        let home = std::env::temp_dir().join("redan-test-empty-key");
+        let claude = home.join(".claude");
+        let _ = std::fs::create_dir_all(&claude);
+        std::fs::write(claude.join(".credentials.json"), "{}").unwrap();
 
         // Empty env vars don't match; fall back to staged credentials.
-        let env_match = match_env_auth(&CLAUDE_CODE, |_| Some(String::new()));
-        assert!(env_match.is_none());
-        let detected = probe_with_env(&CLAUDE_CODE, env_match, Some(&creds), Some(true))
-            .expect("should fall through to OAuth");
+        let detected = detect(&CLAUDE_CODE, |_| Some(String::new()), Some(&home), true)
+            .expect("should fall through to staged files");
         assert!(matches!(
-            detected.auth,
-            ResolvedAuth::StoredCredentials { .. }
+            detected.auth.method,
+            AuthMethod::StagedFiles { .. }
         ));
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn empty_api_key_no_oauth_returns_none() {
-        let env_match = match_env_auth(&CLAUDE_CODE, |_| Some("  ".into()));
-        assert!(probe_with_env(&CLAUDE_CODE, env_match, None, Some(true)).is_none());
+    fn empty_api_key_no_files_returns_none() {
+        assert!(detect(&CLAUDE_CODE, |_| Some("  ".into()), None, true).is_none());
     }
 
     #[test]
     fn needs_image_build_when_image_missing() {
-        let api = env_def(&CLAUDE_CODE, "ANTHROPIC_API_KEY");
-        let detected = probe_with_env(&CLAUDE_CODE, api, None, Some(false)).expect("should detect");
+        let detected =
+            detect(&CLAUDE_CODE, only("ANTHROPIC_API_KEY", "sk"), None, false).expect("detect");
         let auto = build_config(&detected);
         assert!(auto.needs_image_build);
         assert!(auto.messages.iter().any(|m| m.contains("will build")));
@@ -701,10 +717,9 @@ mod tests {
 
     #[test]
     fn pi_api_key_produces_correct_config() {
-        let api = env_def(&PI, "ANTHROPIC_API_KEY");
-        let detected =
-            probe_with_env(&PI, api, None, Some(true)).expect("should detect Pi via API key");
-        assert!(matches!(detected.auth, ResolvedAuth::EnvVar(_)));
+        let detected = detect(&PI, only("ANTHROPIC_API_KEY", "sk-ant-test123"), None, true)
+            .expect("should detect Pi via API key");
+        assert!(matches!(detected.auth.method, AuthMethod::EnvSecret { .. }));
 
         let auto = build_config(&detected);
         assert_eq!(auto.config.image.as_deref(), Some("pi"));
@@ -721,17 +736,16 @@ mod tests {
     }
 
     #[test]
-    fn pi_stored_credentials_stages_multiple_files() {
-        let tmp = std::env::temp_dir().join("redan-test-pi-creds");
-        let _ = std::fs::create_dir_all(&tmp);
-        let auth_file = tmp.join("auth.json");
-        let settings = tmp.join("settings.json");
-        std::fs::write(&auth_file, "{}").unwrap();
-        std::fs::write(&settings, "{}").unwrap();
+    fn pi_staged_files_stages_only_present_files() {
+        let home = std::env::temp_dir().join("redan-test-pi-creds");
+        let agent_dir = home.join(".pi/agent");
+        let _ = std::fs::create_dir_all(&agent_dir);
+        std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+        std::fs::write(agent_dir.join("settings.json"), "{}").unwrap();
         // models.json intentionally absent: only existing files get staged
 
-        let detected = probe_with_env(&PI, None, Some(&auth_file), Some(true))
-            .expect("should detect Pi via stored credentials");
+        let detected = detect(&PI, |_| None, Some(&home), true)
+            .expect("should detect Pi via staged credentials");
         let auto = build_config(&detected);
 
         assert_eq!(auto.stage_files.len(), 2);
@@ -748,7 +762,7 @@ mod tests {
             assert_eq!(dir, "/home/dev/.pi/agent");
         }
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

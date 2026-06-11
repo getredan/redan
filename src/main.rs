@@ -936,18 +936,24 @@ fn run_command(args: RunArgs) {
 
 /// Print how to authenticate an agent whose creds weren't found.
 fn print_agent_auth_hint(agent: &redan::auto_detect::AgentDef) {
-    for e in agent.env_auth {
-        if e.env_var == "CLAUDE_CODE_OAUTH_TOKEN" {
-            eprintln!("  run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN (1-year)");
-        } else {
-            eprintln!("  export {}=...", e.env_var);
+    use redan::auto_detect::AuthMethod;
+    for method in agent.auth {
+        match method {
+            AuthMethod::EnvSecret {
+                env_var: "CLAUDE_CODE_OAUTH_TOKEN",
+                ..
+            } => {
+                eprintln!(
+                    "  run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN (1-year)"
+                );
+            }
+            AuthMethod::EnvSecret { env_var, .. } => eprintln!("  export {env_var}=..."),
+            AuthMethod::StagedFiles { dir, probe, .. } => {
+                eprintln!(
+                    "  or sign in so ~/{dir}/{probe} exists (less reliable; it can go stale)"
+                );
+            }
         }
-    }
-    if let Some(sc) = agent.stored_credentials.as_ref() {
-        eprintln!(
-            "  or sign in so ~/{}/{} exists (less reliable; it can go stale)",
-            sc.home_dir, sc.credentials_file
-        );
     }
 }
 
