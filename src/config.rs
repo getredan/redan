@@ -101,6 +101,57 @@ impl Config {
     }
 }
 
+/// Layer `top` over `base`, returning the merged config (`top` wins conflicts).
+///
+/// Used so `redan run <agent>` honors a project `redan.toml`: the agent profile
+/// is the `base` (a set of defaults) and the file is `top`, so explicit project
+/// config overrides the agent's defaults. This matches the usual precedence of
+/// built-in defaults < config file < CLI flags.
+///
+/// Merge rules:
+/// - Scalar fields (`image`, `command`, `timeout`, ...): `top` wins when it
+///   sets the field, otherwise `base` is kept.
+/// - `network.allow` / `network.forward`: unioned, preserving order, `base`
+///   entries first, duplicates dropped.
+/// - `secrets` / `mount` / `env` maps: unioned, with `top` winning on key
+///   collisions.
+#[must_use]
+pub fn overlay(base: Config, top: Config) -> Config {
+    let mut allow = base.network.allow;
+    for host in top.network.allow {
+        if !allow.contains(&host) {
+            allow.push(host);
+        }
+    }
+    let mut forward = base.network.forward;
+    for spec in top.network.forward {
+        if !forward.contains(&spec) {
+            forward.push(spec);
+        }
+    }
+
+    let mut secrets = base.secrets;
+    secrets.extend(top.secrets);
+    let mut mount = base.mount;
+    mount.extend(top.mount);
+    let mut env = base.env;
+    env.extend(top.env);
+
+    Config {
+        image: top.image.or(base.image),
+        rootfs: top.rootfs.or(base.rootfs),
+        command: top.command.or(base.command),
+        timeout: top.timeout.or(base.timeout),
+        interactive: top.interactive.or(base.interactive),
+        audit_log: top.audit_log.or(base.audit_log),
+        log_file: top.log_file.or(base.log_file),
+        network: NetworkConfig { allow, forward },
+        secrets,
+        mount,
+        env,
+    }
+}
+
 /// Read `sandbox.network.allowedDomains` from Claude Code settings.
 /// Checks project-level `.claude/settings.local.json` first, then
 /// user-level `~/.claude/settings.json`. Returns the merged domain list.
@@ -294,5 +345,164 @@ target = "/workspace"
     #[test]
     fn read_claude_settings_missing_file() {
         assert_eq!(read_claude_settings(Path::new("/nonexistent")), None);
+    }
+
+    // --- overlay (config layering) ---
+
+    #[test]
+    fn overlay_scalar_top_wins_when_set() {
+        let base = Config {
+            image: Some("base-img".into()),
+            timeout: Some(60),
+            ..Config::default()
+        };
+        let top = Config {
+            image: Some("top-img".into()),
+            ..Config::default()
+        };
+        let merged = overlay(base, top);
+        assert_eq!(merged.image.as_deref(), Some("top-img"));
+        // top left timeout unset, so the base value survives
+        assert_eq!(merged.timeout, Some(60));
+    }
+
+    #[test]
+    fn overlay_scalar_falls_back_to_base() {
+        let base = Config {
+            command: Some("base-cmd".into()),
+            ..Config::default()
+        };
+        let merged = overlay(base, Config::default());
+        assert_eq!(merged.command.as_deref(), Some("base-cmd"));
+    }
+
+    #[test]
+    fn overlay_empty_base_is_noop() {
+        let mut top = Config {
+            image: Some("img".into()),
+            ..Config::default()
+        };
+        top.env.insert("A".into(), "b".into());
+        let merged = overlay(Config::default(), top);
+        assert_eq!(merged.image.as_deref(), Some("img"));
+        assert_eq!(merged.env.get("A").map(String::as_str), Some("b"));
+    }
+
+    #[test]
+    fn overlay_allow_hosts_union_dedup() {
+        let base = Config {
+            network: NetworkConfig {
+                allow: vec!["a.com".into(), "b.com".into()],
+                ..NetworkConfig::default()
+            },
+            ..Config::default()
+        };
+        let top = Config {
+            network: NetworkConfig {
+                allow: vec!["b.com".into(), "c.com".into()],
+                ..NetworkConfig::default()
+            },
+            ..Config::default()
+        };
+        let merged = overlay(base, top);
+        assert_eq!(merged.network.allow, vec!["a.com", "b.com", "c.com"]);
+    }
+
+    #[test]
+    fn overlay_forward_union() {
+        let base = Config {
+            network: NetworkConfig {
+                allow: vec![],
+                forward: vec!["9222".into()],
+            },
+            ..Config::default()
+        };
+        let top = Config {
+            network: NetworkConfig {
+                allow: vec![],
+                forward: vec!["8080:3000".into()],
+            },
+            ..Config::default()
+        };
+        let merged = overlay(base, top);
+        assert_eq!(merged.network.forward, vec!["9222", "8080:3000"]);
+    }
+
+    #[test]
+    fn overlay_secrets_top_wins_on_collision() {
+        let mut base = Config::default();
+        base.secrets.insert(
+            "K".into(),
+            SecretConfig {
+                value: "base".into(),
+                hosts: vec!["h".into()],
+            },
+        );
+        base.secrets.insert(
+            "ONLY_BASE".into(),
+            SecretConfig {
+                value: "b".into(),
+                hosts: vec!["h".into()],
+            },
+        );
+        let mut top = Config::default();
+        top.secrets.insert(
+            "K".into(),
+            SecretConfig {
+                value: "top".into(),
+                hosts: vec!["h2".into()],
+            },
+        );
+        let merged = overlay(base, top);
+        assert_eq!(merged.secrets.get("K").unwrap().value, "top");
+        assert!(merged.secrets.contains_key("ONLY_BASE"));
+    }
+
+    #[test]
+    fn overlay_env_merges_top_wins() {
+        let mut base = Config::default();
+        base.env.insert("HOME".into(), "/root".into());
+        base.env.insert("FOO".into(), "1".into());
+        let mut top = Config::default();
+        top.env.insert("HOME".into(), "/home/dev".into());
+        let merged = overlay(base, top);
+        assert_eq!(
+            merged.env.get("HOME").map(String::as_str),
+            Some("/home/dev")
+        );
+        assert_eq!(merged.env.get("FOO").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn overlay_mount_union_top_wins() {
+        let mut base = Config::default();
+        base.mount.insert(
+            "workspace".into(),
+            MountConfig {
+                source: "/base".into(),
+                target: None,
+                read_only: false,
+            },
+        );
+        base.mount.insert(
+            "data".into(),
+            MountConfig {
+                source: "/data".into(),
+                target: None,
+                read_only: true,
+            },
+        );
+        let mut top = Config::default();
+        top.mount.insert(
+            "workspace".into(),
+            MountConfig {
+                source: "/top".into(),
+                target: Some("/workspace".into()),
+                read_only: false,
+            },
+        );
+        let merged = overlay(base, top);
+        assert_eq!(merged.mount.get("workspace").unwrap().source, "/top");
+        assert!(merged.mount.contains_key("data"));
     }
 }
