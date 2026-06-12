@@ -156,11 +156,22 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // Parse mounts
     let mut virtiofs_mounts: Vec<(String, String, bool)> = Vec::new();
     let mut mount_commands: Vec<String> = Vec::new();
+    // The mount of the host's current directory becomes the guest working
+    // directory, so the agent starts in the project (sees its git repo,
+    // relative paths) instead of in `/`.
+    let cwd = std::env::current_dir().and_then(std::fs::canonicalize).ok();
+    let mut workdir: Option<String> = None;
     for (i, spec) in cfg.mount_specs.iter().enumerate() {
         let (host_path, guest_path, read_only) = parse_mount(spec);
         if !Path::new(&host_path).exists() {
             eprintln!("mount source does not exist: {host_path}");
             std::process::exit(1);
+        }
+        if workdir.is_none()
+            && let Some(cwd) = &cwd
+            && std::fs::canonicalize(&host_path).is_ok_and(|p| &p == cwd)
+        {
+            workdir = Some(guest_path.clone());
         }
         let tag = format!("fs{i}");
         let ro_label = if read_only { " (ro)" } else { "" };
@@ -187,7 +198,10 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     let ca_update = vm::ca_update_commands();
     let mount_setup = mount_commands.join("; ");
     let ensure_user = cfg.run_as.map(ensure_user_command);
-    let user_command = wrap_run_as(cfg.command, cfg.run_as);
+    // `cd` runs in the boot shell after the virtio-fs mount, so the cwd
+    // resolves to the mounted directory (not the empty pre-mount inode);
+    // `runuser` then inherits it. Keeps the no-extra-`sh -c` TTY passthrough.
+    let user_command = with_workdir(wrap_run_as(cfg.command, cfg.run_as), workdir.as_deref());
 
     let mut parts = vec![net_setup, ca_update.to_string()];
     if !mount_setup.is_empty() {
@@ -556,6 +570,15 @@ fn wrap_run_as(command: &str, run_as: Option<&str>) -> String {
     format!("runuser -u {user} -- {command}")
 }
 
+/// Prepend `cd <workdir> &&` so the agent starts in the mounted project
+/// directory. No-op when there's no working directory or it's root.
+fn with_workdir(command: String, workdir: Option<&str>) -> String {
+    match workdir {
+        Some(dir) if dir != "/" => format!("cd {dir} && {command}"),
+        _ => command,
+    }
+}
+
 fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
     let dir = rootfs.join("etc/redan");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -683,6 +706,24 @@ mod tests {
     fn wrap_run_as_preserves_command_verbatim() {
         let result = wrap_run_as("echo 'hello world'", Some("dev"));
         assert_eq!(result, "runuser -u dev -- echo 'hello world'");
+    }
+
+    #[test]
+    fn with_workdir_prepends_cd() {
+        assert_eq!(
+            with_workdir("runuser -u dev -- claude".into(), Some("/workspace")),
+            "cd /workspace && runuser -u dev -- claude"
+        );
+    }
+
+    #[test]
+    fn with_workdir_root_is_noop() {
+        assert_eq!(with_workdir("claude".into(), Some("/")), "claude");
+    }
+
+    #[test]
+    fn with_workdir_none_is_noop() {
+        assert_eq!(with_workdir("claude".into(), None), "claude");
     }
 
     #[test]
