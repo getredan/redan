@@ -121,7 +121,7 @@ mod tests {
             },
         );
         cfg.env
-            .insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
+            .insert("CLAUDE_CONFIG_DIR".into(), "/home/dev/.claude".into());
 
         let out = redan_toml(&cfg, true);
         assert!(out.contains("--dangerously-skip-permissions"));

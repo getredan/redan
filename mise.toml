@@ -41,7 +41,9 @@ run = "cargo build --release"
 
 [tasks.install]
 description = "Build and install to ~/.cargo/bin"
-run = "cargo install --path ."
+# --locked: cargo install otherwise ignores Cargo.lock and re-resolves, which
+# can pull a newer `time` that conflicts with `rcgen` (trait impl clash, E0119).
+run = "cargo install --path . --locked"
 
 [tasks.bench]
 description = "Boot-to-proxy benchmark (requires KVM + image)"

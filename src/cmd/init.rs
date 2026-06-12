@@ -52,9 +52,10 @@ pub(crate) fn run(claude: bool) {
         cfg.command = Some("claude --dangerously-skip-permissions".into());
         cfg.interactive = Some(true);
 
-        // Point Claude Code's config to workspace so sessions persist
+        // Claude's config in a guest-only dir, not the mounted workspace,
+        // so its credentials and history don't land in the project.
         cfg.env
-            .insert("CLAUDE_CONFIG_DIR".into(), "/workspace/.claude".into());
+            .insert("CLAUDE_CONFIG_DIR".into(), "/home/dev/.claude".into());
 
         // Claude Code API hosts
         let claude_hosts = [
