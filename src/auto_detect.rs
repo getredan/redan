@@ -49,20 +49,20 @@ static CLAUDE_CODE: AgentDef = AgentDef {
         AuthMethod::EnvSecret {
             env_var: "ANTHROPIC_API_KEY",
             hosts: &["api.anthropic.com"],
-            guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
+            guest_env: &[("CLAUDE_CONFIG_DIR", "/home/dev/.claude")],
         },
         AuthMethod::EnvSecret {
             env_var: "CLAUDE_CODE_OAUTH_TOKEN",
             hosts: &["api.anthropic.com"],
-            guest_env: &[("CLAUDE_CONFIG_DIR", "/workspace/.claude")],
+            guest_env: &[("CLAUDE_CONFIG_DIR", "/home/dev/.claude")],
         },
         AuthMethod::StagedFiles {
             dir: ".claude",
             probe: ".credentials.json",
             files: &[".credentials.json"],
-            guest_dir: "/tmp/.claude",
+            guest_dir: "/home/dev/.claude",
             hosts: &["auth.anthropic.com", "console.anthropic.com"],
-            guest_env: &[("CLAUDE_CONFIG_DIR", "/tmp/.claude")],
+            guest_env: &[("CLAUDE_CONFIG_DIR", "/home/dev/.claude")],
         },
     ],
 };
@@ -569,7 +569,7 @@ mod tests {
 
         assert_eq!(
             auto.config.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
-            Some("/workspace/.claude")
+            Some("/home/dev/.claude")
         );
 
         assert!(auto.config.mount.contains_key("workspace"));
@@ -599,17 +599,17 @@ mod tests {
         assert_eq!(auto.config.image.as_deref(), Some("claude-code"));
         assert!(auto.config.secrets.is_empty());
 
-        // CLAUDE_CONFIG_DIR points to guest-only tmp dir
+        // CLAUDE_CONFIG_DIR is the guest-only config dir (not the workspace)
         assert_eq!(
             auto.config.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
-            Some("/tmp/.claude")
+            Some("/home/dev/.claude")
         );
 
         // Credentials staged into rootfs before boot (no mount, no runtime copy)
         assert_eq!(auto.stage_files.len(), 1);
         let (host_path, guest_dir, filename) = &auto.stage_files[0];
         assert_eq!(host_path, &creds);
-        assert_eq!(guest_dir, "/tmp/.claude");
+        assert_eq!(guest_dir, "/home/dev/.claude");
         assert_eq!(filename, ".credentials.json");
 
         assert!(
