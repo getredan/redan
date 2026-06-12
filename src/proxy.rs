@@ -1136,6 +1136,7 @@ fn tls_connection_thread(
                         write_scrubbed_chunk(
                             &mut tls,
                             &upstream_buf[..n],
+                            &sni,
                             secrets,
                             max_secret_len,
                             &mut scrub_overlap,
@@ -1171,7 +1172,8 @@ fn tls_connection_thread(
                                 );
                             }
 
-                            let (scrubbed, scrub_count) = crate::secret::scrub(&headers, secrets);
+                            let (scrubbed, scrub_count) =
+                                crate::secret::scrub(&headers, &sni, secrets);
                             if scrub_count > 0 {
                                 log::info!("HEADERS SCRUBBED: {scrub_count} value(s)");
                                 audit(
@@ -1192,6 +1194,7 @@ fn tls_connection_thread(
                                 write_scrubbed_chunk(
                                     &mut tls,
                                     &body_remainder,
+                                    &sni,
                                     secrets,
                                     max_secret_len,
                                     &mut scrub_overlap,
@@ -1215,6 +1218,7 @@ fn tls_connection_thread(
                             write_scrubbed_chunk(
                                 &mut tls,
                                 &upstream_buf[..n],
+                                &sni,
                                 secrets,
                                 max_secret_len,
                                 &mut scrub_overlap,
@@ -1227,7 +1231,7 @@ fn tls_connection_thread(
                 }
             }
             if !headers_sent && !header_buf.is_empty() {
-                let (scrubbed, _) = crate::secret::scrub(&header_buf, secrets);
+                let (scrubbed, _) = crate::secret::scrub(&header_buf, &sni, secrets);
                 let rewritten = rewrite_connection_close(&scrubbed);
                 tls.write_all(&rewritten)?;
             }
@@ -1415,6 +1419,7 @@ fn tcp_forward_thread(
 fn write_scrubbed_chunk(
     out: &mut impl Write,
     chunk: &[u8],
+    hostname: &str,
     secrets: &[SecretBinding],
     max_secret_len: usize,
     scrub_overlap: &mut Vec<u8>,
@@ -1427,7 +1432,7 @@ fn write_scrubbed_chunk(
     let mut window = std::mem::take(scrub_overlap);
     window.extend_from_slice(chunk);
 
-    let (scrubbed, scrub_count) = crate::secret::scrub(&window, secrets);
+    let (scrubbed, scrub_count) = crate::secret::scrub(&window, hostname, secrets);
     if scrub_count > 0 {
         log::info!("BODY SCRUBBED: {scrub_count} value(s)");
     }
@@ -1840,7 +1845,11 @@ mod tests {
     // --- write_scrubbed_chunk overlap tests ---
 
     fn make_secret(placeholder: &str, real: &str) -> SecretBinding {
-        SecretBinding::new_unchecked(placeholder.to_string(), real.to_string(), vec![])
+        SecretBinding::new_unchecked(
+            placeholder.to_string(),
+            real.to_string(),
+            vec!["upstream.test".to_string()],
+        )
     }
 
     #[test]
@@ -1851,6 +1860,7 @@ mod tests {
         write_scrubbed_chunk(
             &mut out,
             b"prefix SECRET123 suffix",
+            "upstream.test",
             &[secret],
             9,
             &mut overlap,
@@ -1878,12 +1888,21 @@ mod tests {
         write_scrubbed_chunk(
             &mut out,
             b"prefix ABCDE",
+            "upstream.test",
             &[secret.clone()],
             10,
             &mut overlap,
         )
         .unwrap();
-        write_scrubbed_chunk(&mut out, b"FGHIJ suffix", &[secret], 10, &mut overlap).unwrap();
+        write_scrubbed_chunk(
+            &mut out,
+            b"FGHIJ suffix",
+            "upstream.test",
+            &[secret],
+            10,
+            &mut overlap,
+        )
+        .unwrap();
         out.extend_from_slice(&overlap);
         let text = String::from_utf8_lossy(&out);
         assert!(
@@ -1898,7 +1917,15 @@ mod tests {
         let secret = make_secret("ph", "TOKEN");
         let mut out = Vec::new();
         let mut overlap = Vec::new();
-        write_scrubbed_chunk(&mut out, b"data TOKEN", &[secret], 5, &mut overlap).unwrap();
+        write_scrubbed_chunk(
+            &mut out,
+            b"data TOKEN",
+            "upstream.test",
+            &[secret],
+            5,
+            &mut overlap,
+        )
+        .unwrap();
         // Flush overlap (may contain the tail)
         out.extend_from_slice(&overlap);
         let text = String::from_utf8_lossy(&out);
@@ -1909,7 +1936,15 @@ mod tests {
     fn scrub_chunk_no_secrets_passthrough() {
         let mut out = Vec::new();
         let mut overlap = Vec::new();
-        write_scrubbed_chunk(&mut out, b"hello world", &[], 0, &mut overlap).unwrap();
+        write_scrubbed_chunk(
+            &mut out,
+            b"hello world",
+            "upstream.test",
+            &[],
+            0,
+            &mut overlap,
+        )
+        .unwrap();
         assert_eq!(out, b"hello world");
         assert!(overlap.is_empty());
     }
@@ -1924,6 +1959,7 @@ mod tests {
         write_scrubbed_chunk(
             &mut out,
             b"got ALPHA and BETA here",
+            "upstream.test",
             &[s1, s2],
             max_len,
             &mut overlap,

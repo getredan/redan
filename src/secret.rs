@@ -278,14 +278,25 @@ fn try_inject_basic(value: &[u8], secrets: &[&SecretBinding]) -> Option<(String,
 
 /// Replace real secret values with placeholders in an HTTP response.
 ///
+/// Only secrets whose `allowed_hosts` include `hostname` are scrubbed, so a
+/// response from one host can't expose a secret scoped to another. Mirrors
+/// the host filtering in [`inject`].
+///
 /// Best-effort: matches literal bytes only. See module docs for limitations.
 ///
 /// Returns the (possibly modified) response data and the number of scrubs.
-pub fn scrub(data: &[u8], secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
+pub fn scrub(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     let mut result = data.to_vec();
     let mut count = 0;
 
     for secret in secrets {
+        if !secret
+            .allowed_hosts()
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(hostname))
+        {
+            continue;
+        }
         if let Some((replaced, n)) = byte_replace(
             &result,
             secret.real_value().as_bytes(),
@@ -455,7 +466,7 @@ mod tests {
     fn scrub_removes_real_value() {
         let secrets = vec![test_binding()];
         let resp = b"Token: ghp_RealSecretValue99 is active";
-        let (result, count) = scrub(resp, &secrets);
+        let (result, count) = scrub(resp, "api.github.com", &secrets);
         assert_eq!(count, 1);
         assert!(result.windows(18).any(|w| w == b"redan_ph_test_1234"));
         assert!(!result.windows(21).any(|w| w == b"ghp_RealSecretValue99"));
@@ -465,7 +476,7 @@ mod tests {
     fn scrub_no_match_returns_unchanged() {
         let secrets = vec![test_binding()];
         let resp = b"HTTP/1.1 200 OK\r\n\r\nno secrets here";
-        let (result, count) = scrub(resp, &secrets);
+        let (result, count) = scrub(resp, "api.github.com", &secrets);
         assert_eq!(count, 0);
         assert_eq!(result, resp);
     }
@@ -474,9 +485,20 @@ mod tests {
     fn scrub_handles_binary_data() {
         let secrets = vec![test_binding()];
         let resp: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x01]; // invalid UTF-8
-        let (result, count) = scrub(&resp, &secrets);
+        let (result, count) = scrub(&resp, "api.github.com", &secrets);
         assert_eq!(count, 0);
         assert_eq!(result, resp); // must not corrupt
+    }
+
+    #[test]
+    fn scrub_skips_disallowed_host() {
+        // A response from a host the secret is not bound to must not be
+        // scrubbed: scrub() filters on allowed_hosts the way inject() does.
+        let secrets = vec![test_binding()];
+        let resp = b"Token: ghp_RealSecretValue99 is active";
+        let (result, count) = scrub(resp, "evil.com", &secrets);
+        assert_eq!(count, 0);
+        assert_eq!(result, resp);
     }
 
     #[test]

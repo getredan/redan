@@ -296,7 +296,7 @@ fn b01_scrub_catches_literal_secret_in_body() {
         &["api.github.com"],
     )];
     let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"token\": \"ghp_SuperSecret123\"}";
-    let (result, count) = scrub(resp, &secrets);
+    let (result, count) = scrub(resp, "api.github.com", &secrets);
     assert_eq!(count, 1);
     assert!(
         !result
@@ -327,7 +327,7 @@ fn b02_scrub_does_not_catch_base64_encoded_secret() {
     )];
     let encoded = base64::engine::general_purpose::STANDARD.encode("ghp_SuperSecret123");
     let resp = format!("HTTP/1.1 200 OK\r\n\r\n{{\"encoded\": \"{encoded}\"}}");
-    let (result, count) = scrub(resp.as_bytes(), &secrets);
+    let (result, count) = scrub(resp.as_bytes(), "api.github.com", &secrets);
     assert_eq!(
         count, 0,
         "base64-encoded secret should NOT be caught (known limitation)"
@@ -354,7 +354,7 @@ fn b03_scrub_does_not_catch_url_encoded_secret() {
     // URL-encode: ghp_SuperSecret123 -> ghp%5FSuperSecret123
     let encoded = "ghp%5FSuperSecret123";
     let resp = format!("HTTP/1.1 200 OK\r\n\r\ntoken={encoded}");
-    let (result, count) = scrub(resp.as_bytes(), &secrets);
+    let (result, count) = scrub(resp.as_bytes(), "api.github.com", &secrets);
     assert_eq!(
         count, 0,
         "URL-encoded secret should NOT be caught (known limitation)"
@@ -373,7 +373,7 @@ fn b04_scrub_requires_exact_full_match() {
         &["api.github.com"],
     )];
     let resp = b"HTTP/1.1 200 OK\r\n\r\nPrefix: ghp_Super is common";
-    let (result, count) = scrub(resp, &secrets);
+    let (result, count) = scrub(resp, "api.github.com", &secrets);
     assert_eq!(count, 0, "partial match must not trigger scrub");
     assert_eq!(result, resp);
 }
@@ -393,7 +393,7 @@ fn b05_scrub_preserves_binary_response() {
     let binary: Vec<u8> = (0..256).map(|i| i as u8).collect();
     resp.extend_from_slice(&binary);
 
-    let (result, count) = scrub(&resp, &secrets);
+    let (result, count) = scrub(&resp, "api.github.com", &secrets);
     assert_eq!(count, 0);
     assert_eq!(result, resp, "binary response must be byte-identical");
 }
@@ -408,7 +408,7 @@ fn b06_scrub_catches_secret_in_response_headers() {
         &["api.github.com"],
     )];
     let resp = b"HTTP/1.1 200 OK\r\nX-Auth-Echo: ghp_SuperSecret123\r\n\r\nok";
-    let (result, count) = scrub(resp, &secrets);
+    let (result, count) = scrub(resp, "api.github.com", &secrets);
     assert_eq!(count, 1);
     assert!(
         !result
@@ -941,7 +941,7 @@ fn h05_scrub_catches_secret_in_reassembled_chunked_response() {
     // (relay_upstream does this before passing to scrub)
     let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
                  13\r\nghp_SuperSecret123\r\n0\r\n\r\n";
-    let (result, count) = scrub(resp, &secrets);
+    let (result, count) = scrub(resp, "api.github.com", &secrets);
     assert_eq!(
         count, 1,
         "scrub must catch secret in buffered chunked response"
@@ -973,7 +973,7 @@ fn h06_scrub_does_not_catch_gzip_compressed_secret() {
     let mut resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n".to_vec();
     resp.extend_from_slice(&compressed);
 
-    let (_, count) = scrub(&resp, &secrets);
+    let (_, count) = scrub(&resp, "api.github.com", &secrets);
     assert_eq!(
         count, 0,
         "gzip-compressed secrets NOT caught (known limitation, mitigated by Accept-Encoding stripping)"
