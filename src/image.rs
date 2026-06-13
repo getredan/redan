@@ -312,22 +312,42 @@ fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result
         .trim()
         .to_string();
 
-    let export = std::process::Command::new("sh")
-        .args([
-            "-c",
-            &format!("docker export {cid} | tar xf - -C {}", dest.display()),
-        ])
-        .status();
+    // Stream the container filesystem straight into the destination:
+    // `docker export <cid>` piped into `tar -x`. Wiring the two processes
+    // directly instead of through `sh -c` keeps the destination path out of a
+    // shell, so a path with spaces or shell metacharacters can't break or
+    // inject into the command.
+    let export_ok = match std::process::Command::new("docker")
+        .args(["export", &cid])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut exporter) => {
+            let tar_ok = exporter.stdout.take().is_some_and(|stdout| {
+                std::process::Command::new("tar")
+                    .arg("xf")
+                    .arg("-")
+                    .arg("-C")
+                    .arg(&dest)
+                    .stdin(std::process::Stdio::from(stdout))
+                    .status()
+                    .is_ok_and(|s| s.success())
+            });
+            // Reap docker after tar has drained the pipe.
+            let docker_ok = exporter.wait().is_ok_and(|s| s.success());
+            tar_ok && docker_ok
+        }
+        Err(_) => false,
+    };
+
+    // Remove the container regardless of export outcome.
     let _ = std::process::Command::new("docker")
         .args(["rm", &cid])
         .status();
 
-    match export {
-        Ok(s) if s.success() => {}
-        _ => {
-            let _ = fs::remove_dir_all(&dest);
-            return Err(io::Error::other("docker export failed"));
-        }
+    if !export_ok {
+        let _ = fs::remove_dir_all(&dest);
+        return Err(io::Error::other("docker export failed"));
     }
 
     // Verify it looks like a rootfs
