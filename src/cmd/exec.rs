@@ -647,6 +647,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_secret_wildcard_host_rejected() {
+        // Wildcard secret hosts never inject (injection is exact-match on SNI),
+        // so the spec must be rejected rather than silently no-op.
+        assert!(parse_secret("KEY=val:*.github.com").is_err());
+    }
+
+    #[test]
     #[ignore = "requires running Vault"]
     fn parse_secret_vault_scheme() {
         let (name, binding) =

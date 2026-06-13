@@ -55,8 +55,9 @@ impl SecretBinding {
 impl SecretBinding {
     /// Create a binding with an auto-generated placeholder.
     ///
-    /// Returns `Err` if `real_value` contains CR or LF (header injection risk).
-    /// Placeholder embeds env name (lowercased) + hash suffix.
+    /// Returns `Err` if `real_value` contains CR or LF (header injection risk),
+    /// or if any allowed host contains a wildcard. Placeholder embeds env name
+    /// (lowercased) + hash suffix.
     pub fn new(
         env_name: &str,
         real_value: String,
@@ -66,6 +67,18 @@ impl SecretBinding {
             return Err(
                 format!("secret for {env_name} contains CR/LF (header injection risk)").into(),
             );
+        }
+
+        // Injection matches the TLS SNI by exact (case-insensitive) hostname,
+        // not by wildcard. A wildcard host would be added to the connection
+        // allowlist (which does match wildcards) yet never inject, failing
+        // silently. Reject it so the misconfiguration surfaces.
+        if let Some(host) = allowed_hosts.iter().find(|h| h.contains('*')) {
+            return Err(format!(
+                "secret for {env_name} has wildcard host {host:?}; secret hosts must be exact \
+                 hostnames (injection matches the TLS SNI exactly, not by wildcard)"
+            )
+            .into());
         }
 
         let mut buf = [0u8; 16];
@@ -603,5 +616,25 @@ mod tests {
         let (result, count) = inject(req.as_bytes(), "api.github.com", &secrets);
         assert_eq!(count, 0);
         assert_eq!(result, req.as_bytes());
+    }
+
+    #[test]
+    fn new_rejects_wildcard_host() {
+        // Injection matches the SNI exactly, so a wildcard host would silently
+        // never inject. Reject it loudly at construction instead.
+        let err = SecretBinding::new("TOKEN", "val".into(), vec!["*.github.com".into()])
+            .expect_err("wildcard host must be rejected");
+        assert!(err.to_string().contains("wildcard"), "got: {err}");
+    }
+
+    #[test]
+    fn new_accepts_exact_hosts() {
+        let binding = SecretBinding::new(
+            "TOKEN",
+            "val".into(),
+            vec!["api.github.com".into(), "github.com".into()],
+        )
+        .expect("exact hosts must be accepted");
+        assert_eq!(binding.allowed_hosts(), &["api.github.com", "github.com"]);
     }
 }
