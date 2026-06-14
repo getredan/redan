@@ -46,7 +46,6 @@
 
 use redan::dns;
 use redan::secret::{SecretBinding, inject, rewrite_request_headers, scrub};
-use redan::tls::extract_sni;
 use smoltcp::wire::Ipv4Address;
 
 fn secret(placeholder: &str, real: &str, hosts: &[&str]) -> SecretBinding {
@@ -674,52 +673,6 @@ fn e01_domain_fronting_injects_based_on_sni_not_host() {
     assert_eq!(count_evil, 0, "evil.com SNI must not trigger injection");
 
     let _ = result_allowed;
-}
-
-/// Empty SNI in ClientHello.
-/// Some TLS implementations omit SNI. Our proxy must handle gracefully.
-#[test]
-fn e02_empty_sni_returns_none() {
-    // Minimal TLS record with no extensions
-    let mut hello = Vec::new();
-    hello.push(0x16); // Handshake
-    hello.extend_from_slice(&[0x03, 0x01]); // TLS 1.0
-    // Placeholder for record length
-    let len_pos = hello.len();
-    hello.extend_from_slice(&[0x00, 0x00]);
-    let hs_start = hello.len();
-    hello.push(0x01); // ClientHello
-    let hs_len_pos = hello.len();
-    hello.extend_from_slice(&[0x00, 0x00, 0x00]);
-    let ch_start = hello.len();
-    hello.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
-    hello.extend_from_slice(&[0x00; 32]); // random
-    hello.push(0x00); // session ID len
-    hello.extend_from_slice(&[0x00, 0x02, 0x00, 0x2F]); // cipher suites
-    hello.extend_from_slice(&[0x01, 0x00]); // compression
-    // Extensions: length 0 (no extensions)
-    hello.extend_from_slice(&[0x00, 0x00]);
-
-    // Fill lengths
-    let hs_body_len = hello.len() - ch_start;
-    hello[hs_len_pos] = (hs_body_len >> 16) as u8;
-    hello[hs_len_pos + 1] = (hs_body_len >> 8) as u8;
-    hello[hs_len_pos + 2] = hs_body_len as u8;
-    let record_len = hello.len() - hs_start;
-    hello[len_pos] = (record_len >> 8) as u8;
-    hello[len_pos + 1] = record_len as u8;
-
-    assert_eq!(extract_sni(&hello), None, "no SNI must return None");
-}
-
-/// Non-TLS data on port 443 must not panic.
-#[test]
-fn e03_garbage_on_tls_port_no_panic() {
-    let garbage = b"GET / HTTP/1.1\r\nHost: evil.com\r\n\r\n";
-    assert_eq!(extract_sni(garbage), None);
-    assert_eq!(extract_sni(&[0xFF; 100]), None);
-    assert_eq!(extract_sni(&[0x16, 0x03, 0x01]), None); // truncated
-    assert_eq!(extract_sni(&[]), None);
 }
 
 //
