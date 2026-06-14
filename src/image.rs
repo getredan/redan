@@ -312,22 +312,59 @@ fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result
         .trim()
         .to_string();
 
-    let export = std::process::Command::new("sh")
-        .args([
-            "-c",
-            &format!("docker export {cid} | tar xf - -C {}", dest.display()),
-        ])
-        .status();
+    // Stream the container filesystem straight into the destination:
+    // `docker export <cid>` piped into `tar -x`. Wiring the two processes
+    // directly instead of through `sh -c` keeps the destination path out of a
+    // shell, so a path with spaces or shell metacharacters can't break or
+    // inject into the command.
+    // Each step reports its own failure so the error names the operation that
+    // actually broke (docker spawn, tar spawn, tar extraction, or docker exit)
+    // instead of blaming "docker export" for everything.
+    let export_result: Result<(), String> = match std::process::Command::new("docker")
+        .args(["export", &cid])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Err(e) => Err(format!("could not start docker export: {e}")),
+        Ok(mut exporter) => {
+            let tar_result = exporter
+                .stdout
+                .take()
+                .ok_or_else(|| "docker export produced no stdout".to_string())
+                .and_then(|stdout| {
+                    match std::process::Command::new("tar")
+                        .arg("xf")
+                        .arg("-")
+                        .arg("-C")
+                        .arg(&dest)
+                        .stdin(std::process::Stdio::from(stdout))
+                        .status()
+                    {
+                        Err(e) => Err(format!("could not run tar: {e}")),
+                        Ok(s) if s.success() => Ok(()),
+                        Ok(s) => Err(format!("tar extraction failed ({s})")),
+                    }
+                });
+            // Reap docker after tar has drained the pipe.
+            let docker_result = match exporter.wait() {
+                Err(e) => Err(format!("could not wait on docker export: {e}")),
+                Ok(s) if s.success() => Ok(()),
+                Ok(s) => Err(format!("docker export failed ({s})")),
+            };
+            // Prefer tar's error: if tar dies, docker fails on the broken pipe
+            // too, but tar's failure is the root cause worth surfacing.
+            tar_result.and(docker_result)
+        }
+    };
+
+    // Remove the container regardless of export outcome.
     let _ = std::process::Command::new("docker")
         .args(["rm", &cid])
         .status();
 
-    match export {
-        Ok(s) if s.success() => {}
-        _ => {
-            let _ = fs::remove_dir_all(&dest);
-            return Err(io::Error::other("docker export failed"));
-        }
+    if let Err(msg) = export_result {
+        let _ = fs::remove_dir_all(&dest);
+        return Err(io::Error::other(msg));
     }
 
     // Verify it looks like a rootfs
