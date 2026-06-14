@@ -79,8 +79,10 @@ pub const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
         | [0, ..]             // 0.0.0.0/8 (this network)
         | [100, 64..=127, ..] // 100.64.0.0/10 (CGN, RFC 6598)
         | [192, 0, 0, ..]     // 192.0.0.0/24 (IETF protocol assignments)
+        | [192, 88, 99, ..]   // 192.88.99.0/24 (6to4 relay anycast, RFC 7526)
         | [198, 18..=19, ..]  // 198.18.0.0/15 (benchmarking)
         | [224..=239, ..] // 224.0.0.0/4 (multicast)
+        | [240..=255, ..] // 240.0.0.0/4 (reserved; includes 255.255.255.255 broadcast)
     )
 }
 
@@ -107,6 +109,12 @@ mod tests {
         // Multicast
         assert!(is_private_ip(Ipv4Addr::new(224, 0, 0, 1)));
         assert!(is_private_ip(Ipv4Addr::new(239, 255, 255, 255)));
+        // Reserved 240.0.0.0/4 (includes limited broadcast 255.255.255.255)
+        assert!(is_private_ip(Ipv4Addr::new(240, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(250, 1, 2, 3)));
+        assert!(is_private_ip(Ipv4Addr::new(255, 255, 255, 255)));
+        // 6to4 relay anycast (RFC 7526)
+        assert!(is_private_ip(Ipv4Addr::new(192, 88, 99, 1)));
     }
 
     #[test]
@@ -120,5 +128,10 @@ mod tests {
         assert!(!is_private_ip(Ipv4Addr::new(172, 32, 0, 0)));
         assert!(!is_private_ip(Ipv4Addr::new(100, 63, 255, 255)));
         assert!(!is_private_ip(Ipv4Addr::new(100, 128, 0, 0)));
+        // Just outside 6to4 192.88.99.0/24
+        assert!(!is_private_ip(Ipv4Addr::new(192, 88, 98, 255)));
+        assert!(!is_private_ip(Ipv4Addr::new(192, 88, 100, 0)));
+        // 223.0.0.0/8 is public unicast, just below the multicast block
+        assert!(!is_private_ip(Ipv4Addr::new(223, 255, 255, 255)));
     }
 }
