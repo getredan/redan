@@ -822,6 +822,7 @@ dependencies = [
  "minijinja",
  "rcgen",
  "redan",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",
