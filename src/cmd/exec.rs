@@ -163,6 +163,10 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     let mut workdir: Option<String> = None;
     for (i, spec) in cfg.mount_specs.iter().enumerate() {
         let (host_path, guest_path, read_only) = parse_mount(spec);
+        if let Err(msg) = validate_guest_path(&guest_path) {
+            eprintln!("invalid mount '{spec}': {msg}");
+            std::process::exit(1);
+        }
         if !Path::new(&host_path).exists() {
             eprintln!("mount source does not exist: {host_path}");
             std::process::exit(1);
@@ -177,6 +181,8 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
         let ro_label = if read_only { " (ro)" } else { "" };
         log::info!("mount: {host_path} -> {guest_path}{ro_label} (tag={tag})");
 
+        // guest_path is validated above (absolute, no `..`), so this join
+        // stays within the rootfs.
         let mp = Path::new(cfg.rootfs).join(guest_path.trim_start_matches('/'));
         std::fs::create_dir_all(&mp).ok();
 
@@ -545,6 +551,41 @@ fn validate_username(user: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a guest mount target before it is used.
+///
+/// The guest path is interpolated into the guest's root boot shell
+/// (`mount -t virtiofs <tag> <guest_path>`, `cd <workdir>`) and joined onto
+/// the host rootfs to create the mountpoint. Requiring an absolute path over a
+/// shell-safe character set with no `..` segments keeps the value out of
+/// shell-injection range and stops the mountpoint `create_dir_all` from
+/// escaping the rootfs via `..`.
+fn validate_guest_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("guest mount path must not be empty".into());
+    }
+    if !path.starts_with('/') {
+        return Err(format!("guest mount path must be absolute: {path:?}"));
+    }
+    if path.len() > 256 {
+        return Err(format!(
+            "guest mount path too long ({} chars, max 256)",
+            path.len()
+        ));
+    }
+    if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+    {
+        return Err(format!(
+            "guest mount path has invalid characters: {path:?} (allowed: letters, digits, / . _ -)"
+        ));
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(format!("guest mount path must not contain '..': {path:?}"));
+    }
+    Ok(())
+}
+
 /// Shell command that creates the target user if it doesn't exist.
 /// Runs as root in the init script, before `runuser` drops privileges.
 /// Tries useradd (shadow-utils), Debian adduser, then Alpine/BusyBox
@@ -767,6 +808,47 @@ mod tests {
     fn validate_username_rejects_too_long() {
         let long = "a".repeat(33);
         assert!(validate_username(&long).is_err());
+    }
+
+    #[test]
+    fn validate_guest_path_accepts_normal_mountpoints() {
+        assert!(validate_guest_path("/workspace").is_ok());
+        assert!(validate_guest_path("/home/dev/.claude").is_ok());
+        assert!(validate_guest_path("/a/b-c_d.e2").is_ok());
+        assert!(validate_guest_path("/").is_ok());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_empty_or_relative() {
+        assert!(validate_guest_path("").is_err());
+        assert!(validate_guest_path("workspace").is_err());
+        assert!(validate_guest_path("./workspace").is_err());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_shell_metacharacters() {
+        // These flow into the guest's root boot shell; none may pass.
+        assert!(validate_guest_path("/work space").is_err());
+        assert!(validate_guest_path("/x; rm -rf /").is_err());
+        assert!(validate_guest_path("/x$(whoami)").is_err());
+        assert!(validate_guest_path("/x`id`").is_err());
+        assert!(validate_guest_path("/a|b").is_err());
+        assert!(validate_guest_path("/a\nb").is_err());
+        assert!(validate_guest_path("/a&b").is_err());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_parent_traversal() {
+        // Prevents the mountpoint create_dir_all from escaping the rootfs.
+        assert!(validate_guest_path("/..").is_err());
+        assert!(validate_guest_path("/a/../etc").is_err());
+        assert!(validate_guest_path("/../../etc/cron.d").is_err());
+    }
+
+    #[test]
+    fn validate_guest_path_rejects_too_long() {
+        let long = format!("/{}", "a".repeat(256));
+        assert!(validate_guest_path(&long).is_err());
     }
 
     #[test]
