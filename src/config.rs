@@ -202,25 +202,58 @@ fn read_claude_settings(path: &Path) -> Option<Vec<String>> {
     )
 }
 
-/// Search for a config file. Returns the path and parsed config,
-/// or None if no config file exists.
-pub fn find_and_load() -> Option<(PathBuf, Config)> {
-    let candidates = config_paths();
-    for path in candidates {
-        if path.is_file() {
-            match load(&path) {
-                Ok(config) => {
-                    if !config.secrets.is_empty() {
-                        warn_if_world_readable(&path);
-                    }
-                    return Some((path, config));
-                }
-                Err(e) => {
-                    eprintln!("error: failed to parse {}: {e}", path.display());
-                    std::process::exit(1);
-                }
-            }
+/// Where a discovered config came from.
+///
+/// Project configs (a cwd `redan.toml`) are trust-gated; user configs
+/// (`~/.config/redan/config.toml`) are implicitly trusted, since you placed
+/// them in your own home directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    Project,
+    User,
+}
+
+/// A config file found on disk.
+///
+/// Read once, so the raw bytes are available for the trust hash.
+pub struct DiscoveredConfig {
+    pub path: PathBuf,
+    pub content: String,
+    pub config: Config,
+    pub source: ConfigSource,
+}
+
+/// Find and read the first existing config file.
+///
+/// Looks for a cwd `redan.toml`, then `~/.config/redan/config.toml`, reading it
+/// once so the raw content is available alongside the parsed config. Exits on a
+/// parse error; returns `None` if no config file exists.
+///
+/// This is raw discovery: a project config is **not** trust-checked here.
+/// Callers that act on a cwd config must go through the trust gate
+/// (`cmd::trust::load_config`) rather than calling this directly.
+pub fn discover() -> Option<DiscoveredConfig> {
+    for (path, source) in config_candidates() {
+        if !path.is_file() {
+            continue;
         }
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        let config: Config = toml::from_str(&content).unwrap_or_else(|e| {
+            eprintln!("error: failed to parse {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        if !config.secrets.is_empty() {
+            warn_if_world_readable(&path);
+        }
+        return Some(DiscoveredConfig {
+            path,
+            content,
+            config,
+            source,
+        });
     }
     None
 }
@@ -245,22 +278,16 @@ fn warn_if_world_readable(path: &Path) {
 #[cfg(not(unix))]
 fn warn_if_world_readable(_path: &Path) {}
 
-fn config_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("redan.toml")];
+fn config_candidates() -> Vec<(PathBuf, ConfigSource)> {
+    let mut paths = vec![(PathBuf::from("redan.toml"), ConfigSource::Project)];
     if let Some(config_dir) = dirs_path() {
-        paths.push(config_dir.join("config.toml"));
+        paths.push((config_dir.join("config.toml"), ConfigSource::User));
     }
     paths
 }
 
 fn dirs_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| Path::new(&home).join(".config/redan"))
-}
-
-fn load(path: &Path) -> Result<Config, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    toml::from_str(&content).map_err(|e| format!("{e}"))
 }
 
 #[cfg(test)]
