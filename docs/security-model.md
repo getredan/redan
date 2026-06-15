@@ -152,3 +152,64 @@ Redan rejects requests where the Host header does not match the TLS
 SNI hostname (HTTP 421 Misdirected Request). This blocks domain
 fronting in most cases. Residual risk: if the allowed host itself
 routes internally based on other headers or path components.
+
+## Configuration trust
+
+A `redan.toml` in the working directory is not like the guest: redan's host
+process reads it, before the VM boots, with your own authority. It can read host
+environment variables and Vault (`env://` / `vault://` secrets), mount host
+paths into the guest, set a host `rootfs`, forward host-local ports, and write
+host log files. So it is a second trust boundary. A hostile `redan.toml` in a
+repo you cloned could exfiltrate your credentials or expose host files, none of
+which the VM sandbox would stop, because the config runs before the sandbox.
+
+Redan gates this. A config that stays within a safe subset (`image`, `command`,
+guest `env`, `[network] allow`, and a project-workspace mount) needs no trust,
+since none of it touches host authority. A config that reaches for any of the
+above must be trusted first:
+
+- Interactively, redan prints exactly what the config would be allowed to do and
+  asks before acting on it.
+- Out of band, `redan trust` records the config (and `redan untrust` removes it).
+- Without a terminal and without prior trust (CI, detached runs), redan does not
+  use the config and tells you to run `redan trust`. It is never auto-trusted.
+
+Trust is keyed by a SHA-256 of the file's contents, so editing the file (for
+example, a compromised agent rewriting the mounted `redan.toml`) invalidates
+trust until you review and trust it again. The safe subset is enforced by
+exhaustively classifying every config field, so a field added in a future
+release cannot silently load without trust.
+
+### What configuration trust does NOT protect against
+
+Trust is a machine-local consent record, not a cryptographic signature. The
+store (`~/.local/state/redan/trust.json`, mode 0600) is protected only by
+filesystem permissions. It defends against two things: the sandboxed guest
+agent, which can edit the mounted `redan.toml` but cannot reach the host-side
+store (and any edit changes the content hash, so trust drops); and accidentally
+acting on a config you never reviewed.
+
+It does **not** defend against a process already running as your user on the
+host. That process can rewrite the store, re-trust a malicious file, or read
+your secrets and `~/.ssh` directly without going near redan; it has won by other
+means, and no trust record would stop it. This is the same posture as direnv,
+mise, and git's `safe.directory`. Signing the config would defend a
+*legitimately signed* file against tampering, but redan's actual risk is a
+config you have not reviewed, which a signature you happen to trust does not
+address.
+
+#### Staged credentials in the guest
+
+When redan stages an agent's credential files (Claude's `.credentials.json`,
+Pi's `auth.json`) into the guest rootfs, those are real secrets written to the
+guest filesystem as plaintext. This is the one exception to "secrets never touch
+the guest": a deliberate fallback for agents that need their own credential
+files. The network-injected path (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`)
+keeps the secret host-side and is preferred.
+
+#### Literal secrets on disk in detached mode
+
+A detached session (`--detach`) serializes its resolved config to
+`daemon_config.json` (mode 0600, in a 0700 directory) until the daemon reads and
+unlinks it. A literal `--secret VALUE:host` therefore touches disk briefly;
+`env://` and `vault://` references do not, since only the reference is written.
