@@ -917,9 +917,10 @@ fn run_command(args: RunArgs) {
 
     // The agent profile is a set of defaults; a project redan.toml layers on
     // top (overriding on conflict), then CLI flags override both in `launch`.
-    // Precedence: agent defaults < redan.toml < CLI. With no redan.toml the
-    // merge is a no-op.
-    let config = match config::find_and_load() {
+    // Precedence: agent defaults < redan.toml < CLI. Loading goes through the
+    // trust gate, so a redan.toml that reaches host authority must be trusted
+    // or the gate stops here. With no redan.toml the merge is a no-op.
+    let config = match cmd::trust::load_config() {
         Some((path, project)) => {
             eprintln!("config: {}", path.display());
             config::overlay(auto.config, project)
