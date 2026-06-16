@@ -21,4 +21,5 @@ pub mod session;
 pub mod templates;
 pub mod terminal;
 pub mod tls;
+pub mod trust;
 pub mod vm;

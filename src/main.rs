@@ -281,6 +281,23 @@ enum Cli {
         #[arg(long)]
         claude: bool,
     },
+
+    /// Review and trust a redan.toml so redan will act on it
+    ///
+    /// A working-directory redan.toml that reads host env vars or Vault, mounts
+    /// host paths, sets a rootfs, forwards host ports, or writes host logs must
+    /// be trusted first. Trust is a machine-local record keyed by the file's
+    /// contents, so editing the file requires trusting it again.
+    Trust {
+        /// Path to the config (default: ./redan.toml)
+        path: Option<String>,
+    },
+
+    /// Remove a redan.toml from the trust store
+    Untrust {
+        /// Path to the config (default: ./redan.toml)
+        path: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -486,6 +503,8 @@ fn main() {
         },
         Cli::Logs { session, follow } => logs(session.as_deref(), follow),
         Cli::Init { claude } => cmd::init::run(claude),
+        Cli::Trust { path } => cmd::trust::trust_cmd(path.as_deref()),
+        Cli::Untrust { path } => cmd::trust::untrust_cmd(path.as_deref()),
         Cli::Sessions { action } => match action {
             None => {
                 let sessions = session::list_sessions();
@@ -602,7 +621,7 @@ struct ExecArgs {
 }
 
 fn exec_command(args: ExecArgs) {
-    let config_file = config::find_and_load();
+    let config_file = cmd::trust::load_config();
     if let Some((ref path, _)) = config_file {
         eprintln!("config: {}", path.display());
     }
@@ -898,9 +917,10 @@ fn run_command(args: RunArgs) {
 
     // The agent profile is a set of defaults; a project redan.toml layers on
     // top (overriding on conflict), then CLI flags override both in `launch`.
-    // Precedence: agent defaults < redan.toml < CLI. With no redan.toml the
-    // merge is a no-op.
-    let config = match config::find_and_load() {
+    // Precedence: agent defaults < redan.toml < CLI. Loading goes through the
+    // trust gate, so a redan.toml that reaches host authority must be trusted
+    // or the gate stops here. With no redan.toml the merge is a no-op.
+    let config = match cmd::trust::load_config() {
         Some((path, project)) => {
             eprintln!("config: {}", path.display());
             config::overlay(auto.config, project)
