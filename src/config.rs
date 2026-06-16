@@ -138,6 +138,10 @@ pub fn overlay(base: Config, top: Config) -> Config {
     env.extend(top.env);
 
     Config {
+        // Scalars: `top` wins when set, else `base` is kept. This deliberately
+        // includes `image` and `command`: for `redan run`, the agent profile is
+        // only a default (`base`), so a project `redan.toml` (`top`) may override
+        // even those. Precedence stays agent defaults < redan.toml < CLI.
         image: top.image.or(base.image),
         rootfs: top.rootfs.or(base.rootfs),
         command: top.command.or(base.command),
