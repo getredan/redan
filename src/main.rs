@@ -894,12 +894,25 @@ fn run_command(args: RunArgs) {
     }
 
     let run_as = auto.run_as.map(Into::into);
+    let stage_files = auto.stage_files;
+
+    // The agent profile is a set of defaults; a project redan.toml layers on
+    // top (overriding on conflict), then CLI flags override both in `launch`.
+    // Precedence: agent defaults < redan.toml < CLI. With no redan.toml the
+    // merge is a no-op.
+    let config = match config::find_and_load() {
+        Some((path, project)) => {
+            eprintln!("config: {}", path.display());
+            config::overlay(auto.config, project)
+        }
+        None => auto.config,
+    };
 
     // Append any post-`--` args to the agent command (e.g. an initial prompt).
     let command = if args.extra.is_empty() {
         None
     } else {
-        let base = auto.config.command.clone().unwrap_or_default();
+        let base = config.command.clone().unwrap_or_default();
         let extra = args
             .extra
             .iter()
@@ -910,9 +923,9 @@ fn run_command(args: RunArgs) {
     };
 
     launch(
-        &auto.config,
+        &config,
         run_as,
-        &auto.stage_files,
+        &stage_files,
         ExecArgs {
             image_name: None, // the agent's Config carries the image
             rootfs: None,
