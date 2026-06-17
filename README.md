@@ -10,28 +10,20 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-blue.svg" alt="License: BSD-3-Clause"></a>
 </p>
 
-## Why redan?
+## What is redan?
 
-AI coding agents have your shell, your filesystem, your API keys, and
-full network access. That's fine until:
+redan runs an AI coding agent inside a [libkrun] microVM that boots in
+under a second. The agent gets a real Linux dev environment with your
+project mounted in, walled off from the rest of your machine:
 
-- A prompt injection hidden in a dependency's README or issue comment
-  tells the agent to exfiltrate your API keys
-- The agent modifies `~/.ssh/authorized_keys`, `~/.gitconfig`, or
-  installs packages on your host
-- Malicious instructions in code the agent reads make it open
-  connections to hosts you never approved
-
-These aren't hypothetical. Every file the agent reads is a potential
-injection vector, and LLM prompt injection is an open problem with no
-general solution.
-
-Redan puts the agent in a [libkrun] microVM that boots in under a second.
-The agent gets a real Linux dev environment with your project mounted in,
-but it's isolated from your host: own filesystem, own network, only the
-hosts you allow. Your API keys never enter the VM. Redan injects them at
-the network layer, only for the hosts you permit. Even if the agent is
-fully compromised, it has no secret to steal and nowhere to send it.
+- **Its own filesystem.** It sees the project you mount, not your home
+  directory, SSH keys, or dotfiles.
+- **A network allowlist.** Default-deny outbound; it reaches only the hosts
+  you permit, over HTTPS, with no direct-IP or DNS escape.
+- **Secrets it can't read.** API keys are injected at the network layer,
+  only for the hosts you allow. The agent sees a placeholder, never the
+  real value, so a compromised agent has nothing to steal and nowhere to
+  send it.
 
 > *redan (/ɹɪˈdan/): a V-shaped fieldwork forming a salient angle toward
 > the enemy.*
@@ -98,9 +90,11 @@ redan run claude -- "fix the failing test in api/users.py"
 ```
 
 Git remote hosts are added to the network allowlist automatically so
-git push/pull works out of the box. For OAuth auth (Claude Max/Team/
-Enterprise), redan detects your `~/.claude` credentials and stages them
-into the VM instead of reading an API key.
+git push/pull works out of the box. No API key? For Claude subscription
+auth, set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and redan
+injects it like any other secret. It can also stage your `~/.claude`
+credentials into the VM, though on Linux those rotate and go stale, so the
+token is the reliable choice for unattended runs.
 
 `redan run` is the opinionated path: it knows each agent's image,
 command, auth, and network policy. For full manual control over the
