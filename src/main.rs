@@ -905,6 +905,12 @@ fn resolve_run_target(agent: Option<&str>) -> redan::auto_detect::AutoDetected {
 /// `redan run <agent>`: launch a named agent profile (or auto-detect when
 /// no agent is given), then funnel into the shared `launch` path.
 fn run_command(args: RunArgs) {
+    // Trust-gate the project redan.toml up front, before any agent setup,
+    // messages, or image build, so an untrusted config stops here cleanly
+    // instead of after a wall of setup output. load_config exits the process
+    // if the config needs trust it doesn't have.
+    let project_config = cmd::trust::load_config();
+
     let auto = resolve_run_target(args.agent.as_deref());
 
     build_image_if_needed(&auto);
@@ -917,10 +923,9 @@ fn run_command(args: RunArgs) {
 
     // The agent profile is a set of defaults; a project redan.toml layers on
     // top (overriding on conflict), then CLI flags override both in `launch`.
-    // Precedence: agent defaults < redan.toml < CLI. Loading goes through the
-    // trust gate, so a redan.toml that reaches host authority must be trusted
-    // or the gate stops here. With no redan.toml the merge is a no-op.
-    let config = match cmd::trust::load_config() {
+    // Precedence: agent defaults < redan.toml < CLI. With no redan.toml the
+    // merge is a no-op.
+    let config = match project_config {
         Some((path, project)) => {
             eprintln!("config: {}", path.display());
             config::overlay(auto.config, project)
