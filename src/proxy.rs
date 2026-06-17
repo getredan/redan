@@ -167,6 +167,10 @@ const MAX_CONNECTIONS: usize = 128;
 type AuditLog = Option<Arc<Mutex<BufWriter<std::fs::File>>>>;
 
 /// Write a JSON-lines audit event. Logs a warning on write failure.
+///
+/// Flushes after each event so the log is tailable in real time (`redan
+/// logs`) and durable if the VM dies mid-session. Events are per-connection,
+/// not per-packet, so the flush cost is negligible.
 fn audit(log: &AuditLog, event: &str, fields: &[(&str, &str)]) {
     let Some(log) = log else { return };
     let ts = time::OffsetDateTime::now_utc()
@@ -178,11 +182,13 @@ fn audit(log: &AuditLog, event: &str, fields: &[(&str, &str)]) {
     for (k, v) in fields {
         map.insert((*k).into(), serde_json::Value::String((*v).into()));
     }
-    if let Ok(mut w) = log.lock()
-        && (serde_json::to_writer(&mut *w, &serde_json::Value::Object(map)).is_err()
-            || writeln!(w).is_err())
-    {
-        log::warn!("failed to write audit event: {event}");
+    if let Ok(mut w) = log.lock() {
+        let wrote = serde_json::to_writer(&mut *w, &serde_json::Value::Object(map)).is_ok()
+            && writeln!(w).is_ok()
+            && w.flush().is_ok();
+        if !wrote {
+            log::warn!("failed to write audit event: {event}");
+        }
     }
 }
 
@@ -1623,6 +1629,31 @@ fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
 )]
 mod tests {
     use super::*;
+
+    // --- audit ---
+
+    #[test]
+    fn audit_flushes_each_event() {
+        use std::io::BufWriter;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path())
+            .unwrap();
+        let log: AuditLog = Some(Arc::new(Mutex::new(BufWriter::new(file))));
+
+        audit(&log, "connect", &[("host", "example.com")]);
+
+        // The writer is still alive (never dropped or flushed here), so the
+        // event reaches disk only if audit() flushes after each write.
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(
+            contents.contains(r#""event":"connect""#) && contents.contains("example.com"),
+            "audit event must be flushed to disk immediately, got: {contents:?}"
+        );
+    }
 
     // --- HostMap ---
 
