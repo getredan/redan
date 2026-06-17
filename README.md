@@ -264,6 +264,39 @@ Uses virtio-fs for host directory sharing. The guest has read-write
 access by default. Append `:ro` for read-only. Git is your safety net
 for recovering from unwanted changes to mounted directories.
 
+## Config trust
+
+A `redan.toml` in your working directory is read by redan on the *host*,
+before the VM boots, with your privileges. So a `redan.toml` from a repo you
+cloned could read your environment, mount your home directory, or write host
+files, none of which the sandbox would catch, because it runs before the
+sandbox starts. redan trust-gates it.
+
+A config that only sets safe things (`image`, `command`, guest `env`,
+`[network] allow`, a literal secret, or a mount inside the project) loads with
+no prompt. A config that reaches for host authority has to be trusted first:
+
+- reading host env vars or Vault (`env://` / `vault://` secrets)
+- mounting a path outside the project, or setting `rootfs`
+- forwarding a host-local port, or writing a host `audit_log` / `log_file`
+
+When redan hits one of those and the config isn't trusted, it prints exactly
+what the config would be allowed to do and, in an interactive session, asks
+before continuing. Or trust it ahead of time:
+
+```bash
+redan trust              # review ./redan.toml, then trust it
+redan trust path/to/redan.toml
+redan untrust            # revoke
+```
+
+Trust is keyed by a hash of the file's contents (in
+`~/.local/state/redan/trust.json`), so editing the config requires trusting it
+again. It's a local consent record, not a signature: it guards against an
+unreviewed config and against the sandboxed agent rewriting the mounted file,
+not against someone who already has your user account. See
+[docs/security-model.md](docs/security-model.md).
+
 ## Image management
 
 ```bash
