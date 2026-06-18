@@ -166,6 +166,16 @@ const MAX_CONNECTIONS: usize = 128;
 /// Shared audit log writer. None = no audit logging.
 type AuditLog = Option<Arc<Mutex<BufWriter<std::fs::File>>>>;
 
+/// OWASP-style severity for an audit event. Denied access and anomalies are
+/// warnings; normal activity is info. Kept in one place so the classification
+/// stays consistent across all events.
+fn event_severity(event: &str) -> &'static str {
+    match event {
+        "reject" | "warn" => "warning",
+        _ => "info",
+    }
+}
+
 /// Write a JSON-lines audit event. Logs a warning on write failure.
 ///
 /// Flushes after each event so the log is tailable in real time (`redan
@@ -179,6 +189,10 @@ fn audit(log: &AuditLog, event: &str, fields: &[(&str, &str)]) {
     let mut map = serde_json::Map::new();
     map.insert("ts".into(), serde_json::Value::String(ts));
     map.insert("event".into(), serde_json::Value::String(event.into()));
+    map.insert(
+        "severity".into(),
+        serde_json::Value::String(event_severity(event).into()),
+    );
     for (k, v) in fields {
         map.insert((*k).into(), serde_json::Value::String((*v).into()));
     }
@@ -1652,6 +1666,42 @@ mod tests {
         assert!(
             contents.contains(r#""event":"connect""#) && contents.contains("example.com"),
             "audit event must be flushed to disk immediately, got: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn audit_event_carries_severity() {
+        use std::io::BufWriter;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(tmp.path())
+            .unwrap();
+        let log: AuditLog = Some(Arc::new(Mutex::new(BufWriter::new(file))));
+
+        // OWASP: each entry carries a severity. Denied access is a warning,
+        // normal activity is info.
+        audit(
+            &log,
+            "reject",
+            &[("host", "evil.com"), ("reason", "not_allowed")],
+        );
+        audit(&log, "connect", &[("host", "api.example.com")]);
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(
+            lines[0].contains(r#""event":"reject""#)
+                && lines[0].contains(r#""severity":"warning""#),
+            "reject must be severity=warning, got: {:?}",
+            lines.first()
+        );
+        assert!(
+            lines[1].contains(r#""event":"connect""#) && lines[1].contains(r#""severity":"info""#),
+            "connect must be severity=info, got: {:?}",
+            lines.get(1)
         );
     }
 
