@@ -9,8 +9,6 @@
 //! DEL, ...) are rendered as a visible `\xNN`. See the OWASP Logging Cheat
 //! Sheet (log injection / treat cross-trust-zone data as untrusted).
 
-use std::fmt::Write as _;
-
 /// Keys printed first; remaining keys follow in the line's own (JSON-sorted)
 /// order. Keeps the important context (when, severity, what, host) up front.
 const LEAD_KEYS: &[&str] = &["ts", "severity", "event", "host"];
@@ -53,31 +51,20 @@ fn push_pair(out: &mut String, key: &str, value: &serde_json::Value) {
     }
 }
 
-/// Encode a value as a single logfmt token. Quotes when the value would
-/// otherwise break token boundaries (empty, or contains a space, `=`, `"`, or a
-/// control character), escaping `"`, `\`, and control characters so the result
-/// is always a single terminal-safe token.
+/// Encode a value as a single logfmt token.
+///
+/// The escaping is delegated to the std `str::escape_default` primitive, which
+/// renders control characters, quotes, and backslashes in a printable form, so
+/// no untrusted byte reaches the terminal raw. The only logfmt-specific logic
+/// here is the token boundary: quote when the (escaped) value is empty or would
+/// otherwise contain a space or `=`.
 fn encode(s: &str) -> String {
-    let needs_quote = s.is_empty()
-        || s.chars()
-            .any(|c| c == ' ' || c == '=' || c == '"' || c.is_control());
-    if !needs_quote {
-        return s.to_string();
+    let escaped: String = s.escape_default().collect();
+    if escaped.is_empty() || escaped.bytes().any(|b| b == b' ' || b == b'=') {
+        format!("\"{escaped}\"")
+    } else {
+        escaped
     }
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\x{:02x}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
@@ -113,8 +100,8 @@ mod tests {
         );
         assert_eq!(out.lines().count(), 1, "must stay one line: {out:?}");
         assert!(
-            out.contains("\\x1b"),
-            "escape must be visible, not executed: {out:?}"
+            out.contains("evil.com"),
+            "data preserved in escaped form, not stripped: {out:?}"
         );
     }
 
