@@ -116,6 +116,17 @@ mod tests {
     }
 
     #[test]
+    fn escapes_embedded_double_quotes() {
+        // A value with a quote and '=' must not break out of its quoted token
+        // to forge a new field. escape_default escapes the quote to \", so the
+        // host stays one token.
+        let line = r#"{"event":"connect","host":"a\" b=c","severity":"info","ts":"t"}"#;
+        let out = render(line);
+        assert!(out.contains(r#"host="a\" b=c""#), "{out:?}");
+        assert_eq!(out.lines().count(), 1, "{out:?}");
+    }
+
+    #[test]
     fn corrupt_line_becomes_safe_raw_field() {
         let out = render("this is not json \u{1b}[2J");
         assert!(out.starts_with("raw="), "{out}");
