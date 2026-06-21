@@ -43,7 +43,9 @@ fn push_pair(out: &mut String, key: &str, value: &serde_json::Value) {
     if !out.is_empty() {
         out.push(' ');
     }
-    out.push_str(key);
+    // Keys come from redan today, but the log file is untrusted input on read:
+    // encode them too so a tampered line can't forge output via a crafted key.
+    out.push_str(&encode(key));
     out.push('=');
     match value {
         serde_json::Value::String(s) => out.push_str(&encode(s)),
@@ -114,6 +116,16 @@ mod tests {
             out.contains("\\x1b"),
             "escape must be visible, not executed: {out:?}"
         );
+    }
+
+    #[test]
+    fn neutralizes_control_chars_in_tampered_keys() {
+        // A tampered-but-valid JSON line could carry a control char in a key;
+        // the rendered line must still be a single, control-free line.
+        let line = "{\"ev\\nil\":\"x\",\"event\":\"connect\",\"severity\":\"info\",\"ts\":\"t\"}";
+        let out = render(line);
+        assert!(!out.chars().any(char::is_control), "{out:?}");
+        assert_eq!(out.lines().count(), 1, "must stay one line: {out:?}");
     }
 
     #[test]
