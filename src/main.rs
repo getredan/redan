@@ -258,13 +258,16 @@ enum Cli {
         action: Option<SessionAction>,
     },
 
-    /// View session logs
+    /// View a session's audit event stream (logfmt; `--json` for raw events)
     Logs {
-        /// Session ID (default: most recent)
+        /// Session ID or name (default: most recent)
         session: Option<String>,
-        /// Follow (tail -f)
+        /// Follow the log live as new events arrive
         #[arg(short, long)]
         follow: bool,
+        /// Print raw JSON events instead of logfmt (for piping to `jq`)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Internal: daemon process for detached sessions. Not user-facing.
@@ -501,7 +504,11 @@ fn main() {
                 }
             }
         },
-        Cli::Logs { session, follow } => logs(session.as_deref(), follow),
+        Cli::Logs {
+            session,
+            follow,
+            json,
+        } => cmd::logs::run(session.as_deref(), follow, json),
         Cli::Init { claude } => cmd::init::run(claude),
         Cli::Trust { path } => cmd::trust::trust_cmd(path.as_deref()),
         Cli::Untrust { path } => cmd::trust::untrust_cmd(path.as_deref()),
@@ -1463,46 +1470,6 @@ fn session_status_label(s: &session::SessionMeta) -> &'static str {
         session::SessionStatus::Running => "exited",
         session::SessionStatus::Finished => "finished",
         session::SessionStatus::Failed => "failed",
-    }
-}
-
-fn logs(session_id: Option<&str>, follow: bool) {
-    let id = session_id.map_or_else(
-        || {
-            let sessions = session::list_sessions();
-            sessions.first().map_or_else(
-                || {
-                    eprintln!("no sessions found");
-                    std::process::exit(1);
-                },
-                |s| s.id.clone(),
-            )
-        },
-        String::from,
-    );
-
-    let log_path = session::session_dir(&id).join("redan.log");
-    if !log_path.exists() {
-        eprintln!("no logs for session {id} ({})", log_path.display());
-        std::process::exit(1);
-    }
-
-    if follow {
-        let status = std::process::Command::new("tail")
-            .args(["-f", log_path.to_str().unwrap_or("")])
-            .status();
-        if let Err(e) = status {
-            eprintln!("cannot run tail: {e}");
-            std::process::exit(1);
-        }
-    } else {
-        match std::fs::read_to_string(&log_path) {
-            Ok(content) => print!("{content}"),
-            Err(e) => {
-                eprintln!("cannot read {}: {e}", log_path.display());
-                std::process::exit(1);
-            }
-        }
     }
 }
 
