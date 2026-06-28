@@ -24,7 +24,7 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 | `mise run check` | Full gate: format, lint, test |
 | `mise run format` | `cargo fmt` |
 | `mise run format-check` | CI formatting check |
-| `mise run lint` | `cargo clippy -- -D warnings` |
+| `mise run lint` | Clippy with `-D warnings`, pedantic, nursery, and strict panic/unwrap lints |
 | `mise run test` | Unit tests (`cargo test --lib`) |
 | `mise run test-integration` | VM tests (`--ignored`, needs KVM) |
 | `mise run bench` | Boot-to-proxy benchmark (needs KVM + image) |
@@ -41,7 +41,7 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 `krun_start_enter` blocks and ignores Ctrl-C. Always run via tmux:
 
 ```bash
-SOCKET="/tmp/claude-tmux-sockets/claude.sock"
+SOCKET="/tmp/redan-tmux-sockets/redan.sock"
 tmux -S "$SOCKET" send-keys -t session:0.0 "cargo run -- exec ..." Enter
 pkill -9 redan  # to stop
 ```
@@ -59,7 +59,7 @@ Security-critical project. Tests are load-bearing.
 
 ## Architecture
 
-```
+```text
 libkrun VM (guest)
   |  virtio-net (unix socket, length-prefixed Ethernet frames)
   v
