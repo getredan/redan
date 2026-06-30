@@ -39,9 +39,9 @@ mise run check          # format + lint + all tests
 `krun_start_enter` blocks and ignores Ctrl-C. Always run via tmux:
 
 ```bash
-SOCKET="/tmp/claude-tmux-sockets/claude.sock"
+SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/redan-tmux.sock"
 tmux -S "$SOCKET" send-keys -t session:0.0 "cargo run -- exec ..." Enter
-pkill -9 redan  # to stop
+pkill -9 redan  # SIGKILL required: krun_start_enter ignores SIGTERM
 ```
 
 ## Testing
@@ -58,7 +58,7 @@ Security-critical project. Tests are load-bearing.
 
 ## Architecture
 
-```
+```text
 libkrun VM (guest)
   |  virtio-net (unix socket, length-prefixed Ethernet frames)
   v

@@ -32,7 +32,7 @@ fn rootfs_path() -> &'static str {
 }
 
 fn has_kvm() -> bool {
-    Path::new("/dev/kvm").exists()
+    std::fs::File::open("/dev/kvm").is_ok()
 }
 
 fn has_rootfs() -> bool {
