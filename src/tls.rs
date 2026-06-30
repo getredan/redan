@@ -6,6 +6,7 @@ use std::time::Duration;
 /// Shared TLS client config with system root certificates.
 /// Built once, reused for all upstream connections.
 static UPSTREAM_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
+    crate::ensure_crypto_provider();
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = rustls::ClientConfig::builder()
