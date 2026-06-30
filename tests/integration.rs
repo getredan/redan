@@ -9,7 +9,6 @@
 /// These require KVM (`/dev/kvm`) and an Alpine rootfs at `/tmp/redan-rootfs`.
 /// Run with: `cargo test --test integration`
 use std::path::Path;
-use std::sync::Once;
 use std::time::Duration;
 
 use redan::ca::MitmCa;
@@ -17,14 +16,10 @@ use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::vm;
 
-static CRYPTO_INIT: Once = Once::new();
-
 fn init_crypto() {
-    CRYPTO_INIT.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("failed to install rustls crypto provider");
-    });
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 }
 
 fn rootfs_path() -> &'static str {

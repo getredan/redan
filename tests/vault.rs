@@ -11,37 +11,37 @@
 
 use redan::provider::{SecretProvider, Vault, resolve_secret_value};
 
+fn vault() -> Vault {
+    Vault::from_env().expect("Vault env not configured")
+}
+
 #[test]
 fn vault_fetch_real_secret() {
-    let vault = Vault::from_env().expect("Vault env not configured");
-    let value = vault.resolve("redan/test#github_token").unwrap();
+    let value = vault().resolve("redan/test#github_token").unwrap();
     assert_eq!(value, "ghp_test123");
 }
 
 #[test]
 fn vault_fetch_second_field() {
-    let vault = Vault::from_env().expect("Vault env not configured");
-    let value = vault.resolve("redan/test#npm_token").unwrap();
+    let value = vault().resolve("redan/test#npm_token").unwrap();
     assert_eq!(value, "npm_test456");
 }
 
 #[test]
 fn vault_missing_field_errors() {
-    let vault = Vault::from_env().expect("Vault env not configured");
-    let err = vault.resolve("redan/test#nonexistent").unwrap_err();
+    let err = vault().resolve("redan/test#nonexistent").unwrap_err();
     assert!(err.to_string().contains("not found"));
 }
 
 #[test]
 fn vault_missing_path_errors() {
-    let vault = Vault::from_env().expect("Vault env not configured");
-    let err = vault.resolve("nonexistent/path#field").unwrap_err();
+    let err = vault().resolve("nonexistent/path#field").unwrap_err();
     assert!(err.to_string().contains("vault request failed"));
 }
 
 #[test]
 fn vault_via_resolve_function() {
-    let value = resolve_secret_value("vault://redan/test#github_token")
-        .expect("Vault env not configured");
+    let value =
+        resolve_secret_value("vault://redan/test#github_token").expect("Vault env not configured");
     assert_eq!(value, "ghp_test123");
 }
