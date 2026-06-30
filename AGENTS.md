@@ -9,12 +9,12 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 ## Dev Setup
 
-Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), mise.
+Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), Docker, mise.
 
 ```bash
 mise trust
-mise run check          # format + lint + unit tests
-mise run test-integration  # needs KVM + /tmp/redan-rootfs
+mise run test-setup       # create test image + start Vault
+mise run check            # format + lint + all tests
 ```
 
 ## Tasks
@@ -25,8 +25,9 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 | `mise run format` | `cargo fmt` |
 | `mise run format-check` | CI formatting check |
 | `mise run lint` | Clippy with `-D warnings`, pedantic, nursery, and strict panic/unwrap lints |
-| `mise run test` | Unit tests (`cargo test --lib`) |
-| `mise run test-integration` | VM tests (`--ignored`, needs KVM) |
+| `mise run test` | All tests (requires KVM + test image + Vault) |
+| `mise run test-setup` | Create test image and start Vault dev server |
+| `mise run vault-up` | Start Vault dev server and seed test data |
 | `mise run bench` | Boot-to-proxy benchmark (needs KVM + image) |
 | `mise run build` | Release build |
 
@@ -41,9 +42,9 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 `krun_start_enter` blocks and ignores Ctrl-C. Always run via tmux:
 
 ```bash
-SOCKET="/tmp/redan-tmux-sockets/redan.sock"
+SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/redan-tmux.sock"
 tmux -S "$SOCKET" send-keys -t session:0.0 "cargo run -- exec ..." Enter
-pkill -9 redan  # to stop
+pkill -9 redan  # SIGKILL required: krun_start_enter ignores SIGTERM
 ```
 
 ## Testing
@@ -51,7 +52,8 @@ pkill -9 redan  # to stop
 Security-critical project. Tests are load-bearing.
 
 - Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs, templates
-- Integration tests boot real VMs, marked `#[ignore]`, need KVM
+- Integration tests boot real VMs (KVM + test image via `redan image create test`)
+- Vault tests require a running Vault (`mise run vault-up`)
 - Test names describe scenarios: `inject_skips_disallowed_host`
 - Deterministic: no sleeps, no network in unit tests
 - Never mock security boundaries
@@ -85,7 +87,7 @@ internet (only allowed hosts)
 | `ffi.rs` | libkrun FFI bindings |
 | `image.rs` | Image management: create, import, docker, dockerfile, devcontainer, compose |
 | `net.rs` | smoltcp Device for virtio-net socket |
-| `provider.rs` | Secret providers (literal, Vault KV v2) |
+| `provider.rs` | Secret providers (literal, env, Vault KV v2) |
 | `proxy.rs` | smoltcp event loop, connection state machine, host allowlist |
 | `secret.rs` | Injection and scrubbing |
 | `session.rs` | Session lifecycle, metadata, listing |

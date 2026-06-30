@@ -17,8 +17,7 @@ use redan::secret::SecretBinding;
 use redan::vm;
 
 fn test_rootfs() -> String {
-    let path = redan::image::image_path("test")
-        .expect("invalid test image name");
+    let path = redan::image::image_path("test").expect("invalid test image name");
     assert!(
         path.join("bin").is_dir(),
         "test image not found: run `redan image create test` first"
