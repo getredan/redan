@@ -37,7 +37,12 @@ fn vault_missing_field_errors() {
 #[test]
 fn vault_missing_path_errors() {
     let err = vault().resolve("nonexistent/path#field").unwrap_err();
-    assert!(err.to_string().contains("vault request failed"));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("vault request failed"),
+        "unexpected error: {msg}"
+    );
+    assert!(msg.contains("404"), "expected 404 for missing path: {msg}");
 }
 
 #[test]

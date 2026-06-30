@@ -42,7 +42,7 @@ cargo test --test integration -- --test-threads=1
 [tasks.test-setup]
 description = "Create test image and start Vault"
 run = """
-cargo run -- image create test 2>/dev/null || true
+cargo run -- image list 2>/dev/null | grep -q '^test ' || cargo run -- image create test
 docker compose up -d vault
 ./scripts/seed-vault.sh
 """
@@ -88,4 +88,4 @@ cargo deny check
 """
 
 [tools]
-vault = "latest"
+vault = "1.19"

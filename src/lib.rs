@@ -10,9 +10,7 @@
 /// Library code that depends on a crypto provider (`MitmCa`, TLS config)
 /// calls this internally, so callers rarely need to invoke it directly.
 pub fn ensure_crypto_provider() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Check whether KVM is available and accessible.
