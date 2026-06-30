@@ -26,14 +26,10 @@ cargo clippy --all-targets --all-features -- \
 """
 
 [tasks.test]
-description = "Run unit tests"
-run = "cargo test --lib"
-
-[tasks.test-integration]
-description = "Run integration tests (requires KVM + /tmp/redan-rootfs)"
-# Serialized: Vm::boot forks, and forking from a threaded test harness
-# can deadlock the child on locks held by other test threads.
-run = "cargo test --test integration -- --ignored --test-threads=1"
+description = "Run all tests (requires KVM + rootfs + Vault)"
+# --test-threads=1: Vm::boot forks, and forking from a threaded test
+# harness can deadlock the child on locks held by other test threads.
+run = "cargo test -- --test-threads=1"
 
 [tasks.build]
 description = "Build release binary"
@@ -63,3 +59,6 @@ run = """
 cargo audit
 cargo deny check
 """
+
+[tools]
+vault = "latest"

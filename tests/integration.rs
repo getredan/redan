@@ -7,15 +7,25 @@
 /// Integration tests that boot real libkrun VMs.
 ///
 /// These require KVM (`/dev/kvm`) and an Alpine rootfs at `/tmp/redan-rootfs`.
-/// Run with: `cargo test --test integration -- --ignored`
-/// Or: `mise run test-integration`
+/// Run with: `cargo test --test integration`
 use std::path::Path;
+use std::sync::Once;
 use std::time::Duration;
 
 use redan::ca::MitmCa;
 use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::vm;
+
+static CRYPTO_INIT: Once = Once::new();
+
+fn init_crypto() {
+    CRYPTO_INIT.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("failed to install rustls crypto provider");
+    });
+}
 
 fn rootfs_path() -> &'static str {
     "/tmp/redan-rootfs"
@@ -32,16 +42,10 @@ fn has_rootfs() -> bool {
 /// Boot a VM, resolve DNS, make an HTTPS request through the MITM proxy,
 /// inject a secret placeholder, and verify the response is scrubbed.
 #[test]
-#[ignore]
 fn end_to_end_secret_injection() {
-    if !has_kvm() {
-        eprintln!("SKIP: no KVM");
-        return;
-    }
-    if !has_rootfs() {
-        eprintln!("SKIP: no rootfs");
-        return;
-    }
+    init_crypto();
+    assert!(has_kvm(), "KVM required: /dev/kvm not found");
+    assert!(has_rootfs(), "rootfs required: /tmp/redan-rootfs not found");
 
     let ca = MitmCa::generate();
     vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
@@ -100,16 +104,10 @@ fn end_to_end_secret_injection() {
 
 /// Boot a VM and verify DNS resolution works (all names -> gateway).
 #[test]
-#[ignore]
 fn synthetic_dns_resolution() {
-    if !has_kvm() {
-        eprintln!("SKIP: no KVM");
-        return;
-    }
-    if !has_rootfs() {
-        eprintln!("SKIP: no rootfs");
-        return;
-    }
+    init_crypto();
+    assert!(has_kvm(), "KVM required: /dev/kvm not found");
+    assert!(has_rootfs(), "rootfs required: /tmp/redan-rootfs not found");
 
     let ca = MitmCa::generate();
     vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");

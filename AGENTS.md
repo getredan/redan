@@ -9,12 +9,11 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 ## Dev Setup
 
-Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), mise.
+Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), Vault, mise.
 
 ```bash
 mise trust
-mise run check          # format + lint + unit tests
-mise run test-integration  # needs KVM + /tmp/redan-rootfs
+mise run check          # format + lint + all tests
 ```
 
 ## Tasks
@@ -25,8 +24,7 @@ mise run test-integration  # needs KVM + /tmp/redan-rootfs
 | `mise run format` | `cargo fmt` |
 | `mise run format-check` | CI formatting check |
 | `mise run lint` | `cargo clippy -- -D warnings` |
-| `mise run test` | Unit tests (`cargo test --lib`) |
-| `mise run test-integration` | VM tests (`--ignored`, needs KVM) |
+| `mise run test` | All tests (requires KVM + rootfs + Vault) |
 | `mise run bench` | Boot-to-proxy benchmark (needs KVM + image) |
 | `mise run build` | Release build |
 
@@ -51,7 +49,8 @@ pkill -9 redan  # to stop
 Security-critical project. Tests are load-bearing.
 
 - Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs, templates
-- Integration tests boot real VMs, marked `#[ignore]`, need KVM
+- Integration tests boot real VMs (KVM + `/tmp/redan-rootfs` required)
+- Vault tests require a running Vault with `redan/test` seeded
 - Test names describe scenarios: `inject_skips_disallowed_host`
 - Deterministic: no sleeps, no network in unit tests
 - Never mock security boundaries
