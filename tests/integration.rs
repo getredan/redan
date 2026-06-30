@@ -6,10 +6,9 @@
 )]
 /// Integration tests that boot real libkrun VMs.
 ///
-/// These require KVM (`/dev/kvm`) and an Alpine rootfs at `/tmp/redan-rootfs`.
-/// Run with: `cargo test --test integration -- --ignored`
-/// Or: `mise run test-integration`
-use std::path::Path;
+/// Require KVM (`/dev/kvm`) and a redan image named "test".
+/// Create it with: `redan image create test`
+/// Run with: `cargo test --test integration -- --test-threads=1`
 use std::time::Duration;
 
 use redan::ca::MitmCa;
@@ -17,27 +16,25 @@ use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::vm;
 
-fn rootfs_path() -> &'static str {
-    "/tmp/redan-rootfs"
-}
-
-fn has_rootfs() -> bool {
-    Path::new(rootfs_path()).join("bin/busybox").exists()
+fn test_rootfs() -> String {
+    let path = redan::image::image_path("test")
+        .expect("invalid test image name");
+    assert!(
+        path.join("bin").is_dir(),
+        "test image not found: run `redan image create test` first"
+    );
+    path.to_string_lossy().into_owned()
 }
 
 /// Boot a VM, resolve DNS, make an HTTPS request through the MITM proxy,
 /// inject a secret placeholder, and verify the response is scrubbed.
 #[test]
-#[ignore]
 fn end_to_end_secret_injection() {
     redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
-    if !has_rootfs() {
-        eprintln!("SKIP: no rootfs");
-        return;
-    }
+    let rootfs = test_rootfs();
 
     let ca = MitmCa::generate();
-    vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
+    vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
 
     let placeholder = "redan_ph_test_e2e_abcd1234";
     let real_value = "ghp_FAKE_E2E_TOKEN_99999";
@@ -60,7 +57,7 @@ fn end_to_end_secret_injection() {
     );
 
     let config = vm::VmConfig {
-        rootfs: rootfs_path().into(),
+        rootfs,
         vcpus: 1,
         ram_mib: 256,
         command,
@@ -77,8 +74,6 @@ fn end_to_end_secret_injection() {
     let vm_handle = vm::Vm::boot(config);
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
-    // Proxy runs until timeout. The guest output (DNS, HTTPS, JSON response)
-    // goes to the VM console. The proxy logs show injection + scrubbing.
     let _ = proxy::run(proxy::ProxyConfig {
         host_sock: net_sock,
         ca: std::sync::Arc::new(std::sync::Mutex::new(ca)),
@@ -93,16 +88,12 @@ fn end_to_end_secret_injection() {
 
 /// Boot a VM and verify DNS resolution works (all names -> gateway).
 #[test]
-#[ignore]
 fn synthetic_dns_resolution() {
     redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
-    if !has_rootfs() {
-        eprintln!("SKIP: no rootfs");
-        return;
-    }
+    let rootfs = test_rootfs();
 
     let ca = MitmCa::generate();
-    vm::install_ca_cert(Path::new(rootfs_path()), ca.ca_cert_pem()).expect("install CA cert");
+    vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
 
@@ -114,7 +105,7 @@ fn synthetic_dns_resolution() {
     );
 
     let config = vm::VmConfig {
-        rootfs: rootfs_path().into(),
+        rootfs,
         vcpus: 1,
         ram_mib: 256,
         command,

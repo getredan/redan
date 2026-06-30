@@ -26,14 +26,18 @@ cargo clippy --all-targets --all-features -- \
 """
 
 [tasks.test]
-description = "Run unit tests"
-run = "cargo test --lib"
+description = "Run all tests (requires KVM + test image + Vault)"
+# Vm::boot forks; forking from a threaded test harness can deadlock
+# the child on locks held by other test threads. Only integration
+# tests call Vm::boot, so only that binary is serialized.
+run = """
+cargo test --lib --test adversarial && \
+cargo test --test integration -- --test-threads=1
+"""
 
-[tasks.test-integration]
-description = "Run integration tests (requires KVM + /tmp/redan-rootfs)"
-# Serialized: Vm::boot forks, and forking from a threaded test harness
-# can deadlock the child on locks held by other test threads.
-run = "cargo test --test integration -- --ignored --test-threads=1"
+[tasks.test-setup]
+description = "Create the 'test' image for integration tests"
+run = "cargo run -- image create test"
 
 [tasks.build]
 description = "Build release binary"
