@@ -15,6 +15,15 @@ pub fn ensure_crypto_provider() {
         .ok();
 }
 
+/// Check whether KVM is available and accessible.
+///
+/// Returns `Ok(())` if `/dev/kvm` can be opened, or an error describing
+/// what went wrong (missing device vs. permission denied).
+pub fn check_kvm() -> std::io::Result<()> {
+    std::fs::File::open("/dev/kvm")?;
+    Ok(())
+}
+
 pub mod auto_detect;
 pub mod browser;
 pub mod ca;

@@ -21,10 +21,6 @@ fn rootfs_path() -> &'static str {
     "/tmp/redan-rootfs"
 }
 
-fn has_kvm() -> bool {
-    Path::new("/dev/kvm").exists()
-}
-
 fn has_rootfs() -> bool {
     Path::new(rootfs_path()).join("bin/busybox").exists()
 }
@@ -34,10 +30,7 @@ fn has_rootfs() -> bool {
 #[test]
 #[ignore]
 fn end_to_end_secret_injection() {
-    if !has_kvm() {
-        eprintln!("SKIP: no KVM");
-        return;
-    }
+    redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
     if !has_rootfs() {
         eprintln!("SKIP: no rootfs");
         return;
@@ -102,10 +95,7 @@ fn end_to_end_secret_injection() {
 #[test]
 #[ignore]
 fn synthetic_dns_resolution() {
-    if !has_kvm() {
-        eprintln!("SKIP: no KVM");
-        return;
-    }
+    redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
     if !has_rootfs() {
         eprintln!("SKIP: no rootfs");
         return;
