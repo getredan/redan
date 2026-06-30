@@ -41,6 +41,7 @@ fn vault_missing_path_errors() {
 
 #[test]
 fn vault_via_resolve_function() {
-    let value = resolve_secret_value("vault://redan/test#github_token").unwrap();
+    let value = resolve_secret_value("vault://redan/test#github_token")
+        .expect("Vault env not configured");
     assert_eq!(value, "ghp_test123");
 }
