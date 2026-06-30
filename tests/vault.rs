@@ -10,6 +10,7 @@
 //!   vault kv put secret/redan/test github_token=ghp_test123 npm_token=npm_test456
 
 use redan::provider::{SecretProvider, Vault, resolve_secret_value};
+use redan::secret::SecretBinding;
 
 fn vault() -> Vault {
     Vault::from_env().expect("Vault env not configured")
@@ -44,4 +45,12 @@ fn vault_via_resolve_function() {
     let value =
         resolve_secret_value("vault://redan/test#github_token").expect("Vault env not configured");
     assert_eq!(value, "ghp_test123");
+}
+
+#[test]
+fn vault_resolve_into_secret_binding() {
+    let value = resolve_secret_value("vault://redan/test#github_token").unwrap();
+    let binding = SecretBinding::new("TOKEN", value, vec!["api.github.com".into()]).unwrap();
+    assert_eq!(binding.real_value(), "ghp_test123");
+    assert_eq!(binding.allowed_hosts(), &["api.github.com"]);
 }

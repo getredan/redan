@@ -35,7 +35,7 @@ description = "Run all tests (requires KVM + test image + Vault)"
 # the child on locks held by other test threads. Only integration
 # tests call Vm::boot, so only that binary is serialized.
 run = """
-cargo test --lib --test adversarial --test vault && \
+cargo test --lib --bin redan --test adversarial --test vault && \
 cargo test --test integration -- --test-threads=1
 """
 

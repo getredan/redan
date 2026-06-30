@@ -695,15 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_secret_vault_scheme() {
-        let (name, binding) =
-            parse_secret("TOKEN=vault://redan/test#github_token:api.github.com").unwrap();
-        assert_eq!(name, "TOKEN");
-        assert_eq!(binding.real_value(), "ghp_test123");
-        assert_eq!(binding.allowed_hosts(), &["api.github.com"]);
-    }
-
-    #[test]
     fn parse_mount_with_guest_path() {
         let (host, guest, ro) = parse_mount("/home/chris/project:/workspace");
         assert_eq!(host, "/home/chris/project");
