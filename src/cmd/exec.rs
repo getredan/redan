@@ -695,7 +695,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires running Vault"]
     fn parse_secret_vault_scheme() {
         let (name, binding) =
             parse_secret("TOKEN=vault://redan/test#github_token:api.github.com").unwrap();

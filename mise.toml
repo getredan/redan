@@ -1,3 +1,7 @@
+[env]
+VAULT_ADDR = "http://127.0.0.1:8200"
+VAULT_TOKEN = "redan-dev-token"
+
 [tasks.check]
 description = "Fast local gate: format + lint + test"
 run = "mise run format && mise run lint && mise run test"
@@ -31,13 +35,28 @@ description = "Run all tests (requires KVM + test image + Vault)"
 # the child on locks held by other test threads. Only integration
 # tests call Vm::boot, so only that binary is serialized.
 run = """
-cargo test --lib --test adversarial && \
+cargo test --lib --test adversarial --test vault && \
 cargo test --test integration -- --test-threads=1
 """
 
 [tasks.test-setup]
-description = "Create the 'test' image for integration tests"
-run = "cargo run -- image create test"
+description = "Create test image and start Vault"
+run = """
+cargo run -- image create test 2>/dev/null || true
+docker compose up -d vault
+./scripts/seed-vault.sh
+"""
+
+[tasks.vault-up]
+description = "Start Vault dev server and seed test data"
+run = """
+docker compose up -d vault
+./scripts/seed-vault.sh
+"""
+
+[tasks.vault-down]
+description = "Stop Vault dev server"
+run = "docker compose down"
 
 [tasks.build]
 description = "Build release binary"
@@ -67,3 +86,6 @@ run = """
 cargo audit
 cargo deny check
 """
+
+[tools]
+vault = "latest"
