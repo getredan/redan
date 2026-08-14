@@ -20,27 +20,22 @@ use redan::vm;
 /// even without `--test-threads=1`.
 static VM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-/// Returns the rootfs path if KVM and the test image are both available.
-/// Skips (returns `None`) when run in an environment without them (e.g. CI).
-fn require_vm() -> Option<String> {
-    if redan::check_kvm().is_err() {
-        eprintln!("skipping: KVM not accessible");
-        return None;
-    }
+fn test_rootfs() -> String {
     let path = redan::image::image_path("test").expect("invalid test image name");
-    if !path.join("bin").is_dir() {
-        eprintln!("skipping: test image not found (run `redan image create test`)");
-        return None;
-    }
-    Some(path.to_string_lossy().into_owned())
+    assert!(
+        path.join("bin").is_dir(),
+        "test image not found: run `redan image create test` first"
+    );
+    path.to_string_lossy().into_owned()
 }
 
 /// Boot a VM, resolve DNS, make an HTTPS request through the MITM proxy,
 /// inject a secret placeholder, and verify the response is scrubbed.
 #[test]
 fn end_to_end_secret_injection() {
+    redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
     let _lock = VM_LOCK.lock().unwrap();
-    let Some(rootfs) = require_vm() else { return };
+    let rootfs = test_rootfs();
 
     let ca = MitmCa::generate();
     vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
@@ -98,8 +93,9 @@ fn end_to_end_secret_injection() {
 /// Boot a VM and verify DNS resolution works (all names -> gateway).
 #[test]
 fn synthetic_dns_resolution() {
+    redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
     let _lock = VM_LOCK.lock().unwrap();
-    let Some(rootfs) = require_vm() else { return };
+    let rootfs = test_rootfs();
 
     let ca = MitmCa::generate();
     vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
