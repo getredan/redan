@@ -8,19 +8,18 @@ pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
 
     // KVM
-    let kvm_path = Path::new("/dev/kvm");
-    if kvm_path.exists() {
-        if let Err(e) = std::fs::File::open(kvm_path) {
+    match redan::check_kvm() {
+        Ok(()) => println!("[ok]   kvm: /dev/kvm accessible"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("[err]  kvm: not found");
+            println!("       enable KVM in your kernel or BIOS settings");
+            ok = false;
+        }
+        Err(e) => {
             println!("[err]  kvm: exists but not accessible: {e}");
             println!("       add your user to the kvm group: sudo usermod -aG kvm $USER");
             ok = false;
-        } else {
-            println!("[ok]   kvm: /dev/kvm accessible");
         }
-    } else {
-        println!("[err]  kvm: not found");
-        println!("       enable KVM in your kernel or BIOS settings");
-        ok = false;
     }
 
     // Shared library search paths

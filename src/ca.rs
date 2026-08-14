@@ -28,6 +28,7 @@ impl MitmCa {
     #[must_use]
     #[allow(clippy::expect_used)] // CA key gen failure is unrecoverable
     pub fn generate() -> Self {
+        crate::ensure_crypto_provider();
         let mut params = CertificateParams::default();
         params
             .distinguished_name
@@ -191,9 +192,6 @@ mod tests {
 
     #[test]
     fn test_mitm_server_config() {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok(); // ignore if already installed
         let ca = Arc::new(Mutex::new(MitmCa::generate()));
         let resolver = Arc::new(MitmCertResolver { ca });
         let config = mitm_server_config(resolver);

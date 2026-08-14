@@ -349,11 +349,8 @@ enum ImageAction {
     },
 }
 
-#[allow(clippy::expect_used)] // Crypto provider init is unrecoverable
 fn main() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
+    redan::ensure_crypto_provider();
 
     let cli = Cli::parse();
 

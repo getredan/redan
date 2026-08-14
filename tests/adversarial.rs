@@ -17,8 +17,8 @@
 //!   adversarial inputs. No VM needed.
 //! - **Integration**: test properties requiring the smoltcp stack or
 //!   multiple components. No VM needed.
-//! - **VM black-box**: full chain tests requiring libkrun + KVM. Marked
-//!   `#[ignore]` for CI without KVM. Run with `cargo test -- --ignored`.
+//! - **VM black-box**: full chain tests requiring libkrun + KVM.
+//!   `#[ignore]` until implemented (see g01-g03).
 //!
 //! ## Security model under test
 //!
@@ -934,9 +934,8 @@ fn h06_scrub_does_not_catch_gzip_compressed_secret() {
 }
 
 //
-// These require libkrun + KVM. Run with: cargo test -- --ignored
-// Each test boots a VM and verifies security properties from the guest's
-// perspective.
+// These require libkrun + KVM. Each test boots a VM and verifies security
+// properties from the guest's perspective. Ignored until implemented.
 
 /// Guest env var contains placeholder, not real secret.
 ///

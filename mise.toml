@@ -1,3 +1,7 @@
+[env]
+VAULT_ADDR = "http://127.0.0.1:8200"
+VAULT_TOKEN = "redan-dev-token"
+
 [tasks.check]
 description = "Fast local gate: format + lint + test"
 run = "mise run format && mise run lint && mise run test"
@@ -26,14 +30,33 @@ cargo clippy --all-targets --all-features -- \
 """
 
 [tasks.test]
-description = "Run unit tests"
-run = "cargo test --lib"
+description = "Run all tests (requires KVM + test image + Vault)"
+# Vm::boot forks; forking from a threaded test harness can deadlock
+# the child on locks held by other test threads. Only integration
+# tests call Vm::boot, so only that binary is serialized.
+run = """
+cargo test --lib --bin redan --test adversarial --test vault && \
+cargo test --test integration -- --test-threads=1
+"""
 
-[tasks.test-integration]
-description = "Run integration tests (requires KVM + /tmp/redan-rootfs)"
-# Serialized: Vm::boot forks, and forking from a threaded test harness
-# can deadlock the child on locks held by other test threads.
-run = "cargo test --test integration -- --ignored --test-threads=1"
+[tasks.test-setup]
+description = "Create test image and start Vault"
+run = """
+cargo run -- image list 2>/dev/null | grep -q '^test ' || cargo run -- image create test
+docker compose up -d vault
+./scripts/seed-vault.sh
+"""
+
+[tasks.vault-up]
+description = "Start Vault dev server and seed test data"
+run = """
+docker compose up -d vault
+./scripts/seed-vault.sh
+"""
+
+[tasks.vault-down]
+description = "Stop Vault dev server"
+run = "docker compose down"
 
 [tasks.build]
 description = "Build release binary"
@@ -63,3 +86,6 @@ run = """
 cargo audit
 cargo deny check
 """
+
+[tools]
+vault = "1.19"
