@@ -8,13 +8,17 @@
 ///
 /// Require KVM (`/dev/kvm`) and a redan image named "test".
 /// Create it with: `redan image create test`
-/// Run with: `cargo test --test integration -- --test-threads=1`
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use redan::ca::MitmCa;
 use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::vm;
+
+/// Tests share a mutable rootfs (CA cert install), so serialize access
+/// even without `--test-threads=1`.
+static VM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn test_rootfs() -> String {
     let path = redan::image::image_path("test").expect("invalid test image name");
@@ -30,6 +34,7 @@ fn test_rootfs() -> String {
 #[test]
 fn end_to_end_secret_injection() {
     redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
+    let _lock = VM_LOCK.lock().unwrap();
     let rootfs = test_rootfs();
 
     let ca = MitmCa::generate();
@@ -89,6 +94,7 @@ fn end_to_end_secret_injection() {
 #[test]
 fn synthetic_dns_resolution() {
     redan::check_kvm().expect("KVM required: /dev/kvm not accessible");
+    let _lock = VM_LOCK.lock().unwrap();
     let rootfs = test_rootfs();
 
     let ca = MitmCa::generate();
