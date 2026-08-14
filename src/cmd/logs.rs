@@ -38,7 +38,8 @@ pub fn run(session_id: Option<&str>, follow: bool, json: bool) {
     }
 }
 
-/// Format one stored line for display. `--json` passes the raw event through;
+/// Format one stored line for display. `--json` passes the raw event through
+/// unsanitized (for piping to `jq`, not for direct terminal display);
 /// otherwise it is rendered as a terminal-safe logfmt line.
 fn present(line: &str, json: bool) -> String {
     if json {
@@ -58,6 +59,10 @@ fn dump_log(path: &Path, json: bool) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Discard a partial line if it exceeds this length. Normal audit events are
+/// well under 4 KiB; a line this large means a malformed or tampered file.
+const MAX_LINE_LEN: usize = 1024 * 1024;
+
 fn follow_log(path: &Path, json: bool) -> std::io::Result<()> {
     let mut reader = BufReader::new(std::fs::File::open(path)?);
     let stdout = std::io::stdout();
@@ -68,6 +73,10 @@ fn follow_log(path: &Path, json: bool) -> std::io::Result<()> {
     loop {
         if reader.read_line(&mut pending)? == 0 {
             std::thread::sleep(FOLLOW_POLL);
+            continue;
+        }
+        if pending.len() > MAX_LINE_LEN {
+            pending.clear();
             continue;
         }
         if pending.ends_with('\n') {

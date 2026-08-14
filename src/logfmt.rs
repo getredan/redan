@@ -127,6 +127,23 @@ mod tests {
     }
 
     #[test]
+    fn quotes_keys_containing_equals_or_spaces() {
+        let line = r#"{"event":"connect","a=b":"val1","c d":"val2","severity":"info","ts":"t"}"#;
+        let out = render(line);
+        assert!(out.contains(r#""a=b"=val1"#), "{out:?}");
+        assert!(out.contains(r#""c d"=val2"#), "{out:?}");
+        assert_eq!(out.lines().count(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn handles_non_string_json_values() {
+        let line = r#"{"event":"connect","count":42,"ok":true,"severity":"info","ts":"t"}"#;
+        let out = render(line);
+        assert!(out.contains("count=42"), "{out:?}");
+        assert!(out.contains("ok=true"), "{out:?}");
+    }
+
+    #[test]
     fn corrupt_line_becomes_safe_raw_field() {
         let out = render("this is not json \u{1b}[2J");
         assert!(out.starts_with("raw="), "{out}");
