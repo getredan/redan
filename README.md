@@ -348,10 +348,12 @@ redan logs <session> -f               # follow live (like tail -f)
 redan logs <session> | grep event=reject   # find blocked connections
 ```
 
-You can also write the audit log to a custom path:
+You can also write the audit log to a custom path. `redan logs` picks
+it up automatically:
 
 ```bash
 redan exec --audit-log events.jsonl
+redan logs <session>                    # reads events.jsonl, not the default
 ```
 
 ## Agent awareness
