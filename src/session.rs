@@ -74,6 +74,14 @@ pub fn audit_log_path(id: &str) -> PathBuf {
     session_dir(id).join("audit.jsonl")
 }
 
+/// Resolved audit log path: custom path from metadata if set, default otherwise.
+pub fn resolved_audit_log_path(meta: &SessionMeta) -> PathBuf {
+    meta.audit_log
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| audit_log_path(&meta.id))
+}
+
 /// Session metadata, written to `meta.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -90,6 +98,9 @@ pub struct SessionMeta {
     /// Optional human-friendly name for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Custom audit log path, if `--audit-log` was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_log: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +125,7 @@ impl SessionMeta {
             pid: Some(std::process::id()),
             console_socket: None,
             name: None,
+            audit_log: None,
         }
     }
 
@@ -236,5 +248,38 @@ mod tests {
         assert!(!valid_session_id("abcd/1234"));
         assert!(!valid_session_id("abc xyz"));
         assert!(!valid_session_id("a".repeat(33).as_str()));
+    }
+
+    #[test]
+    fn resolved_audit_log_uses_default_when_no_override() {
+        let meta = SessionMeta::new("aabb0011", Some("test"), Some("bash"));
+        let path = resolved_audit_log_path(&meta);
+        assert!(path.ends_with("redan/sessions/aabb0011/audit.jsonl"));
+    }
+
+    #[test]
+    fn resolved_audit_log_uses_custom_path_when_set() {
+        let mut meta = SessionMeta::new("aabb0011", Some("test"), Some("bash"));
+        meta.audit_log = Some("/tmp/custom-events.jsonl".into());
+        let path = resolved_audit_log_path(&meta);
+        assert_eq!(path, PathBuf::from("/tmp/custom-events.jsonl"));
+    }
+
+    #[test]
+    fn session_meta_roundtrip_with_audit_log() {
+        let mut meta = SessionMeta::new("test456", Some("dev"), Some("bash"));
+        meta.audit_log = Some("/var/log/redan.jsonl".into());
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.audit_log.as_deref(), Some("/var/log/redan.jsonl"));
+    }
+
+    #[test]
+    fn session_meta_roundtrip_without_audit_log() {
+        let meta = SessionMeta::new("test789", Some("dev"), Some("bash"));
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("audit_log"), "audit_log should be skipped when None");
+        let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert!(parsed.audit_log.is_none());
     }
 }

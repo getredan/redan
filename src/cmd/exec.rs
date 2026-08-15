@@ -61,6 +61,7 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     } else {
         let mut m = session::SessionMeta::new(&session_id, cfg.image_name, Some(cfg.command));
         m.name = cfg.session_name.map(Into::into);
+        m.audit_log = cfg.audit_log_path.map(Into::into);
         if let Err(e) = m.save() {
             log::warn!("cannot save session metadata: {e}");
         }
