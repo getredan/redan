@@ -129,6 +129,19 @@ impl SessionMeta {
         }
     }
 
+    /// Set a custom audit log path, resolving relative paths against CWD.
+    pub fn set_audit_log(&mut self, path: &str) {
+        let p = Path::new(path);
+        self.audit_log = Some(if p.is_absolute() {
+            path.into()
+        } else {
+            std::path::absolute(p)
+                .unwrap_or_else(|_| p.to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        });
+    }
+
     /// Write meta to the session directory. Creates the directory if needed.
     pub fn save(&self) -> Result<(), String> {
         let dir = session_dir(&self.id);
@@ -281,5 +294,45 @@ mod tests {
         assert!(!json.contains("audit_log"), "audit_log should be skipped when None");
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
         assert!(parsed.audit_log.is_none());
+    }
+
+    #[test]
+    fn set_audit_log_resolves_relative_path_to_absolute() {
+        let mut meta = SessionMeta::new("cc001122", Some("test"), Some("bash"));
+        meta.set_audit_log("events.jsonl");
+        let stored = meta.audit_log.as_deref().unwrap();
+        assert!(
+            Path::new(stored).is_absolute(),
+            "relative path should be resolved to absolute, got: {stored}"
+        );
+        assert!(stored.ends_with("events.jsonl"));
+    }
+
+    #[test]
+    fn set_audit_log_preserves_absolute_path() {
+        let mut meta = SessionMeta::new("dd112233", Some("test"), Some("bash"));
+        meta.set_audit_log("/var/log/redan-audit.jsonl");
+        assert_eq!(
+            meta.audit_log.as_deref(),
+            Some("/var/log/redan-audit.jsonl")
+        );
+    }
+
+    #[test]
+    fn resolved_audit_log_survives_cwd_change() {
+        let original_dir = std::env::current_dir().unwrap();
+        let mut meta = SessionMeta::new("ee223344", Some("test"), Some("bash"));
+        meta.set_audit_log("audit-custom.jsonl");
+
+        // Change CWD to something else
+        std::env::set_current_dir("/tmp").unwrap();
+        let path = resolved_audit_log_path(&meta);
+        // Restore CWD before any assertions (so a failure doesn't poison other tests)
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(path.is_absolute());
+        assert!(path.ends_with("audit-custom.jsonl"));
+        // The resolved path should be relative to the original CWD, not /tmp
+        assert!(!path.starts_with("/tmp"));
     }
 }
