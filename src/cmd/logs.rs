@@ -18,7 +18,7 @@ pub fn run(session_id: Option<&str>, follow: bool, json: bool) {
         eprintln!("no matching session found");
         std::process::exit(1);
     };
-    let path = session::audit_log_path(&meta.id);
+    let path = session::resolved_audit_log_path(&meta);
     if !path.exists() {
         eprintln!("no audit log for session {} ({})", meta.id, path.display());
         std::process::exit(1);

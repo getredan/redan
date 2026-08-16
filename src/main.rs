@@ -1141,6 +1141,9 @@ fn exec_detached(
     let mut meta = session::SessionMeta::new(&session_id, image_name, Some(command));
     meta.pid = Some(daemon_pid);
     meta.name = session_name.map(Into::into);
+    if let Some(p) = audit_log {
+        meta.set_audit_log(p);
+    }
     if let Err(e) = meta.save() {
         eprintln!("warning: cannot save session metadata: {e}");
     }
