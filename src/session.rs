@@ -291,7 +291,10 @@ mod tests {
     fn session_meta_roundtrip_without_audit_log() {
         let meta = SessionMeta::new("test789", Some("dev"), Some("bash"));
         let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("audit_log"), "audit_log should be skipped when None");
+        assert!(
+            !json.contains("audit_log"),
+            "audit_log should be skipped when None"
+        );
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
         assert!(parsed.audit_log.is_none());
     }
@@ -321,18 +324,19 @@ mod tests {
     #[test]
     fn resolved_audit_log_survives_cwd_change() {
         let original_dir = std::env::current_dir().unwrap();
+        let expected = original_dir.join("audit-custom.jsonl");
+
         let mut meta = SessionMeta::new("ee223344", Some("test"), Some("bash"));
         meta.set_audit_log("audit-custom.jsonl");
 
-        // Change CWD to something else
-        std::env::set_current_dir("/tmp").unwrap();
+        // Change CWD to a temp dir and verify the stored path still
+        // points at the original directory, not the new CWD.
+        let tmp = std::env::temp_dir().join("redan-test-cwd");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
         let path = resolved_audit_log_path(&meta);
-        // Restore CWD before any assertions (so a failure doesn't poison other tests)
         std::env::set_current_dir(&original_dir).unwrap();
 
-        assert!(path.is_absolute());
-        assert!(path.ends_with("audit-custom.jsonl"));
-        // The resolved path should be relative to the original CWD, not /tmp
-        assert!(!path.starts_with("/tmp"));
+        assert_eq!(path, expected, "path should resolve against original CWD");
     }
 }
