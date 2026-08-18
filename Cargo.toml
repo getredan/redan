@@ -36,7 +36,7 @@ minijinja = "2.19.0"
 thiserror = "2.0.18"
 shell-words = "1.1.1"
 getrandom = "0.4"
-base64 = "0.22.1"
+base64 = "0.23.1"
 # Already in the tree via rustls; used directly for SHA-256 of trusted configs.
 ring = "0.17"
 
