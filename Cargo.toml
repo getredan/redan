@@ -15,7 +15,7 @@ name = "redan"
 path = "src/main.rs"
 
 [dependencies]
-smoltcp = { version = "0.12.0", features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "log"] }
+smoltcp = { version = "0.13.1", features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "log"] }
 rustls = "0.23.40"
 rustls-pemfile = "2.2"
 rcgen = "0.14.8"
