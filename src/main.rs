@@ -1398,11 +1398,17 @@ fn stop_session(id_or_name: Option<&str>) {
     }
 
     eprintln!("session {} did not exit, sending SIGKILL", meta.id);
-    if let Err(e) = send_signal(target, libc::SIGKILL) {
-        eprintln!("failed to send SIGKILL: {e}");
-        std::process::exit(1);
+    match send_signal(target, libc::SIGKILL) {
+        Ok(()) => eprintln!("session {} killed", meta.id),
+        // The process exited between the SIGTERM wait and now.
+        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
+            eprintln!("session {} exited", meta.id);
+        }
+        Err(e) => {
+            eprintln!("failed to send SIGKILL: {e}");
+            std::process::exit(1);
+        }
     }
-    eprintln!("session {} killed", meta.id);
 }
 
 fn update_image(name: &str) {

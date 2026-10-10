@@ -11,6 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -213,18 +214,20 @@ fn signal_process_group(child: &std::process::Child, signal: libc::c_int) {
 /// Asks the kernel to send the calling process `SIGTERM` when its parent
 /// thread dies. Meant for `pre_exec`, so it only makes one raw syscall.
 ///
-/// Setting the signal is best effort, so a failure is ignored and Chrome
-/// still starts.
+/// A failure fails the spawn, so a Chrome that couldn't be tied to our
+/// lifetime never starts.
 fn set_parent_death_signal() -> std::io::Result<()> {
     // SAFETY: `prctl(PR_SET_PDEATHSIG, sig)` takes the signal number as an
     // unsigned long and ignores the remaining arguments for this option,
     // so the variadic call needs nothing else. `SIGTERM` is a valid signal.
     // The call reads and writes no memory we own, and it only changes the
     // calling process's own death-signal setting.
-    unsafe {
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+    let ret = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
-    Ok(())
 }
 
 fn spawn_chrome(
@@ -249,8 +252,6 @@ fn spawn_chrome(
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::piped());
-
-    use std::os::unix::process::CommandExt;
 
     // Own process group so kill(-pgid) reaches the entire Chrome tree
     // (zygotes, GPU process, renderers, network service, etc).
