@@ -25,8 +25,18 @@ pub struct MitmCa {
 }
 
 impl MitmCa {
+    /// Generate a fresh self-signed CA with a one-year validity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CA key pair cannot be generated or the CA certificate
+    /// cannot be self-signed. Both only fail when the crypto provider is
+    /// broken, and without a CA the proxy has nothing to intercept with.
     #[must_use]
-    #[allow(clippy::expect_used)] // CA key gen failure is unrecoverable
+    #[expect(
+        clippy::expect_used,
+        reason = "CA key generation failure is unrecoverable, and returning Result would change the signature used across the crate and its tests"
+    )]
     pub fn generate() -> Self {
         crate::ensure_crypto_provider();
         let mut params = CertificateParams::default();
@@ -145,6 +155,7 @@ impl ResolvesServerCert for MitmCertResolver {
 
 /// Build a shared `ServerConfig` with dynamic MITM cert resolution.
 /// One config is shared across all connections.
+#[must_use]
 pub fn mitm_server_config(resolver: Arc<MitmCertResolver>) -> Arc<rustls::ServerConfig> {
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()

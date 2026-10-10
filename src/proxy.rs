@@ -59,6 +59,12 @@ pub struct ForwardSpec {
 /// - `"9222:3000"` -- `guest_port:host_port`
 ///
 /// Rejects reserved ports (22, 53, 80, 443) and port 0.
+///
+/// # Errors
+///
+/// Returns a message if either port is not a valid `u16` ("invalid guest
+/// port" or "invalid host port"), if either port is 0, or if the guest port
+/// is reserved.
 pub fn parse_forward_spec(spec: &str) -> Result<ForwardSpec, String> {
     let (guest_str, host_str) = spec.split_once(':').map_or((spec, spec), |(g, h)| (g, h));
 
@@ -95,8 +101,7 @@ pub fn parse_forward_spec(spec: &str) -> Result<ForwardSpec, String> {
 }
 
 /// IP assigned to DNS queries for "localhost".
-#[allow(clippy::ip_constant)] // smoltcp type, not std
-const LOOPBACK_IP: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
+const LOOPBACK_IP: Ipv4Address = Ipv4Address::LOCALHOST;
 
 /// Subnet from which per-host IPs are allocated (.10 – .254).
 /// Each hostname the guest resolves gets a unique IP, enabling
@@ -235,7 +240,10 @@ pub struct ProxyConfig<'a> {
 type DiscoveredHosts = Arc<Mutex<std::collections::BTreeSet<String>>>;
 
 /// Hosts discovered during a `--discover` run. Returned to the caller.
-#[allow(clippy::too_many_lines)] // Event loop; splitting would obscure control flow
+#[expect(
+    clippy::too_many_lines,
+    reason = "event loop, splitting would obscure control flow"
+)]
 pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
     let ProxyConfig {
         host_sock,
@@ -274,13 +282,23 @@ pub fn run(cfg: ProxyConfig<'_>) -> Vec<String> {
         Arc::new(Mutex::new(BufWriter::new(file)))
     });
 
-    let mut device = VirtioNetDevice::new(host_sock);
+    let mut device = match VirtioNetDevice::new(host_sock) {
+        Ok(device) => device,
+        Err(e) => {
+            log::error!("cannot set virtio-net socket to nonblocking mode: {e}");
+            return Vec::new();
+        }
+    };
     let config = Config::new(GATEWAY_MAC.into());
     let mut iface = Interface::new(config, &mut device, SmolInstant::now());
+    let mut gateway_addr_added = false;
     iface.update_ip_addrs(|addrs| {
-        #[allow(clippy::unwrap_used)] // Single address on fresh interface
-        addrs.push(IpCidr::new(GATEWAY_IP.into(), 24)).unwrap();
+        gateway_addr_added = addrs.push(IpCidr::new(GATEWAY_IP.into(), 24)).is_ok();
     });
+    if !gateway_addr_added {
+        log::error!("cannot assign the gateway address to the proxy interface");
+        return Vec::new();
+    }
 
     let mut sockets = SocketSet::new(vec![]);
     let mut connections: HashMap<SocketHandle, ProxyConn> = HashMap::new();
@@ -509,12 +527,16 @@ const LISTEN_BACKLOG: usize = 32;
 
 // --- DNS (unchanged) ---
 
-#[allow(clippy::unwrap_used)] // Fresh socket bind cannot fail
+#[expect(
+    clippy::expect_used,
+    reason = "binding a fresh socket only fails for port 0, and the callers cannot propagate an error without restructuring the event loop"
+)]
 fn add_udp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
     let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
     let mut sock = udp::Socket::new(rx, tx);
-    sock.bind(port).unwrap();
+    sock.bind(port)
+        .expect("UDP bind on a fresh socket cannot fail");
     sockets.add(sock)
 }
 
@@ -560,12 +582,16 @@ fn process_dns(
 
 // --- TCP ---
 
-#[allow(clippy::unwrap_used)] // Fresh socket listen cannot fail
+#[expect(
+    clippy::expect_used,
+    reason = "listening on a fresh socket only fails for port 0, and the callers cannot propagate an error without restructuring the event loop"
+)]
 fn add_tcp_listener(sockets: &mut SocketSet, port: u16) -> SocketHandle {
     let rx_buf = tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUF]);
     let tx_buf = tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUF]);
     let mut sock = tcp::Socket::new(rx_buf, tx_buf);
-    sock.listen(port).unwrap();
+    sock.listen(port)
+        .expect("TCP listen on a fresh socket cannot fail");
     sockets.add(sock)
 }
 
@@ -899,7 +925,10 @@ impl Write for ChannelStream {
 /// Per-connection thread: TLS handshake, HTTP parsing, upstream relay,
 /// secret injection and response scrubbing. Rustls `StreamOwned` drives
 /// the TLS state machine automatically.
-#[allow(clippy::too_many_lines)] // TLS pipeline; splitting would obscure the flow
+#[expect(
+    clippy::too_many_lines,
+    reason = "TLS pipeline, splitting would obscure the flow"
+)]
 fn tls_connection_thread(
     rx: mpsc::Receiver<Vec<u8>>,
     tx: mpsc::SyncSender<Vec<u8>>,
@@ -1575,6 +1604,7 @@ fn request_has_upgrade(data: &[u8]) -> bool {
 /// - `"api.example.com"` matches `"api.example.com"` and `"API.EXAMPLE.COM"`
 /// - `"*.example.com"` matches `"api.example.com"` and `"foo.bar.example.com"`
 /// - `"*.example.com"` does NOT match `"example.com"` (must have a subdomain)
+#[must_use]
 pub fn host_matches(pattern: &str, hostname: &str) -> bool {
     pattern.strip_prefix("*.").map_or_else(
         || pattern.eq_ignore_ascii_case(hostname),
@@ -1636,11 +1666,6 @@ fn rewrite_connection_close(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cloned_ref_to_slice_refs
-)]
 mod tests {
     use super::*;
 
@@ -1970,7 +1995,7 @@ mod tests {
             &mut out,
             b"prefix ABCDE",
             "upstream.test",
-            &[secret.clone()],
+            std::slice::from_ref(&secret),
             10,
             &mut overlap,
         )
