@@ -50,7 +50,7 @@ cd libkrun && make && sudo make install
 **Install redan:**
 
 [Pre-built binaries](https://github.com/getredan/redan/releases) for
-Linux x86_64 and aarch64, or build from source (Rust 1.92+):
+Linux x86_64 and aarch64, or build from source (Rust 1.99+, `rustup` picks it up from `rust-toolchain.toml`):
 
 ```bash
 cargo install --git https://github.com/getredan/redan.git
