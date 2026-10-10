@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, MountConfig, NetworkConfig, SecretConfig};
+use crate::config::{self, Config, MountConfig, NetworkConfig, SecretConfig};
 use crate::image;
 
 // ---------------------------------------------------------------------------
@@ -483,7 +483,16 @@ fn git_remote_hosts() -> Vec<String> {
 
 /// Extract hostname from a git remote URL.
 /// Handles HTTPS, HTTP, ssh://, and SCP-style (git@host:path) formats.
+///
+/// Returns `None` for anything that isn't a plain hostname. The guest can
+/// edit `.git/config` through the workspace mount, and a remote like
+/// `https://*/repo.git` would otherwise turn the allowlist off for the next
+/// session.
 fn host_from_remote_url(url: &str) -> Option<String> {
+    remote_url_host(url).filter(|host| config::is_hostname(host))
+}
+
+fn remote_url_host(url: &str) -> Option<String> {
     if let Some(rest) = url.strip_prefix("ssh://") {
         let authority = rest.rsplit_once('@').map_or(rest, |(_, a)| a);
         let host = authority.split('/').next()?;
@@ -901,5 +910,17 @@ mod tests {
     #[test]
     fn host_from_nonsense_returns_none() {
         assert_eq!(host_from_remote_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn host_from_remote_url_skips_hosts_that_would_widen_the_allowlist() {
+        for url in [
+            "https://*/repo.git",
+            "https://*.com/repo.git",
+            "git@*:org/repo.git",
+            "ssh://git@*/org/repo.git",
+        ] {
+            assert_eq!(host_from_remote_url(url), None, "{url}");
+        }
     }
 }

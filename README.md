@@ -181,11 +181,13 @@ redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
 
 Wildcard patterns work: `"*.amazonaws.com"` matches any subdomain.
 Hosts required by secrets are included automatically, and so are the
-`sandbox.network.allowedDomains` from Claude Code's settings, both the
+`sandbox.network.allowedDomains` from Claude Code's settings (the
 project's `.claude/settings.json` / `settings.local.json` and your own
-`~/.claude/` ones. A `"*"` in those files is ignored with a warning:
-imported settings can add hosts but not turn the allowlist off, so pass
-`--allow-host '*'` yourself if you want that. Connections to
+`~/.claude/` ones) and, with `redan run`, your git remotes' hosts. Those
+imports can add hostnames and `*.domain` patterns but can't turn the
+allowlist off: anything else, like `"*"`, is skipped, with a warning for
+Claude Code settings. Pass `--allow-host '*'` yourself if you want
+allow-all. Connections to
 private IP ranges (RFC 1918, link-local, cloud metadata) are blocked
 even in allow-all mode. Domain fronting is blocked: HTTP Host must
 match TLS SNI.

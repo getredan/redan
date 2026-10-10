@@ -24,8 +24,13 @@ and are injected into HTTP requests at the network layer.
   attacker's authoritative nameserver.
 - **Unauthorized outbound connections**: default-deny networking blocks
   connections to hosts not in the allowlist. The guest can only reach
-  hosts explicitly permitted via `--allow-host` or `[network] allow`
-  in `redan.toml`. Secret hosts are auto-included.
+  hosts you allow with `--allow-host` or `[network] allow` in
+  `redan.toml`, your secrets' hosts, the agent profile's own hosts and
+  your git remotes' hosts with `redan run`, and the `allowedDomains` in
+  Claude Code's settings. Only `--allow-host`, your user config and a
+  trusted `redan.toml` can turn the allowlist off with `"*"`. The git and
+  Claude Code imports come from files the repo or the guest can write, so
+  they're limited to hostnames and `*.domain` patterns.
 - **Secret exposure in logs**: `Debug` formatting on `SecretBinding`
   prints `[REDACTED]`. Secrets are wrapped in `Zeroizing<String>`
   and overwritten on drop.

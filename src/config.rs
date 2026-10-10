@@ -12,6 +12,28 @@ use serde::{Deserialize, Serialize};
 /// any host.
 pub const ALLOW_ALL_HOSTS: &str = "*";
 
+/// Whether `entry` is a plain DNS hostname, using the same character set the
+/// proxy accepts in an SNI.
+#[must_use]
+pub fn is_hostname(entry: &str) -> bool {
+    !entry.is_empty()
+        && entry.len() <= 253
+        && entry
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// Whether `entry` is a hostname or a `*.example.com` pattern, the two forms
+/// the allowlist matches.
+///
+/// Hosts that redan picks up from files in the project, which the repo or
+/// the guest can write, go through this. They can add hosts, but they can't
+/// turn the allowlist off with [`ALLOW_ALL_HOSTS`].
+#[must_use]
+pub fn is_host_pattern(entry: &str) -> bool {
+    is_hostname(entry.strip_prefix("*.").unwrap_or(entry))
+}
+
 /// Top-level config file structure.
 ///
 /// ```toml
@@ -201,20 +223,19 @@ fn read_claude_settings(path: &Path) -> Option<Vec<String>> {
         .get("network")?
         .get("allowedDomains")?
         .as_array()?;
-    let mut hosts: Vec<String> = domains
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
     // Imported settings can add hosts but not turn redan's allowlist off: a
     // project's `.claude/settings*.json` comes with the repo, and a `"*"`
     // meant for Claude Code's own sandbox shouldn't switch off redan's.
-    if hosts.iter().any(|h| h == ALLOW_ALL_HOSTS) {
+    let (hosts, ignored): (Vec<String>, Vec<String>) = domains
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .partition(|h| is_host_pattern(h));
+    for entry in ignored {
         eprintln!(
-            "warning: ignoring \"*\" in {}: Claude Code settings can't turn off redan's \
-             allowlist. Pass --allow-host '*' if you want that.",
+            "warning: ignoring {entry:?} in {}: Claude Code settings can only add hostnames \
+             and *.domain patterns to redan's allowlist (pass --allow-host '*' to allow every host)",
             path.display()
         );
-        hosts.retain(|h| h != ALLOW_ALL_HOSTS);
     }
     Some(hosts)
 }
@@ -387,16 +408,51 @@ target = "/workspace"
     }
 
     #[test]
-    fn read_claude_settings_ignores_allow_all_wildcard() {
+    fn read_claude_settings_imports_only_hostnames_and_wildcards() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.local.json");
         std::fs::write(
             &path,
-            r#"{"sandbox": {"network": {"allowedDomains": ["github.com", "*"]}}}"#,
+            r#"{"sandbox": {"network": {"allowedDomains": ["github.com", "*", "*.npmjs.org", "localhost:3000"]}}}"#,
         )
         .unwrap();
         let domains = read_claude_settings(&path).unwrap();
-        assert_eq!(domains, vec!["github.com"]);
+        assert_eq!(domains, vec!["github.com", "*.npmjs.org"]);
+    }
+
+    #[test]
+    fn is_host_pattern_accepts_hostnames_and_subdomain_wildcards() {
+        for entry in [
+            "github.com",
+            "api.github.com",
+            "gitlab-ci.internal",
+            "*.npmjs.org",
+        ] {
+            assert!(is_host_pattern(entry), "{entry}");
+        }
+    }
+
+    #[test]
+    fn is_host_pattern_rejects_what_the_allowlist_cannot_match() {
+        for entry in [
+            "",
+            ALLOW_ALL_HOSTS,
+            "*.",
+            "*.*.com",
+            "localhost:3000",
+            "https://github.com",
+            "github.com/org",
+            "git hub.com",
+        ] {
+            assert!(!is_host_pattern(entry), "{entry}");
+        }
+    }
+
+    #[test]
+    fn is_hostname_rejects_wildcards() {
+        assert!(is_hostname("github.com"));
+        assert!(!is_hostname("*.github.com"));
+        assert!(!is_hostname(ALLOW_ALL_HOSTS));
     }
 
     #[test]
