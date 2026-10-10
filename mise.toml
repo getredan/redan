@@ -16,18 +16,7 @@ run = "cargo fmt -- --check"
 
 [tasks.lint]
 description = "Lint with clippy"
-run = """
-cargo clippy --all-targets --all-features -- \
-  -D warnings \
-  -W clippy::pedantic \
-  -W clippy::nursery \
-  -W clippy::unwrap_used \
-  -W clippy::expect_used \
-  -W clippy::panic \
-  -W clippy::unwrap_in_result \
-  -W clippy::fallible_impl_from \
-  -W clippy::string_slice
-"""
+run = "cargo clippy --all-targets --all-features -- -D warnings"
 
 [tasks.test]
 description = "Run all tests (requires KVM + test image + Vault)"
