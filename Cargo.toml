@@ -2,6 +2,7 @@
 name = "redan"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.99"
 license = "BSD-3-Clause"
 description = "Secure, local-first execution environment for AI coding agents"
 repository = "https://github.com/getredan/redan"
@@ -42,6 +43,18 @@ ring = "0.17"
 
 [features]
 test-support = []
+
+# Lint levels live here so `cargo clippy`, `mise run lint` and CI agree. The
+# only flag callers add is `-D warnings`.
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Restriction lints are opt-in one by one.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+unwrap_in_result = "warn"
+string_slice = "warn"
 
 [dev-dependencies]
 flate2 = "1.1.9"

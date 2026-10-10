@@ -520,7 +520,7 @@ fn main() {
                         let name = s.name.as_deref().unwrap_or("");
                         let image = s.image.as_deref().unwrap_or("-");
                         if name.is_empty() {
-                            println!("{}  {:10} {:20} {}", s.id, status, image, s.started_at,);
+                            println!("{}  {:10} {:20} {}", s.id, status, image, s.started_at);
                         } else {
                             println!(
                                 "{}  {:10} {:20} {} ({})",

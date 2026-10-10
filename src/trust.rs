@@ -464,7 +464,8 @@ mod tests {
                 read_only: false,
             },
         );
-        assert!(analyze(&cfg, dir.path()).is_empty());
+        let issues = analyze(&cfg, dir.path());
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]

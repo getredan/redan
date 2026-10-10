@@ -2027,7 +2027,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, b"hello world");
-        assert!(overlap.is_empty());
+        assert!(overlap.is_empty(), "{overlap:?}");
     }
 
     #[test]

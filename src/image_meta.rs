@@ -86,7 +86,7 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: ImageMeta = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed.source, ImageSource::Dockerfile { .. }));
-        assert!(!parsed.built_at.is_empty());
+        assert_ne!(parsed.built_at, "");
     }
 
     #[test]

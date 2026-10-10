@@ -9,7 +9,7 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 ## Dev Setup
 
-Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), Docker, curl, mise.
+Requires: Rust 1.99 (pinned in `rust-toolchain.toml`), libkrun 1.17+, KVM (`/dev/kvm`), Docker, curl, mise.
 
 ```bash
 mise trust
@@ -24,7 +24,7 @@ mise run check            # format + lint + all tests
 | `mise run check` | Full gate: format, lint, test |
 | `mise run format` | `cargo fmt` |
 | `mise run format-check` | CI formatting check |
-| `mise run lint` | Clippy with `-D warnings`, pedantic, nursery, and strict panic/unwrap lints |
+| `mise run lint` | Clippy with `-D warnings`. Lint levels live in `Cargo.toml` under `[lints]` |
 | `mise run test` | All tests (requires KVM + test image + Vault) |
 | `mise run test-setup` | Create test image and start Vault dev server |
 | `mise run vault-up` | Start Vault dev server and seed test data |

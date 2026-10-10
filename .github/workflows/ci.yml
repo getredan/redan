@@ -18,9 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -34,7 +33,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Lint
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Test
         run: cargo test --locked --lib --bin redan --test adversarial
@@ -44,7 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 

@@ -116,7 +116,7 @@ fn ensure_base_cached() -> io::Result<PathBuf> {
     eprintln!(
         "downloaded {} ({} bytes)",
         tarball.display(),
-        fs::metadata(&tarball).map(|meta| meta.len()).unwrap_or(0)
+        fs::metadata(&tarball).map_or(0, |meta| meta.len())
     );
     Ok(tarball)
 }

@@ -343,7 +343,11 @@ target = "/workspace"
         let config: Config = toml::from_str("image = \"dev\"").unwrap();
         assert_eq!(config.image.as_deref(), Some("dev"));
         assert!(config.secrets.is_empty());
-        assert!(config.network.allow.is_empty());
+        assert!(
+            config.network.allow.is_empty(),
+            "{:?}",
+            config.network.allow
+        );
     }
 
     #[test]
