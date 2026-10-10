@@ -135,7 +135,7 @@ fn parse_qname(packet: &[u8], start: usize) -> Option<(String, usize)> {
 
 /// DNS name compression pointer to the question name at byte offset 12.
 /// RFC 1035 s4.1.4: top 2 bits = 0b11 (pointer), lower 14 = offset.
-const NAME_PTR_QUESTION: u16 = 0xC000 | 12;
+const NAME_PTR_QUESTION: u16 = 0xC000 | 0x0C;
 
 fn build_a_response(id: u16, query: &[u8], question_end: usize, ip: Ipv4Address) -> Vec<u8> {
     let mut resp = Vec::with_capacity(question_end + 16);

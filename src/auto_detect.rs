@@ -444,7 +444,7 @@ fn build_config(detected: &DetectedAgent) -> AutoDetected {
 }
 
 fn image_exists(name: &str) -> bool {
-    image::image_path(name).map(|p| p.exists()).unwrap_or(false)
+    image::image_path(name).is_ok_and(|p| p.exists())
 }
 
 /// Extract hostnames from git remote URLs in the current directory.
@@ -643,7 +643,7 @@ mod tests {
 
         let auto = build_config(&detected);
         assert!(auto.config.secrets.contains_key("ANTHROPIC_API_KEY"));
-        assert!(auto.stage_files.is_empty());
+        assert!(auto.stage_files.is_empty(), "{:?}", auto.stage_files);
 
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(secret.value, "env://CLAUDE_CODE_OAUTH_TOKEN");
         assert_eq!(secret.hosts, vec!["api.anthropic.com"]);
         // No credentials file staged when an env token is present.
-        assert!(auto.stage_files.is_empty());
+        assert!(auto.stage_files.is_empty(), "{:?}", auto.stage_files);
     }
 
     #[test]
