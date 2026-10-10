@@ -98,21 +98,26 @@ impl Vm {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();
 
-        // SAFETY: fork + prctl + getppid are async-signal-safe; the
-        // child does allocate afterwards, which is sound because no
-        // other threads exist yet (see doc comment).
+        // SAFETY: fork takes no arguments. In a multi-threaded process the
+        // child may only call async-signal-safe functions, and this child
+        // allocates, so it relies on the doc comment's contract that no
+        // other threads exist when `boot` is called. That contract is on
+        // the callers and is not checked here.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
 
         if pid == 0 {
             // Child: this process belongs to libkrun now.
-            unsafe {
-                // Die with the parent so VMs are never orphaned.
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                // Close the race where the parent died before prctl.
-                if libc::getppid() == 1 {
-                    libc::_exit(EXIT_VMM_ERROR);
-                }
+            // Die with the parent so VMs are never orphaned.
+            // SAFETY: PR_SET_PDEATHSIG takes a signal number as its only
+            // argument, no pointers, and SIGKILL is a valid signal.
+            unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+            // Close the race where the parent died before prctl.
+            // SAFETY: getppid takes no arguments and has no preconditions.
+            if unsafe { libc::getppid() } == 1 {
+                // SAFETY: _exit has no preconditions. Skipping destructors
+                // and atexit handlers is intended in the forked child.
+                unsafe { libc::_exit(EXIT_VMM_ERROR) };
             }
             // Close the host end so the parent's proxy sees EOF when
             // this child dies, not a silently held-open socket.
@@ -128,6 +133,8 @@ impl Vm {
             // _exit, not exit: don't flush stdio buffers inherited from
             // the parent or run its atexit handlers.
             let _ = result;
+            // SAFETY: _exit has no preconditions. Skipping destructors
+            // and atexit handlers is intended in the forked child.
             unsafe { libc::_exit(EXIT_VMM_ERROR) }
         }
 
@@ -147,38 +154,57 @@ impl Vm {
     /// guest exit), kill it first. Blocks until the child is reaped.
     pub fn shutdown(&self) -> i32 {
         let mut status: libc::c_int = 0;
-        unsafe {
-            // Fast path: child already exited (the normal case, the
-            // proxy loop breaks on socket EOF after the child dies).
-            let reaped = libc::waitpid(self.child, &raw mut status, libc::WNOHANG);
-            if reaped == self.child {
-                return exit_code_from_wait_status(status);
-            }
-            // Child still alive: kill it. SIGKILL, not SIGTERM; libkrun
-            // has no graceful-shutdown path on Linux and the rootfs is
-            // host-managed, so there's nothing to flush guest-side.
-            libc::kill(self.child, libc::SIGKILL);
-            if libc::waitpid(self.child, &raw mut status, 0) == self.child {
-                exit_code_from_wait_status(status)
-            } else {
-                EXIT_VMM_ERROR
-            }
+        // Fast path: child already exited (the normal case, the
+        // proxy loop breaks on socket EOF after the child dies).
+        // SAFETY: `status` is a live, aligned, writable `c_int` for the
+        // duration of the call, and WNOHANG is a valid option. `self.child`
+        // is the pid `fork` returned in `boot`.
+        let reaped = unsafe { libc::waitpid(self.child, &raw mut status, libc::WNOHANG) };
+        if reaped == self.child {
+            return exit_code_from_wait_status(status);
+        }
+        // An error here (ECHILD) means the child was already reaped or is
+        // not ours, so its pid may belong to an unrelated process by now.
+        if reaped < 0 {
+            log::error!(
+                "waitpid({}) failed: {}",
+                self.child,
+                std::io::Error::last_os_error()
+            );
+            return EXIT_VMM_ERROR;
+        }
+        // Child still alive: kill it. SIGKILL, not SIGTERM; libkrun
+        // has no graceful-shutdown path on Linux and the rootfs is
+        // host-managed, so there's nothing to flush guest-side.
+        // SAFETY: kill takes no pointers and SIGKILL is a valid signal.
+        // `self.child` is positive (`boot` only builds a `Vm` in the
+        // parent, where fork returned the child's pid) and the waitpid
+        // above returned 0, so the pid is our unreaped child and cannot
+        // have been reused.
+        unsafe { libc::kill(self.child, libc::SIGKILL) };
+        // SAFETY: same `status` and `self.child` as the first waitpid.
+        // Option 0 blocks until the child terminates.
+        if unsafe { libc::waitpid(self.child, &raw mut status, 0) } == self.child {
+            exit_code_from_wait_status(status)
+        } else {
+            EXIT_VMM_ERROR
         }
     }
 
-    #[allow(clippy::unwrap_used, clippy::expect_used)] // FFI setup; failures are unrecoverable
     fn run_vm(config: VmConfig, guest_sock: UnixStream, guest_fd: i32) -> i32 {
         // Raise host process fd limit to hard max. libkrun needs fds
         // for KVM vcpus, virtio devices, etc. (Same as smolvm.)
-        unsafe {
-            let mut limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) == 0 {
-                limit.rlim_cur = limit.rlim_max;
-                libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
-            }
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a live, aligned, writable `rlimit` for the
+        // duration of the call, and RLIMIT_NOFILE is a valid resource.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0 {
+            limit.rlim_cur = limit.rlim_max;
+            // SAFETY: `limit` is a live, initialized `rlimit` that is only
+            // read, and RLIMIT_NOFILE is a valid resource.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) };
         }
         let krun_log_level = match std::env::var("RUST_LOG").as_deref() {
             Ok("trace") => ffi::KRUN_LOG_LEVEL_TRACE,
@@ -187,6 +213,10 @@ impl Vm {
             Ok(s) if s.contains("debug") => ffi::KRUN_LOG_LEVEL_DEBUG,
             _ => ffi::KRUN_LOG_LEVEL_OFF,
         };
+        // SAFETY: krun_init_log takes no pointers. -1 is
+        // KRUN_LOG_TARGET_DEFAULT (stderr), the level is one of the
+        // KRUN_LOG_LEVEL_* constants, the style is KRUN_LOG_STYLE_AUTO and
+        // 0 is the documented default for the options bitmask.
         let ret = unsafe {
             ffi::krun_init_log(
                 ffi::KRUN_LOG_TARGET_DEFAULT,
@@ -197,25 +227,40 @@ impl Vm {
         };
         krun_check!(ret >= 0, "krun_init_log failed: {ret}");
 
+        // SAFETY: krun_create_ctx takes no arguments.
         let ctx_id = unsafe { ffi::krun_create_ctx() };
-        krun_check!(ctx_id >= 0, "krun_create_ctx failed: {ctx_id}");
-        #[allow(clippy::cast_sign_loss)] // Checked non-negative above
-        let ctx_id = ctx_id as u32;
+        let Ok(ctx_id) = u32::try_from(ctx_id) else {
+            log::error!("krun_create_ctx failed: {ctx_id}");
+            return EXIT_VMM_ERROR;
+        };
 
-        unsafe {
-            let ret = ffi::krun_set_vm_config(ctx_id, config.vcpus, config.ram_mib);
-            krun_check!(ret >= 0, "krun_set_vm_config failed: {ret}");
+        let Some(root) = to_cstring("rootfs path", &config.rootfs) else {
+            return EXIT_VMM_ERROR;
+        };
 
-            let root = CString::new(config.rootfs).unwrap();
-            let ret = ffi::krun_set_root(ctx_id, root.as_ptr());
-            krun_check!(ret >= 0, "krun_set_root failed: {ret}");
+        // SAFETY: `ctx_id` came from krun_create_ctx and krun_start_enter
+        // has not been called, so the context is still configurable. The
+        // other arguments are plain integers.
+        let ret = unsafe { ffi::krun_set_vm_config(ctx_id, config.vcpus, config.ram_mib) };
+        krun_check!(ret >= 0, "krun_set_vm_config failed: {ret}");
 
-            let workdir = CString::new("/").unwrap();
-            let ret = ffi::krun_set_workdir(ctx_id, workdir.as_ptr());
-            krun_check!(ret >= 0, "krun_set_workdir failed: {ret}");
-        }
+        // SAFETY: `ctx_id` is as above. `root` is a NUL-terminated C
+        // string owned by this frame, so it is valid for the call and
+        // stays alive until run_vm returns.
+        let ret = unsafe { ffi::krun_set_root(ctx_id, root.as_ptr()) };
+        krun_check!(ret >= 0, "krun_set_root failed: {ret}");
+
+        // SAFETY: `ctx_id` is as above. The C string literal is
+        // NUL-terminated and 'static.
+        let ret = unsafe { ffi::krun_set_workdir(ctx_id, c"/".as_ptr()) };
+        krun_check!(ret >= 0, "krun_set_workdir failed: {ret}");
 
         // virtio-net
+        // SAFETY: `ctx_id` is as above. libkrun.h requires exactly one of
+        // `c_path` and `fd` to be set: `c_path` is null and `fd` is
+        // `guest_fd`, the raw fd of `guest_sock`, which is open here and
+        // kept alive past krun_start_enter below. `GUEST_MAC` is a 'static
+        // array of the 6 bytes the MAC argument points to.
         let ret = unsafe {
             ffi::krun_add_net_unixstream(
                 ctx_id,
@@ -230,8 +275,16 @@ impl Vm {
 
         // virtio-fs mounts
         for (tag, path, read_only) in &config.virtiofs_mounts {
-            let c_tag = CString::new(tag.as_str()).unwrap();
-            let c_path = CString::new(path.as_str()).unwrap();
+            let Some(c_tag) = to_cstring("virtiofs tag", tag) else {
+                return EXIT_VMM_ERROR;
+            };
+            let Some(c_path) = to_cstring("virtiofs path", path) else {
+                return EXIT_VMM_ERROR;
+            };
+            // SAFETY: `ctx_id` is as above. `c_tag` and `c_path` are
+            // NUL-terminated C strings that live until the end of this
+            // iteration, past the call. The remaining arguments are plain
+            // integers and a bool.
             let ret = unsafe {
                 ffi::krun_add_virtiofs3(ctx_id, c_tag.as_ptr(), c_path.as_ptr(), 0, *read_only)
             };
@@ -245,8 +298,16 @@ impl Vm {
         // Set guest RLIMIT_NOFILE via libkrun (before init runs).
         // Format per libkrun.h: "RESOURCE=RLIM_CUR:RLIM_MAX"
         // RLIMIT_NOFILE = 7 on Linux (libc::RLIMIT_NOFILE).
-        let nofile = CString::new(format!("{}={}:{}", libc::RLIMIT_NOFILE, 65536, 65536)).unwrap();
+        let Some(nofile) = to_cstring(
+            "rlimit entry",
+            &format!("{}={}:{}", libc::RLIMIT_NOFILE, 65536, 65536),
+        ) else {
+            return EXIT_VMM_ERROR;
+        };
         let rlimits: Vec<*const c_char> = vec![nofile.as_ptr(), std::ptr::null()];
+        // SAFETY: `ctx_id` is as above. `rlimits` is a null-terminated
+        // array of pointers, and its only non-null entry points into
+        // `nofile`, a NUL-terminated C string. Both live past the call.
         let ret = unsafe { ffi::krun_set_rlimits(ctx_id, rlimits.as_ptr()) };
         if ret < 0 {
             log::warn!("krun_set_rlimits returned {ret}");
@@ -256,19 +317,29 @@ impl Vm {
         // /bin/sh exists on every distro (ash on Alpine, bash/dash elsewhere).
         // libkrun's init uses exec_path as argv[0] (via KRUN_INIT), so
         // argv here contains only the arguments after argv[0].
-        let exec_path = CString::new("/bin/sh").unwrap();
-        let flag = CString::new("-c").unwrap();
-        let cmd = CString::new(config.command).unwrap();
-        let argv: Vec<*const c_char> = vec![flag.as_ptr(), cmd.as_ptr(), std::ptr::null()];
+        let exec_path = c"/bin/sh";
+        let Some(cmd) = to_cstring("command", &config.command) else {
+            return EXIT_VMM_ERROR;
+        };
+        let argv: Vec<*const c_char> = vec![c"-c".as_ptr(), cmd.as_ptr(), std::ptr::null()];
 
-        let env_cstrings: Vec<CString> = config
+        // Env entries can carry secrets, so only the label is logged.
+        let Some(env_cstrings) = config
             .env
             .iter()
-            .map(|e| CString::new(e.as_str()).unwrap())
-            .collect();
+            .map(|e| to_cstring("environment entry", e))
+            .collect::<Option<Vec<CString>>>()
+        else {
+            return EXIT_VMM_ERROR;
+        };
         let mut envp: Vec<*const c_char> = env_cstrings.iter().map(|e| e.as_ptr()).collect();
         envp.push(std::ptr::null());
 
+        // SAFETY: `ctx_id` is as above. `exec_path` is a NUL-terminated
+        // 'static C string. `argv` and `envp` are null-terminated arrays
+        // of pointers to NUL-terminated C strings (`c"-c"`, `cmd`,
+        // `env_cstrings`) that all live past the call. `envp` is never
+        // null, so libkrun does not fall back to the host environment.
         let ret =
             unsafe { ffi::krun_set_exec(ctx_id, exec_path.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
         krun_check!(ret >= 0, "krun_set_exec failed: {ret}");
@@ -278,8 +349,21 @@ impl Vm {
         let _guest_sock = std::mem::ManuallyDrop::new(guest_sock);
 
         log::info!("entering VM");
+        // SAFETY: `ctx_id` is as above and is consumed by this call, which
+        // is its only use after configuration. This runs in the forked
+        // child, which libkrun may take over and `_exit` (see the module
+        // doc comment). It only returns if the configuration was rejected.
         unsafe { ffi::krun_start_enter(ctx_id) }
     }
+}
+
+/// Convert `value` to a C string for libkrun. Returns `None` after logging
+/// an error if it contains a NUL byte. Only `what` and the position are
+/// logged, since values can carry secrets.
+fn to_cstring(what: &str, value: &str) -> Option<CString> {
+    CString::new(value)
+        .map_err(|e| log::error!("{what} contains a NUL byte at offset {}", e.nul_position()))
+        .ok()
 }
 
 /// Build the network setup commands for a guest with static IP config.
@@ -354,6 +438,17 @@ mod tests {
 
     // Linux wait status encoding: normal exit code N is N << 8,
     // death by signal S is S in the low 7 bits.
+
+    #[test]
+    fn to_cstring_rejects_interior_nul() {
+        assert!(to_cstring("test value", "ab\0cd").is_none());
+    }
+
+    #[test]
+    fn to_cstring_keeps_bytes_without_nul() {
+        let c = to_cstring("test value", "KEY=value").unwrap();
+        assert_eq!(c.to_bytes(), b"KEY=value");
+    }
 
     #[test]
     fn exit_code_zero_from_clean_exit() {
