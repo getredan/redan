@@ -70,7 +70,7 @@ fn redirect_logs_to_file(path: &std::path::Path) {
         .open(path)
         && let Err(e) = redirect_stderr_to(&file)
     {
-        eprintln!("cannot redirect stderr to log file {}: {e}", path.display());
+        eprintln!("cannot redirect stderr to the session log: {e}");
     }
 }
 
