@@ -974,12 +974,9 @@ fn tls_connection_thread(
 
     // Validate SNI is a reasonable hostname. Guest controls this value;
     // reject anything that isn't DNS-safe to prevent log injection
-    // (ANSI escapes) or weird resolver behavior.
-    if sni.len() > 253
-        || !sni
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-    {
+    // (ANSI escapes) or weird resolver behavior. RFC 6066 section 3 sends
+    // the name without a trailing dot, so `evil.com.` is refused too.
+    if !is_hostname(&sni) {
         log::warn!("rejected invalid SNI: {sni:?}");
         return Err("invalid SNI hostname".to_string().into());
     }
@@ -1599,6 +1596,27 @@ fn request_has_upgrade(data: &[u8]) -> bool {
         .any(|header| header.name.eq_ignore_ascii_case("upgrade"))
 }
 
+/// Whether `name` is a plain DNS hostname: dot-separated labels of letters,
+/// digits and hyphens, none of them empty. It's what the proxy accepts in an
+/// SNI, so it's every name the allowlist can match.
+#[must_use]
+pub fn is_hostname(name: &str) -> bool {
+    name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// Whether `entry` is a hostname or a `*.example.com` pattern, the two forms
+/// [`host_matches`] takes.
+#[must_use]
+pub fn is_host_pattern(entry: &str) -> bool {
+    is_hostname(entry.strip_prefix("*.").unwrap_or(entry))
+}
+
 /// Check if a hostname matches an allowlist pattern.
 /// Supports exact match (case-insensitive) and wildcard prefix:
 /// - `"api.example.com"` matches `"api.example.com"` and `"API.EXAMPLE.COM"`
@@ -1609,10 +1627,11 @@ pub fn host_matches(pattern: &str, hostname: &str) -> bool {
     pattern.strip_prefix("*.").map_or_else(
         || pattern.eq_ignore_ascii_case(hostname),
         |suffix| {
-            // Wildcard: hostname must end with .suffix and have something before it
+            // Wildcard: hostname must end with .suffix and have something
+            // before it. An empty suffix would match every name ending in a dot.
             let hostname_lower = hostname.to_ascii_lowercase();
             let suffix_lower = suffix.to_ascii_lowercase();
-            hostname_lower.ends_with(&format!(".{suffix_lower}"))
+            !suffix.is_empty() && hostname_lower.ends_with(&format!(".{suffix_lower}"))
         },
     )
 }
@@ -2120,6 +2139,57 @@ mod tests {
         assert!(host_matches("api.example.com", "api.example.com"));
         assert!(host_matches("api.example.com", "API.EXAMPLE.COM"));
         assert!(!host_matches("api.example.com", "other.example.com"));
+    }
+
+    #[test]
+    fn wildcard_with_an_empty_suffix_matches_nothing() {
+        assert!(!host_matches("*.", "evil.com."));
+        assert!(!host_matches("*.", "localhost."));
+    }
+
+    #[test]
+    fn is_hostname_rejects_wildcards_and_empty_labels() {
+        assert!(is_hostname("github.com"));
+        assert!(is_hostname("localhost"));
+        for name in [
+            "",
+            "*",
+            "*.github.com",
+            "github.com.",
+            ".github.com",
+            "git..hub.com",
+        ] {
+            assert!(!is_hostname(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn is_host_pattern_accepts_hostnames_and_subdomain_wildcards() {
+        for entry in [
+            "github.com",
+            "api.github.com",
+            "gitlab-ci.internal",
+            "*.npmjs.org",
+        ] {
+            assert!(is_host_pattern(entry), "{entry}");
+        }
+    }
+
+    #[test]
+    fn is_host_pattern_rejects_what_the_allowlist_cannot_match() {
+        for entry in [
+            "",
+            "*",
+            "*.",
+            "*.*.com",
+            "*.com.",
+            "localhost:3000",
+            "https://github.com",
+            "github.com/org",
+            "git hub.com",
+        ] {
+            assert!(!is_host_pattern(entry), "{entry:?}");
+        }
     }
 
     #[test]

@@ -8,31 +8,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::proxy::is_host_pattern;
+
 /// The allowlist entry that turns the allowlist off, so the guest can reach
 /// any host.
 pub const ALLOW_ALL_HOSTS: &str = "*";
-
-/// Whether `entry` is a plain DNS hostname, using the same character set the
-/// proxy accepts in an SNI.
-#[must_use]
-pub fn is_hostname(entry: &str) -> bool {
-    !entry.is_empty()
-        && entry.len() <= 253
-        && entry
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-}
-
-/// Whether `entry` is a hostname or a `*.example.com` pattern, the two forms
-/// the allowlist matches.
-///
-/// Hosts that redan picks up from files in the project, which the repo or
-/// the guest can write, go through this. They can add hosts, but they can't
-/// turn the allowlist off with [`ALLOW_ALL_HOSTS`].
-#[must_use]
-pub fn is_host_pattern(entry: &str) -> bool {
-    is_hostname(entry.strip_prefix("*.").unwrap_or(entry))
-}
 
 /// Top-level config file structure.
 ///
@@ -418,41 +398,6 @@ target = "/workspace"
         .unwrap();
         let domains = read_claude_settings(&path).unwrap();
         assert_eq!(domains, vec!["github.com", "*.npmjs.org"]);
-    }
-
-    #[test]
-    fn is_host_pattern_accepts_hostnames_and_subdomain_wildcards() {
-        for entry in [
-            "github.com",
-            "api.github.com",
-            "gitlab-ci.internal",
-            "*.npmjs.org",
-        ] {
-            assert!(is_host_pattern(entry), "{entry}");
-        }
-    }
-
-    #[test]
-    fn is_host_pattern_rejects_what_the_allowlist_cannot_match() {
-        for entry in [
-            "",
-            ALLOW_ALL_HOSTS,
-            "*.",
-            "*.*.com",
-            "localhost:3000",
-            "https://github.com",
-            "github.com/org",
-            "git hub.com",
-        ] {
-            assert!(!is_host_pattern(entry), "{entry}");
-        }
-    }
-
-    #[test]
-    fn is_hostname_rejects_wildcards() {
-        assert!(is_hostname("github.com"));
-        assert!(!is_hostname("*.github.com"));
-        assert!(!is_hostname(ALLOW_ALL_HOSTS));
     }
 
     #[test]

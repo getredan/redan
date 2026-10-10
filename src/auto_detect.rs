@@ -10,8 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{self, Config, MountConfig, NetworkConfig, SecretConfig};
+use crate::config::{Config, MountConfig, NetworkConfig, SecretConfig};
 use crate::image;
+use crate::proxy;
 
 // ---------------------------------------------------------------------------
 // Agent registry
@@ -489,7 +490,7 @@ fn git_remote_hosts() -> Vec<String> {
 /// `https://*/repo.git` would otherwise turn the allowlist off for the next
 /// session.
 fn host_from_remote_url(url: &str) -> Option<String> {
-    remote_url_host(url).filter(|host| config::is_hostname(host))
+    remote_url_host(url).filter(|host| proxy::is_hostname(host))
 }
 
 fn remote_url_host(url: &str) -> Option<String> {
