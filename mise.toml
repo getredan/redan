@@ -25,7 +25,7 @@ description = "Run all tests (requires KVM + test image + Vault)"
 # tests call Vm::boot, so only that binary is serialized. The e2e
 # tests boot VMs inside the redan processes they start.
 run = """
-cargo test --lib --bin redan --test adversarial --test vault --test e2e && \
+cargo test --no-fail-fast --lib --bin redan --test adversarial --test vault --test e2e && \
 cargo test --test integration -- --test-threads=1
 """
 

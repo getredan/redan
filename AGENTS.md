@@ -54,7 +54,7 @@ Security-critical project. Tests are load-bearing.
 
 - Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs, templates
 - Integration tests boot real VMs (KVM + test image via `redan image create test`)
-- `tests/e2e.rs` runs the `redan` binary in a throwaway project and home. Its Claude Code evals are `#[ignore]`d (your token, the real API), run them with `mise run e2e`
+- `tests/e2e.rs` runs the `redan` binary in a throwaway project and home. The tests that need the `claude-code` image are `#[ignore]`d, among them the Claude Code evals that use your token and the real API. Run them with `mise run e2e`
 - Vault tests require a running Vault (`mise run vault-up`)
 - Test names describe scenarios: `inject_skips_disallowed_host`
 - Deterministic: no sleeps, no network in unit tests
