@@ -23,16 +23,15 @@ description = "Run all tests (requires KVM + test image + Vault)"
 # Vm::boot forks; forking from a threaded test harness can deadlock
 # the child on locks held by other test threads. Only integration
 # tests call Vm::boot, so only that binary is serialized. The e2e
-# tests boot VMs by running the redan binary, which forks in its own
-# process, not in the harness.
+# tests boot VMs inside the redan processes they start.
 run = """
 cargo test --lib --bin redan --test adversarial --test vault --test e2e && \
 cargo test --test integration -- --test-threads=1
 """
 
 [tasks.e2e]
-description = "Claude Code evals against the real API (requires KVM + claude-code image + a Claude token)"
-run = "cargo test --test e2e -- --ignored"
+description = "End-to-end tests, including the Claude Code evals that use your Claude token and the real API"
+run = "cargo test --test e2e -- --include-ignored"
 
 [tasks.test-setup]
 description = "Create test image and start Vault"
