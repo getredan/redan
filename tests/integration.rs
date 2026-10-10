@@ -75,7 +75,7 @@ fn end_to_end_secret_injection() {
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(config);
+    let vm_handle = vm::Vm::boot(&config);
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
     let _ = proxy::run(proxy::ProxyConfig {
@@ -122,7 +122,7 @@ fn synthetic_dns_resolution() {
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(config);
+    let vm_handle = vm::Vm::boot(&config);
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
     let _ = proxy::run(proxy::ProxyConfig {

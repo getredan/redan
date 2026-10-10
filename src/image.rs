@@ -236,7 +236,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(config);
+    let vm_handle = vm::Vm::boot(&config);
 
     // Run proxy until VM completes (generous timeout for package installation)
     let _ = proxy::run(proxy::ProxyConfig {
@@ -634,7 +634,6 @@ fn strip_jsonc_comments(input: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

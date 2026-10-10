@@ -1,30 +1,73 @@
 //! Terminal handling utilities.
 
-use std::io;
+use std::io::{self, IsTerminal};
+use std::mem::MaybeUninit;
 use std::sync::Mutex;
 
 pub fn stdin_is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+    io::stdin().is_terminal()
 }
 
 /// Read the host terminal's window size (columns, rows).
 /// Returns None if stdin is not a TTY or the ioctl fails.
 pub fn host_terminal_size() -> Option<(u16, u16)> {
-    unsafe {
-        if libc::isatty(libc::STDIN_FILENO) != 1 {
-            return None;
-        }
-        let mut ws = std::mem::MaybeUninit::<libc::winsize>::uninit();
-        if libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) != 0 {
-            return None;
-        }
-        let ws = ws.assume_init();
-        if ws.ws_col > 0 && ws.ws_row > 0 {
-            Some((ws.ws_col, ws.ws_row))
-        } else {
-            None
-        }
+    if !stdin_is_tty() {
+        return None;
     }
+    let mut ws = MaybeUninit::<libc::winsize>::uninit();
+    // SAFETY: `ioctl(TIOCGWINSZ)` writes one `winsize` through its third
+    // argument. `ws.as_mut_ptr()` points to writable, properly aligned memory
+    // of exactly that type, and STDIN_FILENO is a valid descriptor number
+    // (a closed one makes the call fail with EBADF instead).
+    let ret = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) };
+    if ret != 0 {
+        return None;
+    }
+    // SAFETY: the ioctl above returned 0, so the kernel filled in every field
+    // of `ws`. `winsize` is four `c_ushort`s, for which any bit pattern is valid.
+    let ws = unsafe { ws.assume_init() };
+    if ws.ws_col > 0 && ws.ws_row > 0 {
+        Some((ws.ws_col, ws.ws_row))
+    } else {
+        None
+    }
+}
+
+/// Read the termios settings of stdin.
+fn get_termios() -> io::Result<libc::termios> {
+    let mut termios = MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `tcgetattr` writes one `termios` through its second argument.
+    // `termios.as_mut_ptr()` points to writable, properly aligned memory of
+    // that type, and STDIN_FILENO is a valid descriptor number (a closed one
+    // makes the call fail with EBADF instead).
+    let ret = unsafe { libc::tcgetattr(libc::STDIN_FILENO, termios.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `tcgetattr` returned 0, so it filled in the whole struct. All
+    // fields of `termios` are integers or integer arrays, so any bit pattern
+    // is valid.
+    Ok(unsafe { termios.assume_init() })
+}
+
+/// Apply termios settings to stdin immediately.
+fn set_termios(termios: &libc::termios) -> io::Result<()> {
+    // SAFETY: `tcsetattr` reads one `termios` through its third argument.
+    // The pointer comes from a reference, so it is non-null, aligned, and
+    // points to an initialized value that outlives the call. STDIN_FILENO is
+    // a valid descriptor number (a closed one makes the call fail with EBADF
+    // instead).
+    let ret = unsafe {
+        libc::tcsetattr(
+            libc::STDIN_FILENO,
+            libc::TCSANOW,
+            std::ptr::from_ref(termios),
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Terminal state saved before booting the VM. libkrun puts the shared
@@ -41,13 +84,9 @@ pub fn restore_saved_terminal() {
     if let Ok(guard) = SAVED_TERMIOS.lock()
         && let Some(ref original) = *guard
     {
-        unsafe {
-            libc::tcsetattr(
-                libc::STDIN_FILENO,
-                libc::TCSANOW,
-                std::ptr::from_ref(original),
-            );
-        }
+        // Best effort: this runs on the way out, where there is nothing
+        // useful to do about a failure.
+        let _ = set_termios(original);
     }
 }
 
@@ -62,38 +101,30 @@ impl RawTerminalGuard {
     /// Switch stdin to raw mode. Returns an error if stdin is not a TTY
     /// or the termios syscalls fail.
     pub fn enter() -> io::Result<Self> {
-        unsafe {
-            if libc::isatty(libc::STDIN_FILENO) != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "stdin is not a TTY",
-                ));
-            }
-            let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
-            if libc::tcgetattr(libc::STDIN_FILENO, original.as_mut_ptr()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let original = original.assume_init();
-
-            let mut raw = original;
-            libc::cfmakeraw(std::ptr::from_mut(&mut raw));
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, std::ptr::from_ref(&raw)) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Self { original })
+        if !stdin_is_tty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdin is not a TTY",
+            ));
         }
+        let original = get_termios()?;
+
+        let mut raw = original;
+        // SAFETY: `cfmakeraw` modifies one `termios` in place. The pointer
+        // comes from an exclusive reference to the initialized local `raw`,
+        // so it is non-null, aligned, and not aliased during the call.
+        unsafe { libc::cfmakeraw(std::ptr::from_mut(&mut raw)) };
+        set_termios(&raw)?;
+        Ok(Self { original })
     }
 }
 
 impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(
-                libc::STDIN_FILENO,
-                libc::TCSANOW,
-                std::ptr::from_ref(&self.original),
-            );
-        }
+        // A destructor can't return an error, so a failed restore is
+        // ignored. The terminal then stays in raw mode, which the user can
+        // fix with `reset`.
+        let _ = set_termios(&self.original);
     }
 }
 
@@ -101,19 +132,15 @@ impl Drop for RawTerminalGuard {
 /// without modifying the terminal mode. No-op if stdin is not a TTY
 /// or a state was already saved.
 pub fn save_terminal() {
-    unsafe {
-        if libc::isatty(libc::STDIN_FILENO) != 1 {
-            return;
-        }
-        let mut current = std::mem::MaybeUninit::<libc::termios>::uninit();
-        if libc::tcgetattr(libc::STDIN_FILENO, current.as_mut_ptr()) != 0 {
-            return;
-        }
-        let current = current.assume_init();
-        if let Ok(mut saved) = SAVED_TERMIOS.lock()
-            && saved.is_none()
-        {
-            *saved = Some(current);
-        }
+    if !stdin_is_tty() {
+        return;
+    }
+    let Ok(current) = get_termios() else {
+        return;
+    };
+    if let Ok(mut saved) = SAVED_TERMIOS.lock()
+        && saved.is_none()
+    {
+        *saved = Some(current);
     }
 }
