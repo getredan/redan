@@ -272,12 +272,14 @@ files, none of which the sandbox would catch, because it runs before the
 sandbox starts. redan trust-gates it.
 
 A config that only sets safe things (`image`, `command`, guest `env`,
-`[network] allow`, a literal secret, or a mount inside the project) loads with
-no prompt. A config that reaches for host authority has to be trusted first:
+hosts in `[network] allow`, a literal secret, or a mount inside the project)
+loads with no prompt. A config that reaches for host authority has to be
+trusted first:
 
 - reading host env vars or Vault (`env://` / `vault://` secrets)
 - mounting a path outside the project, or setting `rootfs`
 - forwarding a host-local port, or writing a host `audit_log` / `log_file`
+- turning the network allowlist off with `allow = ["*"]`
 
 When redan hits one of those and the config isn't trusted, it prints exactly
 what the config would be allowed to do and, in an interactive session, asks

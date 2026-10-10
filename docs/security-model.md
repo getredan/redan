@@ -164,9 +164,10 @@ repo you cloned could exfiltrate your credentials or expose host files, none of
 which the VM sandbox would stop, because the config runs before the sandbox.
 
 Redan gates this. A config that stays within a safe subset (`image`, `command`,
-guest `env`, `[network] allow`, and a project-workspace mount) needs no trust,
-since none of it touches host authority. A config that reaches for any of the
-above must be trusted first:
+guest `env`, hosts in `[network] allow`, and a project-workspace mount) needs no
+trust, since none of it touches host authority. A config that reaches for any of
+the above must be trusted first, and so must `allow = ["*"]`, which turns
+default-deny egress off:
 
 - Interactively, redan prints exactly what the config would be allowed to do and
   asks before acting on it.

@@ -136,6 +136,9 @@ fn describe(cap: &Capability) -> String {
         Capability::Forward(s) => {
             format!("forward port {s} to a host-local service  [reachable from the guest]")
         }
+        Capability::AllowAllHosts => {
+            "let the guest reach any host  [turns off the network allowlist]".to_string()
+        }
         Capability::EnvSecret { name, var } => {
             format!("read host env var ${var} (secret {name})  [reads your shell environment]")
         }
