@@ -103,12 +103,13 @@ internet (only allowed hosts)
 
 ## Rust
 
-Edition 2024. Clippy already checks most idiom rules (`single_match`, `while_let_loop`, `uninlined_format_args`, ...), so this list only covers what it can't check.
+Edition 2024 on the toolchain pinned in `rust-toolchain.toml`. Lint levels live in `Cargo.toml` under `[lints.clippy]` and `mise run lint` and CI run the same command, so don't add `-W` flags to either. Clippy already checks most idiom rules (`single_match`, `while_let_loop`, `uninlined_format_args`, ...), so this list only covers what it can't check.
 
 - Guard clauses use `let ... else`. Chained conditions use let chains (`if let Some(a) = x && let Some(b) = y`) instead of nesting.
 - Propagate errors with `?`. Use `map_err` only to add context that a `From` impl can't carry.
-- Every `unsafe` block gets a `// SAFETY:` comment that says why it's sound. Use the safe std API when there is one: `std::io::IsTerminal` over `libc::isatty`, `c"/bin/sh"` over `CString::new("/bin/sh").unwrap()`.
-- Suppress a lint with `#[expect(lint, reason = "...")]`, not `#[allow]`. The compiler tells you when the suppression is no longer needed.
+- Every `unsafe` block does one operation and has a `// SAFETY:` comment that names the callee's preconditions and says why they hold here (both are linted). If you can't write that comment truthfully, the code is wrong: validate or return an error. Use the safe std API when there is one: `std::io::IsTerminal` over `libc::isatty`, `Command::process_group` over `setpgid`, `c"/bin/sh"` over `CString::new("/bin/sh").unwrap()`.
+- Fix the cause instead of suppressing a lint. `#[allow]` is denied by `allow_attributes`. When a fix really would make the code worse, use `#[expect(lint, reason = "...")]` on the one item, and the compiler tells you when it stops being needed. Tests may unwrap, expect and panic (`clippy.toml`).
+- Don't mutate the process environment (`std::env::set_var`) in tests. Pass the value in as an argument and test the function that takes it.
 - Types that hold secret values don't derive `Debug`. Write a redacting `Debug` by hand and keep the value in `Zeroizing`, like `secret::SecretBinding`.
 - Bytes from the guest or the network are untrusted. New parsing code uses `.get(..)` over `buf[i]`, `try_from` over `as`, and checked arithmetic on lengths, so a crafted packet can't panic the proxy.
 - Keep a `for` loop when the body has early exits, `?`, or mutable state. Use an iterator chain for a plain filter/map/collect.
