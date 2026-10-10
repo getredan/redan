@@ -16,6 +16,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::Error;
 
+/// How far back certificates start being valid. The guest's clock can trail
+/// the host's a little, and a certificate minted this second would look like
+/// it's from the future to the guest, which then refuses the handshake.
+const CLOCK_SKEW: time::Duration = time::Duration::hours(1);
+
 #[derive(Debug)]
 pub struct MitmCa {
     ca_params: CertificateParams,
@@ -47,7 +52,7 @@ impl MitmCa {
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let now = time::OffsetDateTime::now_utc();
         let one_year = now + time::Duration::days(365);
-        params.not_before = now;
+        params.not_before = now - CLOCK_SKEW;
         params.not_after = one_year;
 
         let key = KeyPair::generate().map_err(|e| format!("CA key generation failed: {e}"))?;
@@ -96,7 +101,7 @@ impl MitmCa {
         params.subject_alt_names = vec![san];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let now = time::OffsetDateTime::now_utc();
-        params.not_before = now;
+        params.not_before = now - CLOCK_SKEW;
         params.not_after = now + time::Duration::days(1);
 
         let leaf_key = match KeyPair::generate() {
@@ -188,6 +193,35 @@ mod tests {
         let key2 = ca.certified_key_for("example.com").unwrap();
         // Same pointer (cached)
         assert!(Arc::ptr_eq(&key1, &key2));
+    }
+
+    /// A guest whose clock trails the host's accepts a leaf minted this very
+    /// second, CA included.
+    #[test]
+    fn leaf_is_valid_for_a_client_whose_clock_is_behind() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::{ServerName, UnixTime};
+
+        let mut ca = MitmCa::generate().unwrap();
+        let leaf = ca.certified_key_for("example.com").unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.ca_cert_der.clone()).unwrap();
+        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        let five_seconds_ago = UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+            UnixTime::now().as_secs() - 5,
+        ));
+
+        let result = verifier.verify_server_cert(
+            &leaf.cert[0],
+            &[],
+            &ServerName::try_from("example.com").unwrap(),
+            &[],
+            five_seconds_ago,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
