@@ -98,6 +98,9 @@ impl Vm {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();
 
+        // SAFETY: getpid takes no arguments and has no preconditions.
+        let parent_pid = unsafe { libc::getpid() };
+
         // SAFETY: fork takes no arguments. In a multi-threaded process the
         // child may only call async-signal-safe functions, and this child
         // allocates, so it relies on the doc comment's contract that no
@@ -111,10 +114,12 @@ impl Vm {
             // Die with the parent so VMs are never orphaned.
             // SAFETY: PR_SET_PDEATHSIG takes a signal number as its only
             // argument, no pointers, and SIGKILL is a valid signal.
-            unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
-            // Close the race where the parent died before prctl.
+            let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == 0;
+            // Close the race where the parent died before prctl. A reparented
+            // child has a different parent pid, whether the new parent is
+            // init, a subreaper, or the init of a pid namespace.
             // SAFETY: getppid takes no arguments and has no preconditions.
-            if unsafe { libc::getppid() } == 1 {
+            if !armed || unsafe { libc::getppid() } != parent_pid {
                 // SAFETY: _exit has no preconditions. Skipping destructors
                 // and atexit handlers is intended in the forked child.
                 unsafe { libc::_exit(EXIT_VMM_ERROR) };
@@ -259,8 +264,10 @@ impl Vm {
         // SAFETY: `ctx_id` is as above. libkrun.h requires exactly one of
         // `c_path` and `fd` to be set: `c_path` is null and `fd` is
         // `guest_fd`, the raw fd of `guest_sock`, which is open here and
-        // kept alive past krun_start_enter below. `GUEST_MAC` is a 'static
-        // array of the 6 bytes the MAC argument points to.
+        // kept alive past krun_start_enter below. `GUEST_MAC` is a const
+        // array of the 6 bytes the MAC argument points to. The header types
+        // the pointee as mutable but documents no write to it, so this
+        // relies on libkrun only reading the MAC.
         let ret = unsafe {
             ffi::krun_add_net_unixstream(
                 ctx_id,
@@ -438,6 +445,18 @@ mod tests {
 
     // Linux wait status encoding: normal exit code N is N << 8,
     // death by signal S is S in the low 7 bits.
+
+    #[test]
+    fn shutdown_returns_vmm_error_without_signalling_a_pid_that_is_not_our_child() {
+        // waitpid on a pid that is not our child fails with ECHILD, so the
+        // pid may belong to an unrelated process and must not be killed.
+        let (net_sock, _peer) = UnixStream::pair().unwrap();
+        let vm = Vm {
+            net_sock,
+            child: i32::MAX,
+        };
+        assert_eq!(vm.shutdown(), EXIT_VMM_ERROR);
+    }
 
     #[test]
     fn to_cstring_rejects_interior_nul() {
