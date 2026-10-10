@@ -299,7 +299,6 @@ pub fn untrust(config_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::{Config, MountConfig, NetworkConfig, SecretConfig};

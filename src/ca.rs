@@ -162,7 +162,6 @@ pub fn mitm_server_config(resolver: Arc<MitmCertResolver>) -> Arc<rustls::Server
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

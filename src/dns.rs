@@ -178,7 +178,6 @@ fn build_empty_response(id: u16, query: &[u8], question_end: usize) -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

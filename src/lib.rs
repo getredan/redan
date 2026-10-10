@@ -2,7 +2,6 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::must_use_candidate)]
-#![allow(clippy::module_name_repetitions)]
 
 /// Install the rustls crypto provider (ring) if not already installed.
 ///
