@@ -4,6 +4,10 @@ use super::exec::parse_secret;
 use redan::image;
 use redan::image_meta::ImageMeta;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear sequence of independent environment checks, splitting it would only scatter them"
+)]
 pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
 
@@ -154,7 +158,18 @@ pub(crate) fn dir_size(path: &std::path::Path) -> u64 {
         .sum()
 }
 
-#[allow(clippy::cast_precision_loss)] // Display-only formatting
+/// `bytes / unit` rounded to one decimal place (ties to even), as `"N.D"`.
+/// Integer arithmetic keeps large sizes exact, unlike a round trip through `f64`.
+fn one_decimal(bytes: u64, unit: u64) -> String {
+    let scaled = u128::from(bytes) * 10;
+    let unit = u128::from(unit);
+    let (mut tenths, rem) = (scaled / unit, scaled % unit);
+    if rem * 2 > unit || (rem * 2 == unit && tenths % 2 == 1) {
+        tenths += 1;
+    }
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
 pub(crate) fn humanize_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
@@ -162,10 +177,37 @@ pub(crate) fn humanize_bytes(bytes: u64) -> String {
     if bytes < KB {
         format!("{bytes} B")
     } else if bytes < MB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
+        format!("{} KB", one_decimal(bytes, KB))
     } else if bytes < GB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
+        format!("{} MB", one_decimal(bytes, MB))
     } else {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
+        format!("{} GB", one_decimal(bytes, GB))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_bytes_picks_unit_and_rounds_to_one_decimal() {
+        assert_eq!(humanize_bytes(0), "0 B");
+        assert_eq!(humanize_bytes(1023), "1023 B");
+        assert_eq!(humanize_bytes(1024), "1.0 KB");
+        assert_eq!(humanize_bytes(1536), "1.5 KB");
+        assert_eq!(humanize_bytes(1024 * 1024 - 1), "1024.0 KB");
+        assert_eq!(humanize_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(humanize_bytes(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
+    }
+
+    #[test]
+    fn humanize_bytes_rounds_exact_ties_to_even() {
+        assert_eq!(humanize_bytes(1280), "1.2 KB");
+        assert_eq!(humanize_bytes(1792), "1.8 KB");
+    }
+
+    #[test]
+    fn humanize_bytes_handles_u64_max() {
+        assert_eq!(humanize_bytes(u64::MAX), "17179869184.0 GB");
     }
 }

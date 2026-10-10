@@ -1,8 +1,3 @@
-// Pedantic lints deferred until API stabilizes
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::must_use_candidate)]
-
 /// Install the rustls crypto provider (ring) if not already installed.
 ///
 /// Safe to call multiple times; subsequent calls are no-ops.
@@ -16,6 +11,11 @@ pub fn ensure_crypto_provider() {
 ///
 /// Returns `Ok(())` if `/dev/kvm` can be opened, or an error describing
 /// what went wrong (missing device vs. permission denied).
+///
+/// # Errors
+///
+/// Returns the `io::Error` from opening `/dev/kvm`: `NotFound` when the
+/// device does not exist, `PermissionDenied` when the user lacks access.
 pub fn check_kvm() -> std::io::Result<()> {
     std::fs::File::open("/dev/kvm")?;
     Ok(())

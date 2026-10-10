@@ -1,10 +1,3 @@
-#![allow(
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::string_slice
-)]
 //! PS-6: Adversarial test suite for redan's security model.
 //!
 //! Tests organized by attack category. Each test references the specific
@@ -44,6 +37,8 @@
 //! Guest receives response
 //! ```
 
+use std::io::Write;
+
 use redan::dns;
 use redan::secret::{SecretBinding, inject, rewrite_request_headers, scrub};
 use smoltcp::wire::Ipv4Address;
@@ -52,14 +47,14 @@ fn secret(placeholder: &str, real: &str, hosts: &[&str]) -> SecretBinding {
     SecretBinding::new_unchecked(
         placeholder.to_string(),
         real.to_string(),
-        hosts.iter().map(|h| h.to_string()).collect(),
+        hosts.iter().map(ToString::to_string).collect(),
     )
 }
 
 fn http_request(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
     let mut req = format!("{method} {path} HTTP/1.1\r\n");
     for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
+        req.extend([*k, ": ", *v, "\r\n"]);
     }
     req.push_str("\r\n");
     req.push_str(body);
@@ -75,7 +70,8 @@ fn dns_query(hostname: &str, qtype: u16) -> Vec<u8> {
     pkt.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     pkt.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
     for label in hostname.split('.') {
-        pkt.push(label.len() as u8);
+        // DNS labels are at most 63 octets, so the length always fits in a byte.
+        pkt.push(u8::try_from(label.len()).unwrap_or(u8::MAX));
         pkt.extend_from_slice(label.as_bytes());
     }
     pkt.push(0); // root label
@@ -265,7 +261,7 @@ fn a06_binary_body_preserved_during_injection() {
     );
 }
 
-/// Ensure inject() handles requests with no body separator gracefully.
+/// Ensure `inject()` handles requests with no body separator gracefully.
 /// A partial/truncated request should not panic or leak secrets.
 #[test]
 fn a07_truncated_request_no_panic() {
@@ -362,7 +358,7 @@ fn b03_scrub_does_not_catch_url_encoded_secret() {
 }
 
 /// Partial secret match should NOT trigger scrubbing.
-/// If the secret is "ghp_SuperSecret123", the string "ghp_Super" appearing
+/// If the secret is `ghp_SuperSecret123`, the string `ghp_Super` appearing
 /// in a response must not be scrubbed.
 #[test]
 fn b04_scrub_requires_exact_full_match() {
@@ -389,7 +385,7 @@ fn b05_scrub_preserves_binary_response() {
     )];
     // Simulate a gzip-compressed response (random bytes, invalid UTF-8)
     let mut resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n".to_vec();
-    let binary: Vec<u8> = (0..256).map(|i| i as u8).collect();
+    let binary: Vec<u8> = (0..=u8::MAX).collect();
     resp.extend_from_slice(&binary);
 
     let (result, count) = scrub(&resp, "api.github.com", &secrets);
@@ -451,7 +447,7 @@ fn c01_all_dns_queries_resolve_to_gateway() {
 /// DNS TXT queries (used by some exfil tools) return empty response.
 /// Must not be forwarded upstream.
 ///
-/// Tools: DNScat2, Iodine use TXT records for bidirectional tunneling.
+/// Tools: `DNScat2`, `Iodine` use TXT records for bidirectional tunneling.
 #[test]
 fn c02_txt_queries_return_empty() {
     let query = dns_query("tunnel.evil.com", 16); // TXT
@@ -683,7 +679,7 @@ fn e01_domain_fronting_injects_based_on_sni_not_host() {
 /// This is intentionally recognizable (aids debugging). The suffix
 /// must contain enough entropy to prevent prediction.
 ///
-/// Note: parse_secret (in main.rs) generates placeholders using
+/// Note: `parse_secret` (in `main.rs`) generates placeholders using
 /// PID + timestamp + env name hash. That can't be tested from
 /// the library crate. This test documents the format contract.
 #[test]
@@ -701,14 +697,17 @@ fn f01_placeholder_format_documented() {
         "placeholder must start with redan_ph_ prefix"
     );
     // Suffix should be long enough to prevent brute-force
-    let suffix = &binding.placeholder()["redan_ph_".len()..];
+    let suffix = binding
+        .placeholder()
+        .strip_prefix("redan_ph_")
+        .expect("prefix checked above");
     assert!(
         suffix.len() >= 8,
         "placeholder suffix must be >= 8 chars for entropy"
     );
 }
 
-/// Debug formatting must not leak real_value.
+/// Debug formatting must not leak `real_value`.
 ///
 /// CWE-532: Insertion of Sensitive Information into Log File.
 /// CWE-209: Generation of Error Message Containing Sensitive Information.
@@ -736,6 +735,7 @@ fn f03_clone_preserves_redaction() {
     let cloned = binding.clone();
     let debug = format!("{cloned:?}");
     assert!(!debug.contains("ghp_SuperSecret123"));
+    assert_eq!(binding.real_value(), cloned.real_value());
     // But the actual value must still work for injection
     assert_eq!(cloned.real_value(), "ghp_SuperSecret123");
 }
@@ -772,7 +772,7 @@ fn e04_websocket_upgrade_detected() {
 /// Accept-Encoding must be stripped to prevent compressed response
 /// scrubbing bypass.
 ///
-/// Without stripping, upstream returns gzip/br/zstd body and scrub()
+/// Without stripping, upstream returns gzip/br/zstd body and `scrub()`
 /// can't match literal secret bytes in the compressed stream.
 /// CWE-838, RFC 7231.
 #[test]
@@ -813,7 +813,7 @@ fn h01_rewrite_request_headers() {
 /// CRLF in secret values would inject extra HTTP headers.
 /// CWE-93: CRLF Injection. CVE-2020-* (various header injection bugs).
 ///
-/// parse_secret must reject secrets containing \r or \n.
+/// `parse_secret` must reject secrets containing `\r` or `\n`.
 #[test]
 fn h02_crlf_in_secret_body_does_not_corrupt_headers() {
     // Even if a secret somehow contained CRLF, inject() should not
@@ -881,7 +881,7 @@ fn h04_localhost_case_insensitive() {
 }
 
 /// Chunked response with secret intact after full buffering.
-/// relay_upstream() accumulates the complete response before scrub().
+/// `relay_upstream()` accumulates the complete response before `scrub()`.
 /// Secret should be caught even in chunked responses.
 #[test]
 fn h05_scrub_catches_secret_in_reassembled_chunked_response() {
@@ -916,7 +916,6 @@ fn h06_scrub_does_not_catch_gzip_compressed_secret() {
         &["api.github.com"],
     )];
     // flate2 compressed data containing the secret
-    use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder
         .write_all(b"{\"token\": \"ghp_SuperSecret123\"}")

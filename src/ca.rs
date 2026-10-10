@@ -14,6 +14,8 @@ use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::error::Error;
+
 #[derive(Debug)]
 pub struct MitmCa {
     ca_params: CertificateParams,
@@ -25,9 +27,14 @@ pub struct MitmCa {
 }
 
 impl MitmCa {
-    #[must_use]
-    #[allow(clippy::expect_used)] // CA key gen failure is unrecoverable
-    pub fn generate() -> Self {
+    /// Generate a fresh self-signed CA with a one-year validity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] if the CA key pair cannot be generated or
+    /// the CA certificate cannot be self-signed. Both only fail when the
+    /// crypto provider is broken.
+    pub fn generate() -> Result<Self, Error> {
         crate::ensure_crypto_provider();
         let mut params = CertificateParams::default();
         params
@@ -43,18 +50,20 @@ impl MitmCa {
         params.not_before = now;
         params.not_after = one_year;
 
-        let key = KeyPair::generate().expect("CA key generation failed");
-        let cert = params.self_signed(&key).expect("CA self-sign failed");
+        let key = KeyPair::generate().map_err(|e| format!("CA key generation failed: {e}"))?;
+        let cert = params
+            .self_signed(&key)
+            .map_err(|e| format!("CA self-sign failed: {e}"))?;
         let ca_cert_der = CertificateDer::from(cert.der().to_vec());
         let ca_cert_pem = cert.pem();
 
-        Self {
+        Ok(Self {
             ca_params: params,
             ca_key: key,
             ca_cert_der,
             ca_cert_pem,
             key_cache: HashMap::new(),
-        }
+        })
     }
 
     /// PEM-encoded CA certificate (for installing in guest trust store).
@@ -145,6 +154,7 @@ impl ResolvesServerCert for MitmCertResolver {
 
 /// Build a shared `ServerConfig` with dynamic MITM cert resolution.
 /// One config is shared across all connections.
+#[must_use]
 pub fn mitm_server_config(resolver: Arc<MitmCertResolver>) -> Arc<rustls::ServerConfig> {
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -167,13 +177,13 @@ mod tests {
 
     #[test]
     fn test_ca_generation() {
-        let ca = MitmCa::generate();
+        let ca = MitmCa::generate().unwrap();
         assert!(ca.ca_cert_pem().contains("BEGIN CERTIFICATE"));
     }
 
     #[test]
     fn test_certified_key_generation() {
-        let mut ca = MitmCa::generate();
+        let mut ca = MitmCa::generate().unwrap();
         let key1 = ca.certified_key_for("example.com").unwrap();
         let key2 = ca.certified_key_for("example.com").unwrap();
         // Same pointer (cached)
@@ -182,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_cert_resolver() {
-        let ca = Arc::new(Mutex::new(MitmCa::generate()));
+        let ca = Arc::new(Mutex::new(MitmCa::generate().unwrap()));
         let resolver = MitmCertResolver { ca };
         // ResolvesServerCert requires a ClientHello, which is hard to
         // construct in tests. Just verify the type exists and compiles.
@@ -191,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_mitm_server_config() {
-        let ca = Arc::new(Mutex::new(MitmCa::generate()));
+        let ca = Arc::new(Mutex::new(MitmCa::generate().unwrap()));
         let resolver = Arc::new(MitmCertResolver { ca });
         let config = mitm_server_config(resolver);
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);

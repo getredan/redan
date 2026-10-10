@@ -1,9 +1,3 @@
-#![allow(
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
 /// Integration tests that boot real libkrun VMs.
 ///
 /// Require KVM (`/dev/kvm`) and a redan image named "test".
@@ -20,6 +14,10 @@ use redan::vm;
 /// even without `--test-threads=1`.
 static VM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+#[expect(
+    clippy::expect_used,
+    reason = "test helper outside a #[test] fn: a bad image name must fail the test with a message"
+)]
 fn test_rootfs() -> String {
     let path = redan::image::image_path("test").expect("invalid test image name");
     assert!(
@@ -37,7 +35,7 @@ fn end_to_end_secret_injection() {
     let _lock = VM_LOCK.lock().unwrap();
     let rootfs = test_rootfs();
 
-    let ca = MitmCa::generate();
+    let ca = MitmCa::generate().expect("generate CA");
     vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
 
     let placeholder = "redan_ph_test_e2e_abcd1234";
@@ -75,7 +73,7 @@ fn end_to_end_secret_injection() {
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(&config);
+    let vm_handle = vm::Vm::boot(&config).expect("boot VM");
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
     let _ = proxy::run(proxy::ProxyConfig {
@@ -97,7 +95,7 @@ fn synthetic_dns_resolution() {
     let _lock = VM_LOCK.lock().unwrap();
     let rootfs = test_rootfs();
 
-    let ca = MitmCa::generate();
+    let ca = MitmCa::generate().expect("generate CA");
     vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
@@ -122,7 +120,7 @@ fn synthetic_dns_resolution() {
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(&config);
+    let vm_handle = vm::Vm::boot(&config).expect("boot VM");
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
     let _ = proxy::run(proxy::ProxyConfig {
