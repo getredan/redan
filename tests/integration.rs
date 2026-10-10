@@ -1,9 +1,3 @@
-#![allow(
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
 /// Integration tests that boot real libkrun VMs.
 ///
 /// Require KVM (`/dev/kvm`) and a redan image named "test".
@@ -20,6 +14,10 @@ use redan::vm;
 /// even without `--test-threads=1`.
 static VM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+#[expect(
+    clippy::expect_used,
+    reason = "test helper outside a #[test] fn: a bad image name must fail the test with a message"
+)]
 fn test_rootfs() -> String {
     let path = redan::image::image_path("test").expect("invalid test image name");
     assert!(

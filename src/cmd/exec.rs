@@ -9,7 +9,16 @@ use redan::session;
 use redan::templates;
 use redan::vm;
 
-#[allow(clippy::struct_excessive_bools)]
+/// Where the host-side `redan` logs go while a session runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogDestination {
+    /// Leave logs on stderr.
+    Stderr,
+    /// Redirect logs to the session's `redan.log`, so they don't interleave
+    /// with guest output on the terminal.
+    SessionFile,
+}
+
 pub(crate) struct ExecConfig<'a> {
     pub rootfs: &'a str,
     pub command: &'a str,
@@ -31,15 +40,18 @@ pub(crate) struct ExecConfig<'a> {
     /// Guest directory to chown to `run_as` user before the user command runs.
     /// Used for staged credentials that the agent needs to write back to.
     pub chown_dir: Option<&'a str>,
-    /// Redirect logs to session file (avoids interleaving with guest output).
-    /// True whenever stdin is a TTY.
-    pub redirect_logs: bool,
+    /// Session file whenever stdin is a TTY, to avoid interleaving with guest output.
+    pub log_destination: LogDestination,
     /// Launch headless Chrome with CDP and an allowlist proxy.
     pub browser: bool,
 }
 
 /// Run a sandboxed VM session to completion.
 /// Returns the guest exit code, which the caller should propagate.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one session lifecycle (setup, boot, wait, teardown) sharing session, proxy and VM state"
+)]
 pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // Create or reuse session
     let session_id = cfg.session_id.map_or_else(session::new_id, Into::into);
@@ -69,7 +81,7 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     log::info!("session {session_id} started");
 
     // Redirect logs to a file so they don't interleave with guest output.
-    if cfg.redirect_logs {
+    if cfg.log_destination == LogDestination::SessionFile {
         let log_path = session::session_dir(&session_id).join("redan.log");
         eprintln!("session: {session_id} (logs: {})", log_path.display());
         crate::redirect_logs_to_file(&log_path);
@@ -638,7 +650,6 @@ fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

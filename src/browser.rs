@@ -31,6 +31,7 @@ const CHROME_CANDIDATES: &[&str] = &[
 ];
 
 /// Find a Chrome/Chromium binary on PATH.
+#[must_use]
 pub fn find_chrome() -> Option<PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
     find_chrome_in(&path_var)
@@ -62,6 +63,18 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// Start Chrome behind a local allowlist proxy and wait for its CDP endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message describing the failing step when:
+    /// - no Chrome/Chromium binary is on `PATH`
+    /// - [`CDP_PORT`] is already in use on 127.0.0.1
+    /// - random bytes, the `0700` profile directory, the proxy listener or the
+    ///   proxy thread cannot be created
+    /// - Chrome fails to spawn, exits before CDP is ready, or does not answer
+    ///   on [`CDP_PORT`] within 10 seconds (the proxy thread and profile
+    ///   directory are cleaned up in these three cases)
     pub fn launch(config: BrowserConfig) -> Result<Self, String> {
         let chrome = find_chrome()
             .ok_or("no Chrome/Chromium binary found on PATH. Install chromium or google-chrome.")?;
@@ -103,7 +116,9 @@ impl Browser {
 
         let proxy_thread = std::thread::Builder::new()
             .name("browser-proxy".into())
-            .spawn(move || run_allowlist_proxy(listener, allowed_hosts, shutdown_clone))
+            .spawn(move || {
+                run_allowlist_proxy(&listener, allowed_hosts.as_ref(), &shutdown_clone);
+            })
             .map_err(|e| format!("failed to spawn proxy thread: {e}"))?;
 
         // From this point, any early return must tear down the proxy thread
@@ -150,6 +165,7 @@ impl Browser {
         })
     }
 
+    #[must_use]
     pub const fn proxy_port(&self) -> u16 {
         self.proxy_port
     }
@@ -302,11 +318,10 @@ fn poll_cdp_ready(timeout_secs: u64) -> bool {
 
 const MAX_PROXY_WORKERS: usize = 32;
 
-#[allow(clippy::needless_pass_by_value)] // Owned values needed: moved into thread
 fn run_allowlist_proxy(
-    listener: TcpListener,
-    allowed_hosts: Option<Arc<[String]>>,
-    shutdown: Arc<AtomicBool>,
+    listener: &TcpListener,
+    allowed_hosts: Option<&Arc<[String]>>,
+    shutdown: &AtomicBool,
 ) {
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -317,7 +332,7 @@ fn run_allowlist_proxy(
                     drop(stream);
                     continue;
                 }
-                let hosts = allowed_hosts.clone();
+                let hosts = allowed_hosts.cloned();
                 let active = active.clone();
                 active.fetch_add(1, Ordering::Relaxed);
                 let _ = std::thread::Builder::new()
@@ -580,7 +595,6 @@ fn parse_absolute_uri(uri: &str) -> Option<(String, u16, String)> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -733,7 +747,7 @@ mod tests {
 
         listener.set_nonblocking(true).unwrap();
         let proxy = std::thread::spawn(move || {
-            run_allowlist_proxy(listener, hosts, shutdown_clone);
+            run_allowlist_proxy(&listener, hosts.as_ref(), &shutdown_clone);
         });
 
         // Give the proxy a moment to start
@@ -768,7 +782,7 @@ mod tests {
 
         listener.set_nonblocking(true).unwrap();
         let proxy = std::thread::spawn(move || {
-            run_allowlist_proxy(listener, hosts, shutdown_clone);
+            run_allowlist_proxy(&listener, hosts.as_ref(), &shutdown_clone);
         });
 
         std::thread::sleep(Duration::from_millis(50));
@@ -802,7 +816,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         // allow-all mode (None), but SSRF check should still block localhost
         let proxy = std::thread::spawn(move || {
-            run_allowlist_proxy(listener, None, shutdown_clone);
+            run_allowlist_proxy(&listener, None, &shutdown_clone);
         });
 
         std::thread::sleep(Duration::from_millis(50));

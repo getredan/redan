@@ -24,6 +24,12 @@ pub trait SecretProvider {
     /// The reference format is provider-specific:
     /// - Literal: the value itself
     /// - Vault: `path#field` (e.g., `secret/redan/test#github_token`)
+    ///
+    /// # Errors
+    ///
+    /// Provider-specific. See the implementations: [`Literal`] never fails,
+    /// [`Env`] and [`Vault`] return an `io::Error` whose kind says what
+    /// went wrong.
     fn resolve(&self, reference: &str) -> Result<String, io::Error>;
 }
 
@@ -93,7 +99,14 @@ pub struct Vault {
 }
 
 impl Vault {
-    /// Create from environment. Returns an error if no token is available.
+    /// Create from environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `io::Error` of kind `NotFound` when neither `VAULT_TOKEN`
+    /// nor `~/.vault-token` yields a token (including when `$HOME` is unset
+    /// or the token is empty), or the underlying read error if
+    /// `~/.vault-token` exists but cannot be read.
     pub fn from_env() -> Result<Self, io::Error> {
         let addr =
             std::env::var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_string());
@@ -186,6 +199,14 @@ impl SecretProvider for Vault {
 /// - `vault://path#field` -> Vault KV v2
 /// - `env://VAR_NAME`    -> host environment variable
 /// - anything else       -> literal value (backward compatible)
+///
+/// # Errors
+///
+/// Returns an `io::Error` for a `vault://` reference when no Vault token is
+/// available or the lookup fails (see [`Vault::from_env`] and the [`Vault`]
+/// provider), and for an `env://` reference when the name is empty
+/// (`InvalidInput`), the variable is unset (`NotFound`), or it is set but
+/// empty (`InvalidData`). Literal values never fail.
 pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
     resolve_secret_value_with(reference, |name| std::env::var(name).ok())
 }
@@ -207,7 +228,6 @@ fn resolve_secret_value_with(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
