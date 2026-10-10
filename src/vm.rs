@@ -94,7 +94,7 @@ impl Vm {
     /// thread at fork time would deadlock the child.
     #[must_use]
     #[allow(clippy::expect_used, clippy::unwrap_used)] // FFI setup; failures are unrecoverable
-    pub fn boot(config: VmConfig) -> Self {
+    pub fn boot(config: &VmConfig) -> Self {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();
 
@@ -191,7 +191,7 @@ impl Vm {
         }
     }
 
-    fn run_vm(config: VmConfig, guest_sock: UnixStream, guest_fd: i32) -> i32 {
+    fn run_vm(config: &VmConfig, guest_sock: UnixStream, guest_fd: i32) -> i32 {
         // Raise host process fd limit to hard max. libkrun needs fds
         // for KVM vcpus, virtio devices, etc. (Same as smolvm.)
         let mut limit = libc::rlimit {

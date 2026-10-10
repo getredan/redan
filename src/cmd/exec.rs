@@ -291,7 +291,7 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // in interactive mode.
     redan::terminal::save_terminal();
 
-    let vm_handle = vm::Vm::boot(vm_config);
+    let vm_handle = vm::Vm::boot(&vm_config);
 
     // Ignore SIGINT in the parent. Ctrl-C must reach the guest, not kill
     // redan: the terminal delivers SIGINT to the whole foreground process
