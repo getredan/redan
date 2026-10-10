@@ -100,3 +100,17 @@ internet (only allowed hosts)
 - KISS. YAGNI. Guard clauses. Return early.
 - Strong typing. Match surrounding style.
 - Workarounds marked: `// WORKAROUND: <description>. See <link>`
+
+## Rust
+
+Edition 2024. Clippy already checks most idiom rules (`single_match`, `while_let_loop`, `uninlined_format_args`, ...), so this list only covers what it can't check.
+
+- Guard clauses use `let ... else`. Chained conditions use let chains (`if let Some(a) = x && let Some(b) = y`) instead of nesting.
+- Propagate errors with `?`. Use `map_err` only to add context that a `From` impl can't carry.
+- Every `unsafe` block gets a `// SAFETY:` comment that says why it's sound. Use the safe std API when there is one: `std::io::IsTerminal` over `libc::isatty`, `c"/bin/sh"` over `CString::new("/bin/sh").unwrap()`.
+- Suppress a lint with `#[expect(lint, reason = "...")]`, not `#[allow]`. The compiler tells you when the suppression is no longer needed.
+- Types that hold secret values don't derive `Debug`. Write a redacting `Debug` by hand and keep the value in `Zeroizing`, like `secret::SecretBinding`.
+- Bytes from the guest or the network are untrusted. New parsing code uses `.get(..)` over `buf[i]`, `try_from` over `as`, and checked arithmetic on lengths, so a crafted packet can't panic the proxy.
+- Keep a `for` loop when the body has early exits, `?`, or mutable state. Use an iterator chain for a plain filter/map/collect.
+- The code is sync: a smoltcp poll loop plus threads. Adding an async runtime is an architecture change, so raise it first.
+- Internal functions take `&str`, `&Path`, `&[u8]`, not `impl AsRef<_>`.
