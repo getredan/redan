@@ -26,6 +26,7 @@ mise run check            # format + lint + all tests
 | `mise run format-check` | CI formatting check |
 | `mise run lint` | Clippy with `-D warnings`. Lint levels live in `Cargo.toml` under `[lints]` |
 | `mise run test` | All tests (requires KVM + test image + Vault) |
+| `mise run e2e` | Claude Code evals against the real API (needs the `claude-code` image and `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`) |
 | `mise run test-setup` | Create test image and start Vault dev server |
 | `mise run vault-up` | Start Vault dev server and seed test data |
 | `mise run bench` | Boot-to-proxy benchmark (needs KVM + image) |
@@ -53,6 +54,7 @@ Security-critical project. Tests are load-bearing.
 
 - Unit tests for pure logic: DNS, SNI, injection, scrubbing, certs, templates
 - Integration tests boot real VMs (KVM + test image via `redan image create test`)
+- `tests/e2e.rs` runs the `redan` binary in a throwaway project and home. Its Claude Code evals are `#[ignore]`d because they use a real token and the real API, so run them yourself with `mise run e2e`
 - Vault tests require a running Vault (`mise run vault-up`)
 - Test names describe scenarios: `inject_skips_disallowed_host`
 - Deterministic: no sleeps, no network in unit tests
