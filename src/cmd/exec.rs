@@ -298,9 +298,18 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // group, and the VM child (libkrun) forwards it to the guest console.
     // The guest agent handles it (or its shell exits), the VM child dies,
     // and the parent cleans up through the normal reap path.
-    // SAFETY: SIG_IGN disposition change, no handler code involved.
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_IGN);
+    // SAFETY: `signal(signum, handler)` needs a valid signal number and a
+    // valid handler value. SIGINT is a valid, catchable signal, and SIG_IGN
+    // is a disposition constant rather than a function pointer, so no handler
+    // code can run and no handler state can be invalidated.
+    let previous = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+    if previous == libc::SIG_ERR {
+        // Not fatal: the VM child is already running, so exiting here would
+        // orphan it. Ctrl-C would then also terminate redan itself.
+        eprintln!(
+            "warning: could not ignore SIGINT: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     let net_sock = match vm_handle.net_sock.try_clone() {

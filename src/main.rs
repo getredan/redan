@@ -25,9 +25,24 @@ const fn redan_banner() -> &'static str {
 Secure AI agent sandbox with network-layer secret injection"
 }
 
-fn init_logging(log_file: Option<&str>) {
+/// Point stderr (fd 2) at `file`. The file stays open and owned by the caller.
+fn redirect_stderr_to(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
+    // SAFETY: `dup2(oldfd, newfd)` needs `oldfd` to be an open descriptor.
+    // `file.as_raw_fd()` stays open for as long as the borrowed `file` lives,
+    // which outlasts the call. `newfd` is STDERR_FILENO, which `dup2` closes
+    // and replaces atomically, and nothing in this process holds an owned
+    // handle to fd 2 that could double-close it.
+    let ret = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+    if ret == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn init_logging(log_file: Option<&str>) {
     let env = Env::default().default_filter_or("info");
     let mut builder = env_logger::Builder::from_env(env);
     if let Some(path) = log_file {
@@ -39,8 +54,8 @@ fn init_logging(log_file: Option<&str>) {
                 eprintln!("cannot open log file {path}: {e}");
                 std::process::exit(1);
             });
-        unsafe {
-            libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+        if let Err(e) = redirect_stderr_to(&file) {
+            eprintln!("cannot redirect stderr to log file {path}: {e}");
         }
         builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
@@ -55,9 +70,8 @@ fn redirect_logs_to_file(path: &std::path::Path) {
         .append(true)
         .open(path)
     {
-        use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+        if let Err(e) = redirect_stderr_to(&file) {
+            eprintln!("cannot redirect stderr to log file {}: {e}", path.display());
         }
     }
 }
@@ -1310,6 +1324,37 @@ fn attach_session(id_or_name: Option<&str>) {
     eprintln!("\ndetached from session {}", meta.id);
 }
 
+/// Convert a pid read from session metadata into a value that is safe to pass
+/// to `kill(2)`.
+///
+/// `kill(2)` gives non-positive pids group semantics: 0 signals our own
+/// process group and -1 signals every process the user may signal. A pid
+/// above `i32::MAX` would wrap into that range, so it is rejected, as is pid
+/// 1 (init), which a session never owns.
+fn kill_target(pid: u32) -> Result<libc::pid_t, String> {
+    match libc::pid_t::try_from(pid) {
+        Ok(target) if target > 1 => Ok(target),
+        _ => Err(format!("invalid pid {pid} in session metadata")),
+    }
+}
+
+/// Send `signal` to the single process `pid`.
+///
+/// `pid` comes from [`kill_target`], so it is always greater than 1.
+fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> std::io::Result<()> {
+    debug_assert!(pid > 1);
+    // SAFETY: `kill` has no memory preconditions, it takes two integers. The
+    // only hazard is a pid with group semantics (0, -1, or negative), which
+    // callers rule out by obtaining `pid` from `kill_target`, and which the
+    // assertion above checks in debug builds.
+    let ret = unsafe { libc::kill(pid, signal) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 fn stop_session(id_or_name: Option<&str>) {
     let meta = session::find_session(id_or_name).unwrap_or_else(|| {
         if let Some(q) = id_or_name {
@@ -1330,15 +1375,16 @@ fn stop_session(id_or_name: Option<&str>) {
         std::process::exit(1);
     });
 
+    let target = kill_target(pid).unwrap_or_else(|e| {
+        eprintln!("session {}: {e}", meta.id);
+        std::process::exit(1);
+    });
+
     eprintln!("stopping session {} (pid {pid})...", meta.id);
 
     // Send SIGTERM for graceful shutdown
-    let ret = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
-    if ret != 0 {
-        eprintln!(
-            "failed to send SIGTERM: {}",
-            std::io::Error::last_os_error()
-        );
+    if let Err(e) = send_signal(target, libc::SIGTERM) {
+        eprintln!("failed to send SIGTERM: {e}");
         std::process::exit(1);
     }
 
@@ -1352,8 +1398,9 @@ fn stop_session(id_or_name: Option<&str>) {
     }
 
     eprintln!("session {} did not exit, sending SIGKILL", meta.id);
-    unsafe {
-        libc::kill(pid.cast_signed(), libc::SIGKILL);
+    if let Err(e) = send_signal(target, libc::SIGKILL) {
+        eprintln!("failed to send SIGKILL: {e}");
+        std::process::exit(1);
     }
     eprintln!("session {} killed", meta.id);
 }
@@ -1497,7 +1544,7 @@ fn build_bundled_image(name: &str) -> std::io::Result<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote;
+    use super::{kill_target, shell_quote};
 
     #[test]
     fn shell_quote_wraps_plain_arg() {
@@ -1516,5 +1563,35 @@ mod tests {
         assert_eq!(shell_quote("; rm -rf /"), "'; rm -rf /'");
         assert_eq!(shell_quote("$(whoami)"), "'$(whoami)'");
         assert_eq!(shell_quote("a && b"), "'a && b'");
+    }
+
+    #[test]
+    fn kill_target_rejects_pid_that_wraps_to_minus_one() {
+        // kill(-1, sig) signals every process the user may signal.
+        let err = kill_target(u32::MAX).unwrap_err();
+        assert!(err.contains("invalid pid"), "{err}");
+    }
+
+    #[test]
+    fn kill_target_rejects_pid_above_i32_max() {
+        assert!(kill_target(u32::try_from(i32::MAX).unwrap() + 1).is_err());
+    }
+
+    #[test]
+    fn kill_target_rejects_zero_pid() {
+        // kill(0, sig) signals our own process group.
+        assert!(kill_target(0).is_err());
+    }
+
+    #[test]
+    fn kill_target_rejects_init_pid() {
+        assert!(kill_target(1).is_err());
+    }
+
+    #[test]
+    fn kill_target_accepts_ordinary_pid() {
+        assert_eq!(kill_target(2), Ok(2));
+        assert_eq!(kill_target(4242), Ok(4242));
+        assert_eq!(kill_target(i32::MAX.cast_unsigned()), Ok(i32::MAX));
     }
 }
