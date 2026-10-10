@@ -13,6 +13,20 @@ pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
 pub const KRUN_LOG_TARGET_DEFAULT: c_int = -1;
 
+// Declarations for the libkrun C API, as documented in `libkrun.h`.
+//
+// Every function is `unsafe` to call. None is declared `safe fn`, because
+// we make no soundness claims about libkrun's C code beyond what its
+// header documents. In general, callers must uphold:
+//
+// - Every `*const c_char` is a valid, NUL-terminated C string that stays
+//   alive for the duration of the call.
+// - Every `*const *const c_char` points to an array of such strings,
+//   terminated by a null pointer, that stays alive for the call.
+// - `ctx_id` comes from `krun_create_ctx` and its configuration has not
+//   been consumed by `krun_start_enter`.
+// - File descriptors handed over (`krun_add_net_unixstream`) are open and
+//   stay open for as long as the VM runs.
 unsafe extern "C" {
     pub fn krun_init_log(target_fd: c_int, level: u32, style: u32, options: u32) -> i32;
     pub fn krun_create_ctx() -> i32;
