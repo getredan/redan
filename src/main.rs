@@ -1,7 +1,3 @@
-// Binary crate lints
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::redundant_pub_crate)] // cmd/ modules are pub(crate) by design
-
 use clap::Parser;
 use env_logger::Env;
 use redan::config;
@@ -358,6 +354,10 @@ enum ImageAction {
     },
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match arm per subcommand that unpacks clap fields into a handler call"
+)]
 fn main() {
     redan::ensure_crypto_provider();
 
@@ -409,7 +409,7 @@ fn main() {
                 audit_log,
                 forwards,
                 discover,
-                detach,
+                mode: LaunchMode::from_detach_flag(detach),
                 name,
                 run_as: None,
                 browser,
@@ -613,7 +613,23 @@ fn main() {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)] // CLI flags map naturally to bools
+/// Whether a session runs attached to this process or in a background daemon.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchMode {
+    Foreground,
+    Detached,
+}
+
+impl LaunchMode {
+    const fn from_detach_flag(detach: bool) -> Self {
+        if detach {
+            Self::Detached
+        } else {
+            Self::Foreground
+        }
+    }
+}
+
 struct ExecArgs {
     image_name: Option<String>,
     rootfs: Option<String>,
@@ -627,7 +643,7 @@ struct ExecArgs {
     audit_log: Option<String>,
     forwards: Vec<String>,
     discover: bool,
-    detach: bool,
+    mode: LaunchMode,
     name: Option<String>,
     run_as: Option<String>,
     browser: bool,
@@ -706,6 +722,10 @@ fn build_image_if_needed(auto: &redan::auto_detect::AutoDetected) {
 /// Resolve final config from a base Config plus CLI overrides, then boot.
 /// Shared by `redan exec` (base from config/flags/auto-detect) and
 /// `redan run` (base from a named agent profile).
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential config merge then boot, the steps share many locals"
+)]
 fn launch(
     cfg: &config::Config,
     detected_run_as: Option<String>,
@@ -724,7 +744,11 @@ fn launch(
     let command = args.command.or_else(|| cfg.command.clone());
     let timeout = args.timeout.or(cfg.timeout).unwrap_or(3600);
     let interactive = args.interactive || cfg.interactive.unwrap_or(false);
-    let redirect_logs = interactive || redan::terminal::stdin_is_tty();
+    let log_destination = if interactive || redan::terminal::stdin_is_tty() {
+        cmd::exec::LogDestination::SessionFile
+    } else {
+        cmd::exec::LogDestination::Stderr
+    };
     let audit_log = args.audit_log.or_else(|| cfg.audit_log.clone());
 
     let mut allow_hosts = args.allow_hosts;
@@ -814,24 +838,24 @@ fn launch(
             "echo 'no command specified; use: redan exec --image <name> -- <command>'".to_string()
         }
     });
-    if args.detach {
-        exec_detached(
-            &rootfs_path,
-            &command,
-            timeout,
-            &secrets,
-            &allow_hosts,
-            &forwards,
-            &mounts,
-            audit_log.as_deref(),
-            image_name.as_deref(),
-            &cfg.env,
-            args.discover,
-            args.name.as_deref(),
-            run_as.as_deref(),
-            chown_dir.as_deref(),
-            args.browser,
-        );
+    if args.mode == LaunchMode::Detached {
+        exec_detached(&DaemonConfig {
+            rootfs: rootfs_path,
+            command,
+            timeout_secs: timeout,
+            secrets,
+            allow_hosts,
+            forwards,
+            mounts,
+            audit_log,
+            image_name,
+            env: cfg.env.clone(),
+            discover: args.discover,
+            session_name: args.name,
+            run_as,
+            chown_dir,
+            browser: args.browser,
+        });
     } else {
         let guest_code = cmd::exec::run(&cmd::exec::ExecConfig {
             rootfs: &rootfs_path,
@@ -850,7 +874,7 @@ fn launch(
             session_id: None,
             run_as: run_as.as_deref(),
             chown_dir: chown_dir.as_deref(),
-            redirect_logs,
+            log_destination,
             browser: args.browser,
         });
         std::process::exit(guest_code);
@@ -977,7 +1001,7 @@ fn run_command(args: RunArgs) {
             audit_log: args.audit_log,
             forwards: args.forwards,
             discover: args.discover,
-            detach: args.detach,
+            mode: LaunchMode::from_detach_flag(args.detach),
             name: args.name,
             run_as: None, // the agent's run_as flows via detected_run_as
             browser: args.browser,
@@ -1033,24 +1057,7 @@ struct DaemonConfig {
     browser: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn exec_detached(
-    rootfs: &str,
-    command: &str,
-    timeout: u64,
-    secrets: &[String],
-    allow_hosts: &[String],
-    forwards: &[String],
-    mounts: &[String],
-    audit_log: Option<&str>,
-    image_name: Option<&str>,
-    env: &std::collections::BTreeMap<String, String>,
-    discover: bool,
-    session_name: Option<&str>,
-    run_as: Option<&str>,
-    chown_dir: Option<&str>,
-    browser: bool,
-) {
+fn exec_detached(daemon_cfg: &DaemonConfig) {
     // Create session directory and write daemon config.
     // Directory is 0o700 and config file is 0o600 because the config
     // contains secret specs that are briefly on disk until the daemon
@@ -1067,26 +1074,8 @@ fn exec_detached(
         let _ = std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    let daemon_cfg = DaemonConfig {
-        rootfs: rootfs.into(),
-        command: command.into(),
-        timeout_secs: timeout,
-        secrets: secrets.to_vec(),
-        allow_hosts: allow_hosts.to_vec(),
-        forwards: forwards.to_vec(),
-        mounts: mounts.to_vec(),
-        audit_log: audit_log.map(Into::into),
-        image_name: image_name.map(Into::into),
-        env: env.clone(),
-        discover,
-        session_name: session_name.map(Into::into),
-        run_as: run_as.map(Into::into),
-        chown_dir: chown_dir.map(Into::into),
-        browser,
-    };
-
     let config_path = session_dir.join("daemon_config.json");
-    let config_json = serde_json::to_string(&daemon_cfg).unwrap_or_else(|e| {
+    let config_json = serde_json::to_string(daemon_cfg).unwrap_or_else(|e| {
         eprintln!("cannot serialize daemon config: {e}");
         std::process::exit(1);
     });
@@ -1147,14 +1136,21 @@ fn exec_detached(
     });
 
     // Write initial session metadata
-    let mut meta = session::SessionMeta::new(&session_id, image_name, Some(command));
+    let mut meta = session::SessionMeta::new(
+        &session_id,
+        daemon_cfg.image_name.as_deref(),
+        Some(&daemon_cfg.command),
+    );
     meta.pid = Some(daemon_pid);
-    meta.name = session_name.map(Into::into);
+    meta.name.clone_from(&daemon_cfg.session_name);
     if let Err(e) = meta.save() {
         eprintln!("warning: cannot save session metadata: {e}");
     }
 
-    let name_display = session_name.map_or(String::new(), |n| format!(" ({n})"));
+    let name_display = daemon_cfg
+        .session_name
+        .as_deref()
+        .map_or(String::new(), |n| format!(" ({n})"));
     eprintln!("session {session_id}{name_display} started (detached)");
     eprintln!("  redan logs {session_id} -f  tail logs");
     eprintln!("  redan stop {session_id}     stop session");
@@ -1211,7 +1207,7 @@ fn run_daemon(session_id: &str) {
         session_id: Some(session_id),
         run_as: cfg.run_as.as_deref(),
         chown_dir: cfg.chown_dir.as_deref(),
-        redirect_logs: false,
+        log_destination: cmd::exec::LogDestination::Stderr,
         browser: cfg.browser,
     });
     std::process::exit(guest_code);
