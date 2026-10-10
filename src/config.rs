@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// The allowlist entry that turns the allowlist off, so the guest can reach
+/// any host.
+pub const ALLOW_ALL_HOSTS: &str = "*";
+
 /// Top-level config file structure.
 ///
 /// ```toml
@@ -197,12 +201,22 @@ fn read_claude_settings(path: &Path) -> Option<Vec<String>> {
         .get("network")?
         .get("allowedDomains")?
         .as_array()?;
-    Some(
-        domains
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect(),
-    )
+    let mut hosts: Vec<String> = domains
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    // Imported settings can add hosts but not turn redan's allowlist off: a
+    // project's `.claude/settings*.json` comes with the repo, and a `"*"`
+    // meant for Claude Code's own sandbox shouldn't switch off redan's.
+    if hosts.iter().any(|h| h == ALLOW_ALL_HOSTS) {
+        eprintln!(
+            "warning: ignoring \"*\" in {}: Claude Code settings can't turn off redan's \
+             allowlist. Pass --allow-host '*' if you want that.",
+            path.display()
+        );
+        hosts.retain(|h| h != ALLOW_ALL_HOSTS);
+    }
+    Some(hosts)
 }
 
 /// Where a discovered config came from.
@@ -370,6 +384,19 @@ target = "/workspace"
         .unwrap();
         let domains = read_claude_settings(&path).unwrap();
         assert_eq!(domains, vec!["github.com", "*.npmjs.org"]);
+    }
+
+    #[test]
+    fn read_claude_settings_ignores_allow_all_wildcard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.local.json");
+        std::fs::write(
+            &path,
+            r#"{"sandbox": {"network": {"allowedDomains": ["github.com", "*"]}}}"#,
+        )
+        .unwrap();
+        let domains = read_claude_settings(&path).unwrap();
+        assert_eq!(domains, vec!["github.com"]);
     }
 
     #[test]
