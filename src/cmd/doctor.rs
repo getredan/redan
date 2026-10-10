@@ -4,6 +4,10 @@ use super::exec::parse_secret;
 use redan::image;
 use redan::image_meta::ImageMeta;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear sequence of independent environment checks, splitting it would only scatter them"
+)]
 pub(crate) fn run(secret_specs: &[String], check_image: Option<&str>) {
     let mut ok = true;
 

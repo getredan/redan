@@ -95,7 +95,10 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     );
     let audit_log_path = Some(audit_log_path.as_str());
 
-    let ca = MitmCa::generate();
+    let ca = MitmCa::generate().unwrap_or_else(|e| {
+        eprintln!("failed to generate MITM CA: {e}");
+        std::process::exit(1);
+    });
     log::info!("MITM CA generated");
 
     // Install CA cert in guest rootfs
@@ -303,7 +306,10 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
     // in interactive mode.
     redan::terminal::save_terminal();
 
-    let vm_handle = vm::Vm::boot(&vm_config);
+    let vm_handle = vm::Vm::boot(&vm_config).unwrap_or_else(|e| {
+        eprintln!("failed to boot VM: {e}");
+        std::process::exit(1);
+    });
 
     // Ignore SIGINT in the parent. Ctrl-C must reach the guest, not kill
     // redan: the terminal delivers SIGINT to the whole foreground process

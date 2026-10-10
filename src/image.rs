@@ -236,7 +236,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
 
     // Step 4: boot VM with network, run setup
     eprintln!("building image (this boots a VM with network)...");
-    let ca = MitmCa::generate();
+    let ca = MitmCa::generate().map_err(io::Error::other)?;
     vm::install_ca_cert(dest, ca.ca_cert_pem())?;
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
@@ -256,7 +256,7 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(&config);
+    let vm_handle = vm::Vm::boot(&config)?;
 
     // Run proxy until VM completes (generous timeout for package installation)
     let _ = proxy::run(proxy::ProxyConfig {

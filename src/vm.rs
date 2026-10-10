@@ -93,19 +93,14 @@ impl Vm {
     /// inherits only the calling thread, and a lock held by another
     /// thread at fork time would deadlock the child.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics in the parent if the socketpair for virtio-net cannot be
+    /// Returns the OS error if the socketpair for virtio-net cannot be
     /// created or if `fork` fails. Failures inside the forked child never
     /// reach the caller: they make the child exit with the VMM error code,
     /// which `shutdown()` reports.
-    #[must_use]
-    #[expect(
-        clippy::expect_used,
-        reason = "socketpair failure is unrecoverable, and returning Result would change the signature used by `redan exec` and the integration tests"
-    )]
-    pub fn boot(config: &VmConfig) -> Self {
-        let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
+    pub fn boot(config: &VmConfig) -> std::io::Result<Self> {
+        let (host_sock, guest_sock) = UnixStream::pair()?;
         let guest_fd = guest_sock.as_raw_fd();
 
         // SAFETY: getpid takes no arguments and has no preconditions.
@@ -117,7 +112,9 @@ impl Vm {
         // other threads exist when `boot` is called. That contract is on
         // the callers and is not checked here.
         let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
 
         if pid == 0 {
             // Child: this process belongs to libkrun now.
@@ -157,10 +154,10 @@ impl Vm {
         // holder so EOF propagates when the child exits.
         drop(guest_sock);
 
-        Self {
+        Ok(Self {
             net_sock: host_sock,
             child: pid,
-        }
+        })
     }
 
     /// Reap the VM child and return the guest exit code.
