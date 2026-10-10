@@ -193,12 +193,14 @@ pub struct ResolvedAuth {
 // ---------------------------------------------------------------------------
 
 /// Auto-detect: return a Config for the first detected agent.
+#[must_use]
 pub fn detect() -> Option<AutoDetected> {
     detect_all().into_iter().next().map(|d| build_config(&d))
 }
 
 /// Detect all agents whose auth requirements are satisfied.
 /// Returns them in registry order (highest priority first).
+#[must_use]
 pub fn detect_all() -> Vec<DetectedAgent> {
     AGENTS
         .iter()
@@ -207,11 +209,13 @@ pub fn detect_all() -> Vec<DetectedAgent> {
 }
 
 /// Look up an agent by its `redan run` slug (e.g. "claude", "pi").
+#[must_use]
 pub fn agent_by_slug(slug: &str) -> Option<&'static AgentDef> {
     AGENTS.iter().find(|a| a.slug == slug).copied()
 }
 
 /// All known agent slugs, in registry order.
+#[must_use]
 pub fn agent_slugs() -> Vec<&'static str> {
     AGENTS.iter().map(|a| a.slug).collect()
 }
@@ -227,6 +231,12 @@ pub enum ResolveError {
 /// Resolve a single named agent, probing its auth against the environment.
 /// This is the `redan run <slug>` entry point: unlike [`detect`], the agent
 /// is chosen explicitly rather than by registry priority.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::Unknown`] if no agent is registered under `slug`,
+/// and [`ResolveError::NoAuth`] if the agent exists but none of its auth
+/// methods is satisfied by the current environment.
 pub fn resolve_by_slug(slug: &str) -> Result<AutoDetected, ResolveError> {
     let agent = agent_by_slug(slug).ok_or(ResolveError::Unknown)?;
     let detected = detect_one(agent).ok_or(ResolveError::NoAuth(agent))?;
@@ -293,6 +303,7 @@ pub struct ExecFlags<'a> {
     pub discover: bool,
 }
 
+#[must_use]
 pub const fn has_explicit_flags(f: &ExecFlags<'_>) -> bool {
     f.image.is_some()
         || f.rootfs.is_some()

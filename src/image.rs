@@ -42,6 +42,11 @@ fn cache_dir() -> PathBuf {
 ///
 /// Validates that the name contains only safe characters to prevent
 /// path traversal (e.g., `../../etc`).
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] if `name` is empty or contains
+/// anything other than ASCII letters, digits, `-` or `_`.
 pub fn image_path(name: &str) -> io::Result<PathBuf> {
     if !is_valid_image_name(name) {
         return Err(io::Error::new(
@@ -75,6 +80,12 @@ pub fn list() -> Vec<String> {
 }
 
 /// Remove a named image.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] for an invalid image name,
+/// [`io::ErrorKind::NotFound`] if no image has that name, and any I/O error
+/// from deleting the image directory.
 pub fn remove(name: &str) -> io::Result<()> {
     let path = image_path(name)?;
     if !path.exists() {
@@ -143,6 +154,15 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> io::Result<()> {
 /// 2. Boot a redan VM with that rootfs
 /// 3. Run `apk update && apk add <packages>` + custom commands
 /// 4. The modified rootfs is the image
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] for an invalid image name and
+/// [`io::ErrorKind::AlreadyExists`] if the image exists. It also returns any
+/// I/O error from downloading and extracting the base tarball, installing the
+/// CA certificate, or cloning the proxy socket, and an error if the setup
+/// commands did not run to completion (no build sentinel file in the rootfs).
+/// A partially built image directory is removed on failure after extraction.
 pub fn create(name: &str, packages: &[String], run_commands: &[String]) -> io::Result<PathBuf> {
     let dest = image_path(name)?;
     if dest.exists() {
@@ -272,6 +292,14 @@ fn build_image(dest: &Path, packages: &[String], run_commands: &[String]) -> io:
 ///
 /// Runs the image (to flatten layers), exports the filesystem,
 /// and stores it as a redan image.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] for an invalid image name and
+/// [`io::ErrorKind::AlreadyExists`] if the image exists. It also returns an
+/// error if `docker pull`, `docker create`, `docker export` or the `tar`
+/// extraction fails, or if the exported filesystem has no `/bin` directory.
+/// The destination directory is removed after a failed export.
 pub fn import_docker(name: &str, docker_image: &str) -> io::Result<PathBuf> {
     import_docker_inner(name, docker_image, true)
 }
@@ -388,6 +416,12 @@ fn import_docker_inner(name: &str, docker_image: &str, pull: bool) -> io::Result
 }
 
 /// Build a Dockerfile, then import the result as a redan image.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] if `dockerfile_path` does not exist
+/// and an error if `docker build` fails. Otherwise it returns the errors of
+/// [`import_docker`] for the built image.
 pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBuf> {
     let df = Path::new(dockerfile_path);
     if !df.exists() {
@@ -444,7 +478,16 @@ pub fn import_dockerfile(name: &str, dockerfile_path: &str) -> io::Result<PathBu
 ///
 /// The devcontainer.json can live at `.devcontainer/devcontainer.json`
 /// or `.devcontainer.json` (per the spec).
-#[allow(clippy::too_many_lines)] // Devcontainer has 3 code paths (dockerfile, image, compose)
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] if `config_path` does not exist and
+/// [`io::ErrorKind::InvalidData`] if it is not valid JSON (after stripping
+/// comments), if it sets `dockerComposeFile` without `service`, if the compose
+/// config cannot be parsed, or if it has none of `build.dockerfile`, `image`
+/// or `dockerComposeFile`. It also returns an error if `docker build` or
+/// `docker compose build` fails or no image name can be found for the compose
+/// service, plus the errors of [`import_docker`] for the resulting image.
 pub fn import_devcontainer(name: &str, config_path: &str) -> io::Result<PathBuf> {
     let result = import_devcontainer_inner(name, config_path)?;
     let meta = ImageMeta::new(ImageSource::Devcontainer {

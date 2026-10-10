@@ -39,14 +39,17 @@ pub struct SecretBinding {
 }
 
 impl SecretBinding {
+    #[must_use]
     pub fn placeholder(&self) -> &str {
         &self.placeholder
     }
 
+    #[must_use]
     pub fn real_value(&self) -> &str {
         &self.real_value
     }
 
+    #[must_use]
     pub fn allowed_hosts(&self) -> &[String] {
         &self.allowed_hosts
     }
@@ -55,9 +58,13 @@ impl SecretBinding {
 impl SecretBinding {
     /// Create a binding with an auto-generated placeholder.
     ///
-    /// Returns `Err` if `real_value` contains CR or LF (header injection risk),
-    /// or if any allowed host contains a wildcard. Placeholder embeds env name
-    /// (lowercased) + hash suffix.
+    /// The placeholder embeds the env name (lowercased) plus a random suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `real_value` contains CR or LF (header injection
+    /// risk), if any entry of `allowed_hosts` contains a `*` wildcard, or if
+    /// the system random source fails while generating the placeholder suffix.
     pub fn new(
         env_name: &str,
         real_value: String,
@@ -109,6 +116,7 @@ impl SecretBinding {
     ///
     /// Available only under `#[cfg(test)]` or the `test-support` feature.
     /// Production code should use `new()` which validates.
+    #[must_use]
     pub fn new_unchecked(
         placeholder: String,
         real_value: String,
@@ -298,6 +306,7 @@ fn try_inject_basic(value: &[u8], secrets: &[&SecretBinding]) -> Option<(String,
 /// Best-effort: matches literal bytes only. See module docs for limitations.
 ///
 /// Returns the (possibly modified) response data and the number of scrubs.
+#[must_use]
 pub fn scrub(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>, usize) {
     let mut result = data.to_vec();
     let mut count = 0;
@@ -333,6 +342,7 @@ pub fn scrub(data: &[u8], hostname: &str, secrets: &[SecretBinding]) -> (Vec<u8>
 /// Uses httparse for header parsing to handle RFC 7230 edge cases
 /// (obs-fold, case-insensitive names). The body is passed through
 /// as raw bytes.
+#[must_use]
 pub fn rewrite_request_headers(data: &[u8]) -> Vec<u8> {
     let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
     let mut req = httparse::Request::new(&mut parsed_headers);

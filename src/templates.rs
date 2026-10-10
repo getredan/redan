@@ -4,9 +4,8 @@
 //! compile time via `include_str!`. Adding or modifying a `.j2` file
 //! triggers a rebuild (see `build.rs`).
 //!
-//! Template registration and rendering use `unwrap()` because the templates
+//! Template registration and rendering panic on failure because the templates
 //! are compiled in and validated by tests. A syntax error is a build bug.
-#![allow(clippy::unwrap_used)]
 
 use std::sync::LazyLock;
 
@@ -14,33 +13,55 @@ use minijinja::{Environment, context};
 
 use crate::config::Config;
 
-static ENV: LazyLock<Environment<'static>> = LazyLock::new(|| {
-    let mut env = Environment::new();
-    env.add_template("redan.toml", include_str!("../templates/redan.toml.j2"))
-        .unwrap();
-    env.add_template(
+/// Template name and compiled-in source, in registration order.
+const TEMPLATES: [(&str, &str); 4] = [
+    ("redan.toml", include_str!("../templates/redan.toml.j2")),
+    (
         "claude.dockerfile",
         include_str!("../templates/claude.dockerfile.j2"),
-    )
-    .unwrap();
-    env.add_template(
+    ),
+    (
         "devcontainer.json",
         include_str!("../templates/devcontainer.json.j2"),
-    )
-    .unwrap();
-    env.add_template("guest-policy", include_str!("../templates/guest-policy.j2"))
-        .unwrap();
+    ),
+    ("guest-policy", include_str!("../templates/guest-policy.j2")),
+];
+
+static ENV: LazyLock<Environment<'static>> = LazyLock::new(build_env);
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "the templates are compiled in and checked by tests, so a syntax error is a build bug"
+)]
+fn build_env() -> Environment<'static> {
+    let mut env = Environment::new();
+    for (name, source) in TEMPLATES {
+        env.add_template(name, source).unwrap();
+    }
     env
-});
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "every name is registered in `ENV` and the contexts are built from plain data, so a failure is a build bug"
+)]
+fn render(name: &str, ctx: minijinja::Value) -> String {
+    ENV.get_template(name).unwrap().render(ctx).unwrap()
+}
 
 /// Render `redan.toml` from a Config and mode flag.
+///
+/// # Panics
+///
+/// Panics if the compiled-in template fails to render, which is a build bug.
+#[must_use]
 pub fn redan_toml(cfg: &Config, claude: bool) -> String {
     let mounts: Vec<(&String, &crate::config::MountConfig)> = cfg.mount.iter().collect();
     let env_vars: Vec<(&String, &String)> = cfg.env.iter().collect();
 
-    ENV.get_template("redan.toml")
-        .unwrap()
-        .render(context! {
+    render(
+        "redan.toml",
+        context! {
             image => cfg.image,
             command => cfg.command,
             interactive => cfg.interactive,
@@ -50,37 +71,49 @@ pub fn redan_toml(cfg: &Config, claude: bool) -> String {
             forwards => cfg.network.forward,
             mounts,
             env => env_vars,
-        })
-        .unwrap()
+        },
+    )
 }
 
 /// Render the Claude Code Dockerfile.
+///
+/// # Panics
+///
+/// Panics if the compiled-in template fails to render, which is a build bug.
+#[must_use]
 pub fn claude_dockerfile(
     base_image: &str,
     apt_packages: &[&str],
     needs_node: bool,
     has_python: bool,
 ) -> String {
-    ENV.get_template("claude.dockerfile")
-        .unwrap()
-        .render(context! {
+    render(
+        "claude.dockerfile",
+        context! {
             base_image,
             apt_packages,
             needs_node,
             has_python,
-        })
-        .unwrap()
+        },
+    )
 }
 
 /// Render devcontainer.json (static for now, but templated for future fields).
+///
+/// # Panics
+///
+/// Panics if the compiled-in template fails to render, which is a build bug.
+#[must_use]
 pub fn devcontainer_json() -> String {
-    ENV.get_template("devcontainer.json")
-        .unwrap()
-        .render(context! {})
-        .unwrap()
+    render("devcontainer.json", context! {})
 }
 
 /// Render the guest `/etc/redan/policy` file.
+///
+/// # Panics
+///
+/// Panics if the compiled-in template fails to render, which is a build bug.
+#[must_use]
 pub fn guest_policy(allowed_hosts: Option<&Vec<String>>) -> String {
     let (mode, hosts) = match allowed_hosts {
         None => ("allow-all", vec![]),
@@ -88,10 +121,7 @@ pub fn guest_policy(allowed_hosts: Option<&Vec<String>>) -> String {
         Some(h) => ("restrict", h.iter().map(String::as_str).collect()),
     };
 
-    ENV.get_template("guest-policy")
-        .unwrap()
-        .render(context! { mode, hosts })
-        .unwrap()
+    render("guest-policy", context! { mode, hosts })
 }
 
 #[cfg(test)]

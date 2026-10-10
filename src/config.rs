@@ -74,6 +74,7 @@ pub struct MountConfig {
 impl Config {
     /// Convert secrets map to CLI --secret spec format.
     /// Skips secrets with empty hosts (invalid spec).
+    #[must_use]
     pub fn secret_specs(&self) -> Vec<String> {
         self.secrets
             .iter()
@@ -83,6 +84,7 @@ impl Config {
     }
 
     /// Convert mounts map to CLI --mount spec format.
+    #[must_use]
     pub fn mount_specs(&self) -> Vec<String> {
         self.mount
             .values()
@@ -159,6 +161,7 @@ pub fn overlay(base: Config, top: Config) -> Config {
 /// Read `sandbox.network.allowedDomains` from Claude Code settings.
 /// Checks project-level `.claude/settings.local.json` first, then
 /// user-level `~/.claude/settings.json`. Returns the merged domain list.
+#[must_use]
 pub fn claude_allowed_domains() -> Vec<String> {
     let mut domains = Vec::new();
 
@@ -232,6 +235,7 @@ pub struct DiscoveredConfig {
 /// This is raw discovery: a project config is **not** trust-checked here.
 /// Callers that act on a cwd config must go through the trust gate
 /// (`cmd::trust::load_config`) rather than calling this directly.
+#[must_use]
 pub fn discover() -> Option<DiscoveredConfig> {
     for (path, source) in config_candidates() {
         if !path.is_file() {
