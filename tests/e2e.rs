@@ -151,9 +151,9 @@ fn report(out: &Output) -> String {
     )
 }
 
-/// A repo's `.claude/settings.local.json` with `"*"` in `allowedDomains` used
-/// to turn off the allowlist with no prompt. The `"*"` is now ignored with a
-/// warning, so the guest's request to a host nobody allowed is rejected.
+/// A repo's `.claude/settings.local.json` with `"*"` in `allowedDomains`
+/// can't turn off the allowlist. redan skips the `"*"` with a warning, and
+/// the guest's request to a host nobody allowed is rejected.
 #[test]
 fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
     let _turn = vm_turn();
@@ -178,7 +178,9 @@ fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(r#"warning: ignoring "*" in .claude/settings.local.json"#),
+        stderr.contains(
+            r#"warning: ignoring "*" in ./.claude/settings.local.json: Claude Code settings can't turn off redan's allowlist"#
+        ),
         "{stderr}"
     );
     let events = sandbox.audit_events();

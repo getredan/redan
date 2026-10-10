@@ -754,14 +754,21 @@ fn launch(
     let mut allow_hosts = args.allow_hosts;
     allow_hosts.extend(cfg.network.allow.clone());
 
-    // Import allowedDomains from Claude Code settings if present.
-    let claude_domains = config::claude_allowed_domains();
-    if !claude_domains.is_empty() {
-        log::info!(
-            "imported {} domains from Claude Code settings",
-            claude_domains.len()
-        );
-        allow_hosts.extend(claude_domains);
+    // Import allowedDomains from Claude Code settings if present. With
+    // allow-all on there's nothing for them to add.
+    if !allow_hosts.iter().any(|h| h == config::ALLOW_ALL_HOSTS) {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let claude = config::claude_allowed_domains(std::path::Path::new("."), home.as_deref());
+        for warning in &claude.warnings {
+            eprintln!("warning: {warning}");
+        }
+        if !claude.hosts.is_empty() {
+            log::info!(
+                "allowing hosts from Claude Code settings: {}",
+                claude.hosts.join(", ")
+            );
+            allow_hosts.extend(claude.hosts);
+        }
     }
 
     let mut forwards = args.forwards;

@@ -164,41 +164,55 @@ pub fn overlay(base: Config, top: Config) -> Config {
     }
 }
 
-/// Read `sandbox.network.allowedDomains` from Claude Code settings.
-/// Checks project-level `.claude/settings.local.json` first, then
-/// user-level `~/.claude/settings.json`. Returns the merged domain list.
+/// What redan takes from `sandbox.network.allowedDomains` in Claude Code's
+/// settings.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ClaudeDomains {
+    /// Hostnames and `*.domain` patterns to add to the allowlist.
+    pub hosts: Vec<String>,
+    /// One line for each entry that was left out, saying why.
+    pub warnings: Vec<String>,
+}
+
+/// Read `sandbox.network.allowedDomains` from Claude Code's settings.
+///
+/// The files are `.claude/settings.local.json` and `.claude/settings.json` in
+/// `project`, then the same two under `home`. When the project is your home
+/// directory, each file is read once.
 #[must_use]
-pub fn claude_allowed_domains() -> Vec<String> {
-    let mut domains = Vec::new();
-
-    // Project-level (higher specificity, checked first)
-    if let Some(d) = read_claude_settings(Path::new(".claude/settings.local.json")) {
-        domains.extend(d);
-    }
-    if let Some(d) = read_claude_settings(Path::new(".claude/settings.json")) {
-        domains.extend(d);
-    }
-
-    // User-level
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = Path::new(&home);
-        if let Some(d) = read_claude_settings(&home.join(".claude/settings.local.json")) {
-            domains.extend(d);
+pub fn claude_allowed_domains(project: &Path, home: Option<&Path>) -> ClaudeDomains {
+    let mut domains = ClaudeDomains::default();
+    let mut read = Vec::new();
+    for dir in std::iter::once(project).chain(home) {
+        for name in ["settings.local.json", "settings.json"] {
+            let path = dir.join(".claude").join(name);
+            // The guest can write the project's `.claude/`, and a FIFO or a
+            // link to a device there would block before the session starts.
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if read.contains(&canonical) {
+                continue;
+            }
+            read.push(canonical);
+            if let Some(found) = read_claude_settings(&path) {
+                domains.hosts.extend(found.hosts);
+                domains.warnings.extend(found.warnings);
+            }
         }
-        if let Some(d) = read_claude_settings(&home.join(".claude/settings.json")) {
-            domains.extend(d);
-        }
     }
-
-    domains.sort();
-    domains.dedup();
+    domains.hosts.sort();
+    domains.hosts.dedup();
     domains
 }
 
-fn read_claude_settings(path: &Path) -> Option<Vec<String>> {
+fn read_claude_settings(path: &Path) -> Option<ClaudeDomains> {
     let content = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let domains = value
+    let entries = value
         .get("sandbox")?
         .get("network")?
         .get("allowedDomains")?
@@ -206,18 +220,25 @@ fn read_claude_settings(path: &Path) -> Option<Vec<String>> {
     // Imported settings can add hosts but not turn redan's allowlist off: a
     // project's `.claude/settings*.json` comes with the repo, and a `"*"`
     // meant for Claude Code's own sandbox shouldn't switch off redan's.
-    let (hosts, ignored): (Vec<String>, Vec<String>) = domains
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .partition(|h| is_host_pattern(h));
-    for entry in ignored {
-        eprintln!(
-            "warning: ignoring {entry:?} in {}: Claude Code settings can only add hostnames \
-             and *.domain patterns to redan's allowlist (pass --allow-host '*' to allow every host)",
-            path.display()
-        );
+    let mut domains = ClaudeDomains::default();
+    for entry in entries.iter().filter_map(serde_json::Value::as_str) {
+        if is_host_pattern(entry) {
+            domains.hosts.push(entry.to_string());
+        } else if entry == ALLOW_ALL_HOSTS {
+            domains.warnings.push(format!(
+                "ignoring {entry:?} in {}: Claude Code settings can't turn off redan's \
+                 allowlist, pass --allow-host '*' for that",
+                path.display()
+            ));
+        } else {
+            domains.warnings.push(format!(
+                "ignoring {entry:?} in {}: redan's allowlist only takes hostnames and \
+                 *.domain patterns",
+                path.display()
+            ));
+        }
     }
-    Some(hosts)
+    Some(domains)
 }
 
 /// Where a discovered config came from.
@@ -384,7 +405,8 @@ target = "/workspace"
         )
         .unwrap();
         let domains = read_claude_settings(&path).unwrap();
-        assert_eq!(domains, vec!["github.com", "*.npmjs.org"]);
+        assert_eq!(domains.hosts, vec!["github.com", "*.npmjs.org"]);
+        assert_eq!(domains.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -397,7 +419,77 @@ target = "/workspace"
         )
         .unwrap();
         let domains = read_claude_settings(&path).unwrap();
-        assert_eq!(domains, vec!["github.com", "*.npmjs.org"]);
+        assert_eq!(domains.hosts, vec!["github.com", "*.npmjs.org"]);
+        let path = path.display();
+        assert_eq!(
+            domains.warnings,
+            vec![
+                format!(
+                    "ignoring \"*\" in {path}: Claude Code settings can't turn off redan's \
+                     allowlist, pass --allow-host '*' for that"
+                ),
+                format!(
+                    "ignoring \"localhost:3000\" in {path}: redan's allowlist only takes \
+                     hostnames and *.domain patterns"
+                ),
+            ]
+        );
+    }
+
+    fn write_claude_settings(dir: &Path, name: &str, domains: &str) {
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(
+            dir.join(".claude").join(name),
+            format!(r#"{{"sandbox": {{"network": {{"allowedDomains": {domains}}}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn claude_allowed_domains_merges_project_and_home_settings() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_claude_settings(project.path(), "settings.local.json", r#"["*.npmjs.org"]"#);
+        write_claude_settings(project.path(), "settings.json", r#"["github.com"]"#);
+        write_claude_settings(
+            home.path(),
+            "settings.json",
+            r#"["github.com", "pypi.org"]"#,
+        );
+
+        let domains = claude_allowed_domains(project.path(), Some(home.path()));
+
+        assert_eq!(domains.hosts, vec!["*.npmjs.org", "github.com", "pypi.org"]);
+    }
+
+    #[test]
+    fn claude_allowed_domains_reads_a_file_once_when_the_project_is_your_home() {
+        let home = tempfile::tempdir().unwrap();
+        write_claude_settings(home.path(), "settings.json", r#"["*", "github.com"]"#);
+
+        let domains = claude_allowed_domains(home.path(), Some(home.path()));
+
+        assert_eq!(domains.hosts, vec!["github.com"]);
+        assert_eq!(domains.warnings.len(), 1, "{:?}", domains.warnings);
+    }
+
+    /// The guest can leave a FIFO or a link to `/dev/zero` in the project,
+    /// and reading either would never return.
+    #[test]
+    fn claude_allowed_domains_skips_settings_that_are_not_regular_files() {
+        let project = tempfile::tempdir().unwrap();
+        let claude = project.path().join(".claude");
+        std::fs::create_dir(&claude).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(claude.join("settings.local.json"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::os::unix::fs::symlink("/dev/zero", claude.join("settings.json")).unwrap();
+
+        let domains = claude_allowed_domains(project.path(), None);
+
+        assert_eq!(domains, ClaudeDomains::default());
     }
 
     #[test]
