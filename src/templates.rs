@@ -95,7 +95,6 @@ pub fn guest_policy(allowed_hosts: Option<&Vec<String>>) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::{Config, MountConfig, NetworkConfig};

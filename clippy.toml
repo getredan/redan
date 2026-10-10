@@ -1,0 +1,5 @@
+# Tests and `#[cfg(test)]` modules may unwrap, expect and panic: a failing
+# call there is the failing test. Production code gets no such allowance.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
