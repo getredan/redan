@@ -287,12 +287,25 @@ pub fn is_trusted(config_path: &Path, content: &[u8]) -> bool {
 }
 
 /// Record `config_path` with these `content` bytes as trusted.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] if neither `$XDG_STATE_HOME` nor
+/// `$HOME` is set, or if `config_path` cannot be canonicalized (for example
+/// because it does not exist). It also returns any I/O or serialization error
+/// from writing the trust store.
 pub fn trust(config_path: &Path, content: &[u8]) -> io::Result<()> {
     let sp = store_path().ok_or_else(no_store_dir)?;
     trust_in(&sp, config_path, content)
 }
 
 /// Remove `config_path` from the trust store.
+///
+/// # Errors
+///
+/// Fails in the same ways as [`trust`]: [`io::ErrorKind::NotFound`] when there
+/// is no state directory or `config_path` cannot be canonicalized, plus any
+/// I/O or serialization error from writing the trust store.
 pub fn untrust(config_path: &Path) -> io::Result<()> {
     let sp = store_path().ok_or_else(no_store_dir)?;
     untrust_in(&sp, config_path)

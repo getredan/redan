@@ -37,6 +37,7 @@ pub struct ImageMeta {
 }
 
 impl ImageMeta {
+    #[must_use]
     pub fn new(source: ImageSource) -> Self {
         let built_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -45,6 +46,11 @@ impl ImageMeta {
     }
 
     /// Write metadata to the image directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the metadata cannot be serialized or
+    /// `.redan-image.json` cannot be written in `image_dir`.
     pub fn save(&self, image_dir: &Path) -> Result<(), String> {
         let path = image_dir.join(META_FILE);
         let json = serde_json::to_string_pretty(self)
@@ -53,6 +59,7 @@ impl ImageMeta {
     }
 
     /// Read metadata from an image directory. Returns None if not found.
+    #[must_use]
     pub fn load(image_dir: &Path) -> Option<Self> {
         let path = image_dir.join(META_FILE);
         let content = std::fs::read_to_string(&path).ok()?;
@@ -60,6 +67,7 @@ impl ImageMeta {
     }
 
     /// Age of the image in days. Returns None if timestamp can't be parsed.
+    #[must_use]
     pub fn age_days(&self) -> Option<u64> {
         let built = time::OffsetDateTime::parse(
             &self.built_at,
@@ -68,13 +76,12 @@ impl ImageMeta {
         .ok()?;
         let now = time::OffsetDateTime::now_utc();
         let duration: time::Duration = now - built;
-        #[allow(clippy::cast_sign_loss)] // Duration is always positive (now >= built)
-        Some(duration.whole_days().max(0) as u64)
+        // A negative age (clock skew, future timestamp) counts as zero days
+        Some(u64::try_from(duration.whole_days()).unwrap_or(0))
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

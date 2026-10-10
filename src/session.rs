@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Short hex session ID (8 chars from random bytes).
+#[must_use]
 pub fn new_id() -> String {
     use std::io::Read;
     let mut buf = [0u8; 4];
@@ -17,13 +18,13 @@ pub fn new_id() -> String {
         .and_then(|mut f| f.read_exact(&mut buf))
         .is_err()
     {
-        // Fallback: timestamp-based
-        #[allow(clippy::cast_possible_truncation)] // Intentional: low 32 bits for entropy
-        let t = std::time::SystemTime::now()
+        // Fallback: the low 32 bits of the nanosecond timestamp
+        let [b0, b1, b2, b3, ..] = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos() as u32;
-        buf = t.to_le_bytes();
+            .as_nanos()
+            .to_le_bytes();
+        buf = [b0, b1, b2, b3];
     }
     hex::encode(&buf)
 }
@@ -43,7 +44,10 @@ mod hex {
 }
 
 /// Base directory for session state.
-#[allow(clippy::unwrap_used)] // process::exit on missing $HOME is intentional
+///
+/// Exits the process with status 1 if neither `$XDG_STATE_HOME` nor `$HOME`
+/// is set, because no state directory can be determined.
+#[must_use]
 pub fn sessions_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map_or_else(
@@ -60,16 +64,19 @@ pub fn sessions_dir() -> PathBuf {
 }
 
 /// Validate session ID format (hex characters only, max 32).
+#[must_use]
 pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Directory for a specific session.
+#[must_use]
 pub fn session_dir(id: &str) -> PathBuf {
     sessions_dir().join(id)
 }
 
 /// Default audit log path for a session.
+#[must_use]
 pub fn audit_log_path(id: &str) -> PathBuf {
     session_dir(id).join("audit.jsonl")
 }
@@ -101,6 +108,7 @@ pub enum SessionStatus {
 }
 
 impl SessionMeta {
+    #[must_use]
     pub fn new(id: &str, image: Option<&str>, command: Option<&str>) -> Self {
         let started_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -118,6 +126,11 @@ impl SessionMeta {
     }
 
     /// Write meta to the session directory. Creates the directory if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the session directory cannot be created, the
+    /// metadata cannot be serialized, or `meta.json` cannot be written.
     pub fn save(&self) -> Result<(), String> {
         let dir = session_dir(&self.id);
         std::fs::create_dir_all(&dir)
@@ -129,6 +142,7 @@ impl SessionMeta {
     }
 
     /// Check if the session's process is still running.
+    #[must_use]
     pub fn is_alive(&self) -> bool {
         self.pid
             .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
@@ -146,11 +160,13 @@ impl SessionMeta {
 }
 
 /// Path to the console unix socket for a session.
+#[must_use]
 pub fn console_socket_path(id: &str) -> std::path::PathBuf {
     session_dir(id).join("console.sock")
 }
 
 /// Find a session by ID prefix or name. Returns the full session metadata.
+#[must_use]
 pub fn find_session(id_or_name: Option<&str>) -> Option<SessionMeta> {
     let sessions = list_sessions();
     let Some(query) = id_or_name else {
@@ -178,6 +194,7 @@ pub fn find_session(id_or_name: Option<&str>) -> Option<SessionMeta> {
 }
 
 /// List recent sessions, newest first.
+#[must_use]
 pub fn list_sessions() -> Vec<SessionMeta> {
     let dir = sessions_dir();
     let mut sessions: Vec<SessionMeta> = Vec::new();

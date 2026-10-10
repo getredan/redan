@@ -1,7 +1,4 @@
 // Binary crate lints
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::must_use_candidate)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::redundant_pub_crate)] // cmd/ modules are pub(crate) by design
 

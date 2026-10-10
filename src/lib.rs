@@ -1,7 +1,4 @@
 // Pedantic lints deferred until API stabilizes
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::must_use_candidate)]
 
 /// Install the rustls crypto provider (ring) if not already installed.
 ///
