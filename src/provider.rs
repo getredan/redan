@@ -46,26 +46,35 @@ pub struct Env;
 
 impl SecretProvider for Env {
     fn resolve(&self, reference: &str) -> Result<String, io::Error> {
-        if reference.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "env:// variable name cannot be empty",
-            ));
-        }
-        let value = std::env::var(reference).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("environment variable '{reference}' is not set"),
-            )
-        })?;
-        if value.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("environment variable '{reference}' is set but empty"),
-            ));
-        }
-        Ok(value)
+        resolve_env_with(reference, |name| std::env::var(name).ok())
     }
+}
+
+/// Applies the `Env` provider rules on top of `lookup`, which returns the
+/// variable's value, or `None` when it is unset or not valid Unicode.
+fn resolve_env_with(
+    reference: &str,
+    lookup: impl FnOnce(&str) -> Option<String>,
+) -> Result<String, io::Error> {
+    if reference.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "env:// variable name cannot be empty",
+        ));
+    }
+    let value = lookup(reference).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("environment variable '{reference}' is not set"),
+        )
+    })?;
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("environment variable '{reference}' is set but empty"),
+        ));
+    }
+    Ok(value)
 }
 
 /// Fetches secrets from `HashiCorp` Vault KV v2.
@@ -178,11 +187,20 @@ impl SecretProvider for Vault {
 /// - `env://VAR_NAME`    -> host environment variable
 /// - anything else       -> literal value (backward compatible)
 pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
+    resolve_secret_value_with(reference, |name| std::env::var(name).ok())
+}
+
+/// Same as [`resolve_secret_value`], with the `env://` lookup supplied by the
+/// caller so tests don't have to touch the process environment.
+fn resolve_secret_value_with(
+    reference: &str,
+    env_lookup: impl FnOnce(&str) -> Option<String>,
+) -> Result<String, io::Error> {
     if let Some(vault_ref) = reference.strip_prefix("vault://") {
         let vault = Vault::from_env()?;
         vault.resolve(vault_ref)
     } else if let Some(var_name) = reference.strip_prefix("env://") {
-        Env.resolve(var_name)
+        resolve_env_with(var_name, env_lookup)
     } else {
         Literal.resolve(reference)
     }
@@ -192,12 +210,16 @@ pub fn resolve_secret_value(reference: &str) -> Result<String, io::Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::sync::{LazyLock, Mutex};
 
-    // Serialize all tests that mutate the process environment.
-    // set_var/remove_var are unsafe because they race with other threads
-    // reading or iterating the environment.
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    /// Builds an env lookup over a fixed list of variables, so tests never
+    /// touch the process environment.
+    fn lookup_in<'a>(vars: &'a [(&'a str, &'a str)]) -> impl FnOnce(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
 
     #[test]
     fn literal_returns_value() {
@@ -266,52 +288,62 @@ mod tests {
 
     #[test]
     fn env_reads_set_variable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("_REDAN_TEST_VAR", "test-secret-value") };
-        assert_eq!(Env.resolve("_REDAN_TEST_VAR").unwrap(), "test-secret-value");
-        unsafe { std::env::remove_var("_REDAN_TEST_VAR") };
+        let vars = [("_REDAN_TEST_VAR", "test-secret-value")];
+        assert_eq!(
+            resolve_env_with("_REDAN_TEST_VAR", lookup_in(&vars)).unwrap(),
+            "test-secret-value"
+        );
     }
 
     #[test]
     fn env_errors_on_unset_variable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::remove_var("_REDAN_TEST_UNSET") };
-        let err = Env.resolve("_REDAN_TEST_UNSET").unwrap_err();
-        assert!(err.to_string().contains("not set"));
-        assert!(err.to_string().contains("_REDAN_TEST_UNSET"));
+        let err = resolve_env_with("_REDAN_TEST_UNSET", lookup_in(&[])).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            err.to_string(),
+            "environment variable '_REDAN_TEST_UNSET' is not set"
+        );
     }
 
     #[test]
     fn env_errors_on_empty_variable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("_REDAN_TEST_EMPTY", "") };
-        let err = Env.resolve("_REDAN_TEST_EMPTY").unwrap_err();
-        assert!(err.to_string().contains("empty"));
-        unsafe { std::env::remove_var("_REDAN_TEST_EMPTY") };
+        let vars = [("_REDAN_TEST_EMPTY", "")];
+        let err = resolve_env_with("_REDAN_TEST_EMPTY", lookup_in(&vars)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.to_string(),
+            "environment variable '_REDAN_TEST_EMPTY' is set but empty"
+        );
     }
 
     #[test]
     fn env_errors_on_empty_var_name() {
-        let err = Env.resolve("").unwrap_err();
+        let err = resolve_env_with("", |_| panic!("lookup must not run")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("empty"));
+    }
+
+    // Reads the real environment, which this test only reads. The name is
+    // never set by anything in the test suite.
+    #[test]
+    fn env_provider_errors_on_unset_variable() {
+        let err = Env.resolve("_REDAN_TEST_NEVER_SET_6F1C2D").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn resolve_env_scheme() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("_REDAN_TEST_SCHEME", "from-env") };
+        let vars = [("_REDAN_TEST_SCHEME", "from-env")];
         assert_eq!(
-            resolve_secret_value("env://_REDAN_TEST_SCHEME").unwrap(),
+            resolve_secret_value_with("env://_REDAN_TEST_SCHEME", lookup_in(&vars)).unwrap(),
             "from-env"
         );
-        unsafe { std::env::remove_var("_REDAN_TEST_SCHEME") };
     }
 
     #[test]
     fn resolve_env_scheme_unset_errors() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::remove_var("_REDAN_TEST_SCHEME_UNSET") };
-        let err = resolve_secret_value("env://_REDAN_TEST_SCHEME_UNSET").unwrap_err();
+        let err = resolve_secret_value_with("env://_REDAN_TEST_SCHEME_UNSET", lookup_in(&[]))
+            .unwrap_err();
         assert!(err.to_string().contains("not set"));
     }
 
