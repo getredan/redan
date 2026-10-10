@@ -19,23 +19,28 @@ pub struct VirtioNetDevice {
 }
 
 impl VirtioNetDevice {
-    #[must_use]
-    #[allow(clippy::unwrap_used)] // Nonblocking mode must succeed on a fresh socket
-    pub fn new(sock: UnixStream) -> Self {
-        sock.set_nonblocking(true).unwrap();
-        Self {
+    /// Wrap `sock` and switch it to nonblocking mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the socket cannot be set to nonblocking mode.
+    pub fn new(sock: UnixStream) -> std::io::Result<Self> {
+        sock.set_nonblocking(true)?;
+        Ok(Self {
             sock,
             pending_rx: None,
             pending_tx: VecDeque::new(),
             peer_closed: false,
-        }
+        })
     }
 
     /// Write all pending TX frames to the socket.
     pub fn flush_tx(&mut self) {
         while let Some(frame) = self.pending_tx.pop_front() {
-            #[allow(clippy::cast_possible_truncation)] // Frames are ≤MTU (1500)
-            let len_buf = (frame.len() as u32).to_be_bytes();
+            let Ok(len) = u32::try_from(frame.len()) else {
+                break;
+            };
+            let len_buf = len.to_be_bytes();
             if self.sock.write_all(&len_buf).is_err() {
                 break;
             }

@@ -10,6 +10,7 @@ use smoltcp::wire::Ipv4Address;
 /// Used by callers that need the hostname before deciding which IP to
 /// return, without parsing the packet twice.
 /// Returns `None` for malformed packets or non-standard queries.
+#[must_use]
 pub fn query_hostname(packet: &[u8]) -> Option<String> {
     if packet.len() < 12 {
         return None;
@@ -38,6 +39,7 @@ pub fn query_hostname(packet: &[u8]) -> Option<String> {
 ///
 /// Returns `Some((hostname, response_bytes))` on success, `None` if the
 /// packet is malformed or not a query we handle.
+#[must_use]
 pub fn handle_query(packet: &[u8], resolve_ip: Ipv4Address) -> Option<(String, Vec<u8>)> {
     if packet.len() < 12 {
         return None;
@@ -76,8 +78,7 @@ pub fn handle_query(packet: &[u8], resolve_ip: Ipv4Address) -> Option<(String, V
             // proxy would break any service binding to the loopback interface.
             // Case-insensitive per RFC 4343.
             let ip = if hostname.eq_ignore_ascii_case("localhost") {
-                #[allow(clippy::ip_constant)] // smoltcp Ipv4Address, not std
-                Ipv4Address::new(127, 0, 0, 1)
+                Ipv4Address::LOCALHOST
             } else {
                 resolve_ip
             };
@@ -191,8 +192,7 @@ mod tests {
         pkt.extend_from_slice(&0u16.to_be_bytes());
 
         for label in hostname.split('.') {
-            #[allow(clippy::cast_possible_truncation)] // DNS labels ≤63 bytes
-            pkt.push(label.len() as u8);
+            pkt.push(u8::try_from(label.len()).expect("DNS labels are at most 63 bytes"));
             pkt.extend_from_slice(label.as_bytes());
         }
         pkt.push(0);

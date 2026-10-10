@@ -20,6 +20,15 @@ static UPSTREAM_TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(
 
 /// Connect to an upstream server over TLS, returning the TCP stream and
 /// rustls client connection.
+///
+/// # Errors
+///
+/// Returns an I/O error if DNS resolution fails or yields no IPv4 address
+/// ("DNS resolution failed"), if the TCP connect times out (10 seconds) or is
+/// refused, or if `hostname` is not a valid TLS server name. Returns a
+/// `PermissionDenied` I/O error ("blocked connection to private IP") if the
+/// address is private or reserved and `allow_private` is false. A rustls
+/// error is returned if the client connection cannot be set up.
 pub fn connect_upstream(
     hostname: &str,
     port: u16,
@@ -67,7 +76,11 @@ pub fn connect_upstream(
 
 /// Returns true if the IP is in a private, loopback, or link-local range.
 /// Used to block SSRF to cloud metadata endpoints and internal services.
-#[allow(clippy::unnested_or_patterns)] // Nesting destroys per-range comments
+#[must_use]
+#[expect(
+    clippy::unnested_or_patterns,
+    reason = "nesting the or-patterns would destroy the per-range comments"
+)]
 pub const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
     matches!(
@@ -88,7 +101,6 @@ pub const fn is_private_ip(ip: std::net::Ipv4Addr) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::ip_constant)]
 mod tests {
     use super::*;
 
@@ -103,7 +115,7 @@ mod tests {
         assert!(is_private_ip(Ipv4Addr::new(172, 31, 255, 255)));
         assert!(is_private_ip(Ipv4Addr::new(192, 168, 1, 1)));
         // Loopback
-        assert!(is_private_ip(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::LOCALHOST));
         // CGN
         assert!(is_private_ip(Ipv4Addr::new(100, 64, 0, 1)));
         assert!(is_private_ip(Ipv4Addr::new(100, 127, 255, 255)));
@@ -113,7 +125,7 @@ mod tests {
         // Reserved 240.0.0.0/4 (includes limited broadcast 255.255.255.255)
         assert!(is_private_ip(Ipv4Addr::new(240, 0, 0, 1)));
         assert!(is_private_ip(Ipv4Addr::new(250, 1, 2, 3)));
-        assert!(is_private_ip(Ipv4Addr::new(255, 255, 255, 255)));
+        assert!(is_private_ip(Ipv4Addr::BROADCAST));
         // 6to4 relay anycast (RFC 7526)
         assert!(is_private_ip(Ipv4Addr::new(192, 88, 99, 1)));
     }

@@ -92,8 +92,18 @@ impl Vm {
     /// Must be called before the process spawns any threads: the child
     /// inherits only the calling thread, and a lock held by another
     /// thread at fork time would deadlock the child.
+    ///
+    /// # Panics
+    ///
+    /// Panics in the parent if the socketpair for virtio-net cannot be
+    /// created or if `fork` fails. Failures inside the forked child never
+    /// reach the caller: they make the child exit with the VMM error code,
+    /// which `shutdown()` reports.
     #[must_use]
-    #[allow(clippy::expect_used, clippy::unwrap_used)] // FFI setup; failures are unrecoverable
+    #[expect(
+        clippy::expect_used,
+        reason = "socketpair failure is unrecoverable, and returning Result would change the signature used by `redan exec` and the integration tests"
+    )]
     pub fn boot(config: &VmConfig) -> Self {
         let (host_sock, guest_sock) = UnixStream::pair().expect("socketpair failed");
         let guest_fd = guest_sock.as_raw_fd();
@@ -157,6 +167,7 @@ impl Vm {
     ///
     /// If the child is still running (e.g. proxy timeout rather than
     /// guest exit), kill it first. Blocks until the child is reaped.
+    #[must_use]
     pub fn shutdown(&self) -> i32 {
         let mut status: libc::c_int = 0;
         // Fast path: child already exited (the normal case, the
@@ -374,6 +385,7 @@ fn to_cstring(what: &str, value: &str) -> Option<CString> {
 }
 
 /// Build the network setup commands for a guest with static IP config.
+#[must_use]
 pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
     format!(
         "ulimit -n 65536 2>/dev/null; \
@@ -395,6 +407,13 @@ pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
 /// for tools that use `SSL_CERT_FILE`.
 ///
 /// Safe to call multiple times (replaces previous cert).
+///
+/// # Errors
+///
+/// Returns the I/O error if `etc/ssl/certs` under `rootfs` cannot be
+/// replaced or created, if a stale `redan-ca.pem` symlink cannot be removed,
+/// or if the PEM cannot be written to the standalone path or to any of the
+/// distro CA source directories that exist.
 pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
     // Standalone PEM for SSL_CERT_FILE.
     // Fedora has /etc/ssl/certs as a broken symlink; replace it.
@@ -435,6 +454,7 @@ pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
 /// Shell commands to update the CA trust store inside the guest.
 /// Tries both Debian-style and Fedora-style; each is a no-op if
 /// the tool doesn't exist.
+#[must_use]
 pub const fn ca_update_commands() -> &'static str {
     "update-ca-certificates 2>/dev/null; update-ca-trust 2>/dev/null; true"
 }

@@ -4,12 +4,14 @@ use std::io::{self, IsTerminal};
 use std::mem::MaybeUninit;
 use std::sync::Mutex;
 
+#[must_use]
 pub fn stdin_is_tty() -> bool {
     io::stdin().is_terminal()
 }
 
 /// Read the host terminal's window size (columns, rows).
 /// Returns None if stdin is not a TTY or the ioctl fails.
+#[must_use]
 pub fn host_terminal_size() -> Option<(u16, u16)> {
     if !stdin_is_tty() {
         return None;
@@ -98,8 +100,13 @@ pub struct RawTerminalGuard {
 }
 
 impl RawTerminalGuard {
-    /// Switch stdin to raw mode. Returns an error if stdin is not a TTY
-    /// or the termios syscalls fail.
+    /// Switch stdin to raw mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorKind::InvalidInput` ("stdin is not a TTY") if stdin is
+    /// not a terminal, or the OS error if reading or setting the termios
+    /// attributes fails.
     pub fn enter() -> io::Result<Self> {
         if !stdin_is_tty() {
             return Err(io::Error::new(
