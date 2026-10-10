@@ -32,6 +32,11 @@ const CHROME_CANDIDATES: &[&str] = &[
 /// Find a Chrome/Chromium binary on PATH.
 pub fn find_chrome() -> Option<PathBuf> {
     let path_var = std::env::var("PATH").ok()?;
+    find_chrome_in(&path_var)
+}
+
+/// Find a Chrome/Chromium binary in the `:`-separated directory list `path_var`.
+fn find_chrome_in(path_var: &str) -> Option<PathBuf> {
     for candidate in CHROME_CANDIDATES {
         for dir in path_var.split(':') {
             let full = PathBuf::from(dir).join(candidate);
@@ -154,10 +159,7 @@ impl Drop for Browser {
         self.proxy_shutdown.store(true, Ordering::Relaxed);
 
         // Kill the entire process group (Chrome tree: zygotes, GPU, renderers).
-        let pgid = self.child.id().cast_signed();
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
+        signal_process_group(&self.child, libc::SIGTERM);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
@@ -165,7 +167,7 @@ impl Drop for Browser {
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                signal_process_group(&self.child, libc::SIGKILL);
                 let _ = self.child.wait();
                 break;
             }
@@ -179,6 +181,50 @@ impl Drop for Browser {
         let _ = std::fs::remove_dir_all(&self.profile_dir);
         log::info!("Chrome stopped and profile cleaned up");
     }
+}
+
+/// Sends `signal` to the process group led by `child`.
+///
+/// `child` must have been spawned with `process_group(0)` (see
+/// [`spawn_chrome`]) and must not have been reaped yet, so its pid is
+/// still its own process group id. std only signals single processes.
+fn signal_process_group(child: &std::process::Child, signal: libc::c_int) {
+    // A pid that isn't above 1 would turn `-pgid` into 0 (our own group),
+    // -1 (every process we may signal) or a wrapped value. A real child
+    // never has one, so skip the call instead of signalling something else.
+    let Ok(pgid) = libc::pid_t::try_from(child.id()) else {
+        return;
+    };
+    if pgid <= 1 {
+        return;
+    }
+    // SAFETY: `kill` takes plain integers and reads no memory. `-pgid` is
+    // below -1, so it addresses exactly one process group and never "all
+    // processes" or our own group (checked above). The group exists because
+    // `child` led it from spawn, and the caller hasn't reaped `child`, so
+    // the kernel can't have reused its pid for an unrelated process or group.
+    // A group that is already gone makes `kill` fail with ESRCH, which is
+    // ignored on purpose.
+    unsafe {
+        libc::kill(-pgid, signal);
+    }
+}
+
+/// Asks the kernel to send the calling process `SIGTERM` when its parent
+/// thread dies. Meant for `pre_exec`, so it only makes one raw syscall.
+///
+/// Setting the signal is best effort, so a failure is ignored and Chrome
+/// still starts.
+fn set_parent_death_signal() -> std::io::Result<()> {
+    // SAFETY: `prctl(PR_SET_PDEATHSIG, sig)` takes the signal number as an
+    // unsigned long and ignores the remaining arguments for this option,
+    // so the variadic call needs nothing else. `SIGTERM` is a valid signal.
+    // The call reads and writes no memory we own, and it only changes the
+    // calling process's own death-signal setting.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+    }
+    Ok(())
 }
 
 fn spawn_chrome(
@@ -204,18 +250,24 @@ fn spawn_chrome(
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::piped());
 
+    use std::os::unix::process::CommandExt;
+
     // Own process group so kill(-pgid) reaches the entire Chrome tree
     // (zygotes, GPU process, renderers, network service, etc).
+    // `process_group(0)` makes the child call setpgid(0, 0), and a failure
+    // there fails the spawn instead of leaving Chrome in our group.
+    cmd.process_group(0);
+
     // PDEATHSIG is kernel-enforced cleanup for paths no userspace
     // handler covers (redan SIGKILLed): Chrome gets SIGTERM and shuts
     // its tree down itself.
+    //
+    // SAFETY: `pre_exec` requires an async-signal-safe closure, because it
+    // runs in the forked child before exec while the parent's other threads
+    // may have held locks at fork time. `set_parent_death_signal` only makes
+    // a `prctl` syscall, so it doesn't allocate, lock or touch shared state.
     unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setpgid(0, 0);
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
+        cmd.pre_exec(set_parent_death_signal);
     }
 
     cmd.spawn()
@@ -641,13 +693,30 @@ mod tests {
 
     #[test]
     fn find_chrome_empty_path_returns_none() {
-        let original = std::env::var("PATH").ok();
-        unsafe { std::env::set_var("PATH", "") };
-        let result = find_chrome();
-        if let Some(p) = original {
-            unsafe { std::env::set_var("PATH", p) };
-        }
-        assert!(result.is_none());
+        // An empty entry means the current directory, which holds no
+        // Chrome binary under the test harness.
+        assert!(find_chrome_in("").is_none());
+    }
+
+    #[test]
+    fn find_chrome_in_returns_binary_from_search_dir() {
+        let empty = tempfile::tempdir().unwrap();
+        let with_chrome = tempfile::tempdir().unwrap();
+        let binary = with_chrome.path().join("chromium");
+        std::fs::write(&binary, "").unwrap();
+        let path_var = format!(
+            "{}:{}",
+            empty.path().display(),
+            with_chrome.path().display()
+        );
+        assert_eq!(find_chrome_in(&path_var), Some(binary));
+    }
+
+    #[test]
+    fn find_chrome_in_skips_dirs_without_a_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("firefox"), "").unwrap();
+        assert!(find_chrome_in(&dir.path().display().to_string()).is_none());
     }
 
     // -- allowlist proxy integration ------------------------------------------
