@@ -494,24 +494,18 @@ fn host_from_remote_url(url: &str) -> Option<String> {
 }
 
 fn remote_url_host(url: &str) -> Option<String> {
-    if let Some(rest) = url.strip_prefix("ssh://") {
-        let authority = rest.rsplit_once('@').map_or(rest, |(_, a)| a);
-        let host = authority.split('/').next()?;
-        return Some(host.split(':').next().unwrap_or(host).to_string());
+    let after_scheme = ["ssh://", "https://", "http://"]
+        .iter()
+        .find_map(|scheme| url.strip_prefix(scheme));
+    if let Some(rest) = after_scheme {
+        // scheme://[user[:password]@]host[:port]/path
+        let authority = rest.split('/').next()?;
+        let host_and_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        return host_and_port.split(':').next().map(String::from);
     }
-    if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
-        return rest
-            .split('/')
-            .next()
-            .map(|h| h.split(':').next().unwrap_or(h).to_string());
-    }
-    if let Some((_user, host_and_path)) = url.split_once('@') {
-        return host_and_path.split(':').next().map(String::from);
-    }
-    None
+    // SCP style: user@host:path
+    let (_user, host_and_path) = url.split_once('@')?;
+    host_and_path.split(':').next().map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -906,6 +900,27 @@ mod tests {
             host_from_remote_url("ssh://git@gitlab.example.com:2222/group/repo.git"),
             Some("gitlab.example.com".into())
         );
+    }
+
+    /// A token in a remote URL is neither a host to allow nor something to
+    /// print, and an `@` in the path isn't the end of the user part.
+    #[test]
+    fn host_from_remote_url_skips_credentials_and_paths() {
+        for (url, host) in [
+            (
+                "https://x-access-token:ghs_secret@github.com/o/r.git",
+                "github.com",
+            ),
+            (
+                "https://oauth2:glpat-secret@gitlab.com/g/r.git",
+                "gitlab.com",
+            ),
+            ("https://ghp_secret@github.com/o/r.git", "github.com"),
+            ("https://chris@bitbucket.org/ws/r.git", "bitbucket.org"),
+            ("ssh://git@github.com/org/repo@v2.git", "github.com"),
+        ] {
+            assert_eq!(host_from_remote_url(url).as_deref(), Some(host), "{url}");
+        }
     }
 
     #[test]
