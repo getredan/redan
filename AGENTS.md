@@ -9,7 +9,7 @@ Secure, local-first AI agent execution environment. Rust + libkrun microVMs + ne
 
 ## Dev Setup
 
-Requires: Rust 1.92+, libkrun 1.17+, KVM (`/dev/kvm`), Docker, curl, mise.
+Requires: Rust 1.99 (pinned in `rust-toolchain.toml`), libkrun 1.17+, KVM (`/dev/kvm`), Docker, curl, mise.
 
 ```bash
 mise trust
