@@ -35,7 +35,7 @@ fn end_to_end_secret_injection() {
     let _lock = VM_LOCK.lock().unwrap();
     let rootfs = test_rootfs();
 
-    let ca = MitmCa::generate();
+    let ca = MitmCa::generate().expect("generate CA");
     vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
 
     let placeholder = "redan_ph_test_e2e_abcd1234";
@@ -73,7 +73,7 @@ fn end_to_end_secret_injection() {
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(&config);
+    let vm_handle = vm::Vm::boot(&config).expect("boot VM");
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
     let _ = proxy::run(proxy::ProxyConfig {
@@ -95,7 +95,7 @@ fn synthetic_dns_resolution() {
     let _lock = VM_LOCK.lock().unwrap();
     let rootfs = test_rootfs();
 
-    let ca = MitmCa::generate();
+    let ca = MitmCa::generate().expect("generate CA");
     vm::install_ca_cert(rootfs.as_ref(), ca.ca_cert_pem()).expect("install CA cert");
 
     let net_setup = vm::net_setup_commands(&proxy::GATEWAY_IP.to_string(), proxy::GUEST_IP);
@@ -120,7 +120,7 @@ fn synthetic_dns_resolution() {
         interactive: false,
     };
 
-    let vm_handle = vm::Vm::boot(&config);
+    let vm_handle = vm::Vm::boot(&config).expect("boot VM");
     let net_sock = vm_handle.net_sock.try_clone().expect("clone net_sock");
 
     let _ = proxy::run(proxy::ProxyConfig {

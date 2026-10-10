@@ -199,6 +199,10 @@ fn write_claude_devcontainer(detections: &[ProjectDetection], packages: &[String
     eprintln!("wrote .devcontainer/redan/devcontainer.json");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear sequence of file probes, one block per project type"
+)]
 pub(crate) fn detect_project() -> Vec<ProjectDetection> {
     let mut detections = Vec::new();
 
