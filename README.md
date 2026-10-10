@@ -312,7 +312,8 @@ images older than 30 days.
 
 ```bash
 redan exec -d --name my-agent    # run in background
-redan logs my-agent -f           # tail the logs
+redan logs my-agent              # view audit trail (logfmt)
+redan logs my-agent -f           # follow live
 redan attach my-agent            # reconnect
 redan stop my-agent              # SIGTERM, wait 3s, SIGKILL
 
@@ -323,12 +324,35 @@ redan sessions remove            # clean up exited sessions
 
 ## Audit log
 
+Every session records an audit trail automatically. View it with
+`redan logs`:
+
+```bash
+redan logs <session>
+```
+```text
+ts=2026-08-14T20:04:07Z severity=info event=dns hostname=example.com
+ts=2026-08-14T20:04:07Z severity=warning event=reject host=example.com reason=not_allowed
+ts=2026-08-14T20:04:07Z severity=info event=dns hostname=httpbin.org
+ts=2026-08-14T20:04:08Z severity=info event=inject host=httpbin.org count=1
+ts=2026-08-14T20:04:08Z severity=info event=connect host=httpbin.org
+```
+
+The default view is [logfmt] (greppable `key=value` lines). Event values
+are escaped so a crafted hostname can't forge a log line or drive the
+terminal.
+
+```bash
+redan logs <session> --json           # raw JSON for jq
+redan logs <session> -f               # follow live (like tail -f)
+redan logs <session> | grep event=reject   # find blocked connections
+```
+
+You can also write the audit log to a custom path:
+
 ```bash
 redan exec --audit-log events.jsonl
 ```
-
-JSON-lines event log: connections, injections, scrubs, rejections.
-Also stored per-session automatically.
 
 ## Agent awareness
 
@@ -424,3 +448,4 @@ If redan is useful to you, consider [buying me a coffee](https://buymeacoffee.co
 [rustls]: https://github.com/rustls/rustls
 [rcgen]: https://github.com/rustls/rcgen
 [Gondolin]: https://github.com/earendil-works/gondolin
+[logfmt]: https://brandur.org/logfmt
