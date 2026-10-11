@@ -2,9 +2,12 @@
 //!
 //! Stored as `.redan-image.json` inside the image directory.
 
+use std::io::Write as _;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::rootfs::Rootfs;
 
 const META_FILE: &str = ".redan-image.json";
 
@@ -45,17 +48,22 @@ impl ImageMeta {
         Self { built_at, source }
     }
 
-    /// Write metadata to the image directory.
+    /// Write metadata to the image directory. The image directory is also
+    /// the guest's rootfs, so the write goes through [`Rootfs`].
     ///
     /// # Errors
     ///
     /// Returns a message if the metadata cannot be serialized or
     /// `.redan-image.json` cannot be written in `image_dir`.
     pub fn save(&self, image_dir: &Path) -> Result<(), String> {
-        let path = image_dir.join(META_FILE);
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("cannot serialize image meta: {e}"))?;
-        std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        Rootfs::open(image_dir)
+            .and_then(|root| {
+                root.create(Path::new(META_FILE))?
+                    .write_all(json.as_bytes())
+            })
+            .map_err(|e| format!("cannot write {}: {e}", image_dir.join(META_FILE).display()))
     }
 
     /// Read metadata from an image directory. Returns None if not found.
@@ -84,6 +92,21 @@ impl ImageMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Docker image can ship `/.redan-image.json` as a link, and the
+    /// metadata is saved into the image right after the import.
+    #[test]
+    fn save_never_writes_outside_the_image() {
+        let yours = tempfile::tempdir().unwrap();
+        let victim = yours.path().join("victim");
+        std::fs::write(&victim, "yours").unwrap();
+        let image = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&victim, image.path().join(META_FILE)).unwrap();
+
+        let _ = ImageMeta::new(ImageSource::Unknown).save(image.path());
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "yours");
+    }
 
     #[test]
     fn roundtrip_dockerfile_source() {

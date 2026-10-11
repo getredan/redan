@@ -34,6 +34,7 @@ pub mod logfmt;
 pub mod net;
 pub mod provider;
 pub mod proxy;
+pub mod rootfs;
 pub mod secret;
 pub mod session;
 pub mod templates;

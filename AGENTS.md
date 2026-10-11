@@ -89,6 +89,7 @@ internet (only allowed hosts)
 | `net.rs` | smoltcp Device for virtio-net socket |
 | `provider.rs` | Secret providers (literal, env, Vault KV v2) |
 | `proxy.rs` | smoltcp event loop, connection state machine, host allowlist |
+| `rootfs.rs` | Host-side writes into a guest rootfs, kept inside it with `openat2(RESOLVE_IN_ROOT)` |
 | `secret.rs` | Injection and scrubbing |
 | `session.rs` | Session lifecycle, metadata, listing |
 | `templates.rs` | Minijinja templates (`templates/*.j2`, embedded via `include_str!`) |
