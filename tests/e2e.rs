@@ -90,9 +90,10 @@ impl Sandbox {
         self.root.path().join(name)
     }
 
-    /// Write a file into the project directory, creating parent directories.
-    fn write(&self, relative: &str, content: &str) {
-        let path = self.path("project").join(relative);
+    /// Write a file in the sandbox, like `project/redan.toml` or
+    /// `home/.claude/settings.json`, creating parent directories.
+    fn write(&self, name: &str, content: &str) {
+        let path = self.path(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
     }
@@ -100,7 +101,8 @@ impl Sandbox {
     /// `program` in the project directory, with only `PATH`, the sandbox's
     /// own `HOME` and state directory and the [`CANARY`] in its environment.
     /// `XDG_DATA_HOME` points at your real data directory so the images are
-    /// found.
+    /// found, and your `LD_LIBRARY_PATH` comes along in case that's how your
+    /// libkrun is found.
     fn command(&self, program: &str) -> Command {
         // image_dir() is <data home>/redan/images.
         let images = redan::image::image_dir();
@@ -113,6 +115,7 @@ impl Sandbox {
             .env("HOME", self.path("home"))
             .env("XDG_STATE_HOME", self.path("state"))
             .env("XDG_DATA_HOME", data_home)
+            .envs(std::env::var_os("LD_LIBRARY_PATH").map(|path| ("LD_LIBRARY_PATH", path)))
             .env(CANARY.0, CANARY.1);
         command
     }
@@ -230,16 +233,16 @@ fn report(out: &Output) -> String {
     )
 }
 
-/// A repo's `.claude/settings.local.json` with `"*"` in `allowedDomains`
-/// can't turn off the allowlist. redan skips the `"*"` with a warning, and
-/// the guest's request to a host nobody allowed is rejected.
+/// Neither a repo's `.claude/settings.local.json` nor your own
+/// `~/.claude/settings.json` can turn off the allowlist with `"*"` in
+/// `allowedDomains`. redan skips each `"*"` with a warning, and the guest's
+/// request to a host nobody allowed gets the proxy's 403.
 #[test]
 fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
     let sandbox = Sandbox::new("test");
-    sandbox.write(
-        ".claude/settings.local.json",
-        r#"{"sandbox": {"network": {"allowedDomains": ["*"]}}}"#,
-    );
+    let settings = r#"{"sandbox": {"network": {"allowedDomains": ["*"]}}}"#;
+    sandbox.write("project/.claude/settings.local.json", settings);
+    sandbox.write("home/.claude/settings.json", settings);
 
     let out = sandbox.redan(
         &[
@@ -255,10 +258,22 @@ fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
     );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let home_settings = sandbox.path("home/.claude/settings.json");
+    for settings in [
+        "./.claude/settings.local.json",
+        &home_settings.display().to_string(),
+    ] {
+        assert!(
+            stderr.contains(&format!(
+                r#"warning: ignoring "*" in {settings}: Claude Code settings can't turn off redan's allowlist"#
+            )),
+            "{}",
+            sandbox.explain(&out)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains(
-            r#"warning: ignoring "*" in ./.claude/settings.local.json: Claude Code settings can't turn off redan's allowlist"#
-        ),
+        stdout.contains("wget_exit=") && !stdout.contains("wget_exit=0"),
         "{}",
         sandbox.explain(&out)
     );
@@ -273,7 +288,7 @@ fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
 #[test]
 fn redan_toml_allow_all_is_refused_until_trusted() {
     let sandbox = Sandbox::new("test");
-    sandbox.write("redan.toml", ALLOW_ALL_CONFIG);
+    sandbox.write("project/redan.toml", ALLOW_ALL_CONFIG);
 
     let refused = sandbox.redan(&["exec"], &[]);
     let stderr = String::from_utf8_lossy(&refused.stderr);
@@ -312,7 +327,7 @@ fn redan_toml_allow_all_is_refused_until_trusted() {
 #[test]
 fn redan_toml_allow_all_asks_in_a_terminal() {
     let sandbox = Sandbox::new("test");
-    sandbox.write("redan.toml", ALLOW_ALL_CONFIG);
+    sandbox.write("project/redan.toml", ALLOW_ALL_CONFIG);
 
     let declined = sandbox.redan_in_terminal(&["exec"], "n\n");
     let output = String::from_utf8_lossy(&declined.stdout);
@@ -354,12 +369,13 @@ fn redan_toml_allow_all_asks_in_a_terminal() {
 /// `allow = ["*."]` isn't `"*"`, so it needs no trust, but as a pattern it
 /// would match every name the guest sends with a trailing dot. redan refuses
 /// to run with an allowlist entry that isn't a hostname or a `*.domain`
-/// pattern, before it starts a session.
+/// pattern, before it starts a session, so a detached run fails in your
+/// terminal and not in a log you'd have to go looking for.
 #[test]
 fn redan_toml_allow_entry_that_is_not_a_hostname_is_refused() {
     let sandbox = Sandbox::new("test");
     sandbox.write(
-        "redan.toml",
+        "project/redan.toml",
         r#"
 image = "test"
 command = "true"
@@ -370,15 +386,17 @@ allow = ["*."]
 "#,
     );
 
-    let out = sandbox.redan(&["exec"], &[]);
+    for args in [&["exec"][..], &["exec", "--detach"]] {
+        let out = sandbox.redan(args, &[]);
 
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{}", sandbox.explain(&out));
-    assert!(
-        stderr.contains(r#"take a hostname or a *.domain pattern, not a URL or host:port: "*.""#),
-        "{}",
-        sandbox.explain(&out)
-    );
+        assert_eq!(out.status.code(), Some(1), "{}", sandbox.explain(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains(r#"take a hostname or a *.domain pattern, got "*.""#),
+            "{}",
+            sandbox.explain(&out)
+        );
+    }
     let sessions = sandbox.redan(&["sessions"], &[]);
     assert!(
         String::from_utf8_lossy(&sessions.stderr).contains("no sessions"),
@@ -475,7 +493,7 @@ fn ask_claude(sandbox: &Sandbox, prompt: &str) -> (Output, Vec<AuditEvent>) {
 fn claude_guest_env_has_placeholders_instead_of_your_credentials() {
     let sandbox = Sandbox::new("claude-code");
     // A project's redan.toml overrides the agent's command, as it would for you.
-    sandbox.write("redan.toml", r#"command = "env""#);
+    sandbox.write("project/redan.toml", r#"command = "env""#);
 
     let (out, _) = run_claude(&sandbox, &fake_claude_credentials(), &[]);
 
@@ -495,8 +513,8 @@ fn claude_guest_env_has_placeholders_instead_of_your_credentials() {
 fn git_remote_wildcard_does_not_turn_off_the_allowlist() {
     let sandbox = Sandbox::new("claude-code");
     sandbox.write(
-        "redan.toml",
-        r#"command = "curl -sS -m 10 https://example.com/""#,
+        "project/redan.toml",
+        r#"command = "curl -sS -m 10 -o /dev/null -w 'http=%{http_code}' https://example.com/""#,
     );
     sandbox.git(&["init", "-q"]);
     sandbox.git(&[
@@ -512,6 +530,11 @@ fn git_remote_wildcard_does_not_turn_off_the_allowlist() {
     // The real remote's host is allowed, so redan did read the remotes.
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("Allowing git remote hosts: github.com\n"),
+        "{}",
+        sandbox.explain(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("http=403"),
         "{}",
         sandbox.explain(&out)
     );
@@ -552,7 +575,7 @@ fn claude_answers_through_the_injected_credential() {
 fn claude_cannot_reach_other_hosts_when_project_settings_allow_all() {
     let sandbox = Sandbox::new("claude-code");
     sandbox.write(
-        ".claude/settings.json",
+        "project/.claude/settings.json",
         r#"{"sandbox": {"network": {"allowedDomains": ["*"]}}}"#,
     );
 
