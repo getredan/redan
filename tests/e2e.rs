@@ -328,7 +328,7 @@ fn redan_toml_allow_all_asks_in_a_terminal() {
 /// `allow = ["*."]` isn't `"*"`, so it needs no trust, but as a pattern it
 /// would match every name the guest sends with a trailing dot. redan refuses
 /// to run with an allowlist entry that isn't a hostname or a `*.domain`
-/// pattern.
+/// pattern, before it starts a session.
 #[test]
 fn redan_toml_allow_entry_that_is_not_a_hostname_is_refused() {
     let _turn = vm_turn();
@@ -345,6 +345,12 @@ fn redan_toml_allow_entry_that_is_not_a_hostname_is_refused() {
     assert!(
         stderr.contains(r#"take a hostname or a *.domain pattern, not a URL or host:port: "*.""#),
         "{stderr}"
+    );
+    let sessions = sandbox.redan(&["sessions"], &[]);
+    assert!(
+        String::from_utf8_lossy(&sessions.stderr).contains("no sessions"),
+        "{}",
+        report(&sessions)
     );
 }
 

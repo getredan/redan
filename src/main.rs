@@ -772,6 +772,20 @@ fn launch(
         }
     }
 
+    // Validate the allowlist before anything touches the image or a detached
+    // session starts. Only "*" turns the allowlist off, and trust::analyze
+    // gates that one. Anything else that isn't a hostname or *.domain pattern
+    // could match more than it says.
+    for host in &allow_hosts {
+        if host != config::ALLOW_ALL_HOSTS && !redan::proxy::is_host_pattern(host) {
+            eprintln!(
+                "error: --allow-host and [network] allow take a hostname or a *.domain pattern, \
+                 not a URL or host:port: {host:?}"
+            );
+            std::process::exit(1);
+        }
+    }
+
     let mut forwards = args.forwards;
     forwards.extend(cfg.network.forward.clone());
 

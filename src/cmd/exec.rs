@@ -131,19 +131,6 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
         }
     }
 
-    // Validate --allow-host and [network] allow values. Only "*" turns the
-    // allowlist off, and trust::analyze gates that one. Anything else that
-    // isn't a hostname or *.domain pattern could match more than it says.
-    for host in cfg.allow_host_specs {
-        if host != ALLOW_ALL_HOSTS && !proxy::is_host_pattern(host) {
-            eprintln!(
-                "error: --allow-host and [network] allow take a hostname or a *.domain pattern, \
-                 not a URL or host:port: {host:?}"
-            );
-            std::process::exit(1);
-        }
-    }
-
     // Default-deny: all outbound HTTPS blocked unless explicitly allowed.
     let allowed_hosts: Option<Vec<String>> = if cfg
         .allow_host_specs
