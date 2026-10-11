@@ -177,23 +177,17 @@ pub struct ClaudeDomains {
 /// Read `sandbox.network.allowedDomains` from Claude Code's settings.
 ///
 /// The files are `.claude/settings.local.json` and `.claude/settings.json` in
-/// `project`, then the same two under `home`. When the project is your home
-/// directory, each file is read once.
+/// `project`, then the same two under `home`. When the project's `.claude`
+/// is your home's, because the project is your home or links it there, each
+/// file is read once.
 #[must_use]
 pub fn claude_allowed_domains(project: &Path, home: Option<&Path>) -> ClaudeDomains {
+    let claude_dir = |dir: &Path| dir.join(".claude").canonicalize().ok();
+    let home = home.filter(|home| claude_dir(home) != claude_dir(project));
     let mut domains = ClaudeDomains::default();
-    let mut read = Vec::new();
     for dir in std::iter::once(project).chain(home) {
         for name in ["settings.local.json", "settings.json"] {
-            let path = dir.join(".claude").join(name);
-            let Ok(canonical) = path.canonicalize() else {
-                continue;
-            };
-            if read.contains(&canonical) {
-                continue;
-            }
-            read.push(canonical);
-            if let Some(found) = read_claude_settings(&path) {
+            if let Some(found) = read_claude_settings(&dir.join(".claude").join(name)) {
                 domains.hosts.extend(found.hosts);
                 domains.warnings.extend(found.warnings);
             }
@@ -241,19 +235,17 @@ fn read_claude_settings(path: &Path) -> Option<ClaudeDomains> {
     for entry in entries.iter().filter_map(serde_json::Value::as_str) {
         if is_host_pattern(entry) {
             domains.hosts.push(entry.to_string());
-        } else if entry == ALLOW_ALL_HOSTS {
-            domains.warnings.push(format!(
-                "ignoring {entry:?} in {}: Claude Code settings can't turn off redan's \
-                 allowlist, pass --allow-host '*' for that",
-                path.display()
-            ));
-        } else {
-            domains.warnings.push(format!(
-                "ignoring {entry:?} in {}: redan's allowlist only takes hostnames and \
-                 *.domain patterns",
-                path.display()
-            ));
+            continue;
         }
+        let reason = if entry == ALLOW_ALL_HOSTS {
+            "Claude Code settings can't turn off redan's allowlist, pass --allow-host '*' for that"
+        } else {
+            "redan's allowlist only takes hostnames and *.domain patterns"
+        };
+        domains.warnings.push(format!(
+            "ignoring {entry:?} in {}: {reason}",
+            path.display()
+        ));
     }
     Some(domains)
 }
@@ -485,6 +477,20 @@ target = "/workspace"
         write_claude_settings(home.path(), "settings.json", r#"["*", "github.com"]"#);
 
         let domains = claude_allowed_domains(home.path(), Some(home.path()));
+
+        assert_eq!(domains.hosts, vec!["github.com"]);
+        assert_eq!(domains.warnings.len(), 1, "{:?}", domains.warnings);
+    }
+
+    #[test]
+    fn claude_allowed_domains_reads_a_project_claude_dir_linked_to_your_home_once() {
+        let home = tempfile::tempdir().unwrap();
+        write_claude_settings(home.path(), "settings.json", r#"["*", "github.com"]"#);
+        let project = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(home.path().join(".claude"), project.path().join(".claude"))
+            .unwrap();
+
+        let domains = claude_allowed_domains(project.path(), Some(home.path()));
 
         assert_eq!(domains.hosts, vec!["github.com"]);
         assert_eq!(domains.warnings.len(), 1, "{:?}", domains.warnings);
