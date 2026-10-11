@@ -201,6 +201,10 @@ pub fn claude_allowed_domains(project: &Path, home: Option<&Path>) -> ClaudeDoma
 /// Largest settings file redan reads, far above any real one.
 const MAX_CLAUDE_SETTINGS_BYTES: u64 = 1 << 20;
 
+/// Skipped entries in one settings file that get a warning of their own. The
+/// rest are counted, since the guest can fill the project's settings.
+const MAX_SKIP_WARNINGS: usize = 5;
+
 fn read_claude_settings(path: &Path) -> Option<ClaudeDomains> {
     use std::io::Read as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -232,18 +236,30 @@ fn read_claude_settings(path: &Path) -> Option<ClaudeDomains> {
     // project's `.claude/settings*.json` comes with the repo, and a `"*"`
     // meant for Claude Code's own sandbox shouldn't switch off redan's.
     let mut domains = ClaudeDomains::default();
+    let mut skipped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for entry in entries.iter().filter_map(serde_json::Value::as_str) {
         if is_host_pattern(entry) {
             domains.hosts.push(entry.to_string());
-            continue;
+        } else if seen.insert(entry) {
+            skipped.push(entry);
         }
-        let reason = if entry == ALLOW_ALL_HOSTS {
+    }
+    for entry in skipped.iter().take(MAX_SKIP_WARNINGS) {
+        let reason = if *entry == ALLOW_ALL_HOSTS {
             "Claude Code settings can't turn off redan's allowlist, pass --allow-host '*' for that"
         } else {
             "redan's allowlist only takes hostnames and *.domain patterns"
         };
         domains.warnings.push(format!(
             "ignoring {entry:?} in {}: {reason}",
+            path.display()
+        ));
+    }
+    let more = skipped.len().saturating_sub(MAX_SKIP_WARNINGS);
+    if more > 0 {
+        domains.warnings.push(format!(
+            "ignoring {more} more entries in {} that aren't hostnames or *.domain patterns",
             path.display()
         ));
     }
@@ -445,6 +461,36 @@ target = "/workspace"
         );
     }
 
+    /// The guest can write the project's settings, so a file full of entries
+    /// redan skips gets one warning for each of the first few and a count for
+    /// the rest, instead of a line for every entry before each session.
+    #[test]
+    fn read_claude_settings_warns_about_the_first_few_skipped_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries: Vec<String> = std::iter::repeat_n(r#""*""#.to_string(), 1000)
+            .chain((0..100).map(|i| format!(r#""host:{i}""#)))
+            .collect();
+        write_claude_settings(
+            dir.path(),
+            "settings.json",
+            &format!("[{}]", entries.join(", ")),
+        );
+        let path = dir.path().join(".claude").join("settings.json");
+
+        let domains = read_claude_settings(&path).unwrap();
+
+        assert_eq!(domains.warnings.len(), 6, "{:?}", domains.warnings);
+        assert!(domains.warnings[0].starts_with(r#"ignoring "*" in"#));
+        assert!(domains.warnings[4].starts_with(r#"ignoring "host:3" in"#));
+        assert_eq!(
+            domains.warnings[5],
+            format!(
+                "ignoring 96 more entries in {} that aren't hostnames or *.domain patterns",
+                path.display()
+            )
+        );
+    }
+
     fn write_claude_settings(dir: &Path, name: &str, domains: &str) {
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         std::fs::write(
@@ -496,10 +542,15 @@ target = "/workspace"
         assert_eq!(domains.warnings.len(), 1, "{:?}", domains.warnings);
     }
 
-    /// The guest can leave a FIFO or a link to `/dev/zero` in the project,
-    /// and reading either would never return.
+    /// The guest can leave a FIFO in the project, which would block redan
+    /// before the session starts, or a link to `/dev/stdin`, which would read
+    /// redan's own input when you pipe something into it. A pipe that holds
+    /// valid settings stands in for the second.
     #[test]
     fn claude_allowed_domains_skips_settings_that_are_not_regular_files() {
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+
         let project = tempfile::tempdir().unwrap();
         let claude = project.path().join(".claude");
         std::fs::create_dir(&claude).unwrap();
@@ -508,7 +559,13 @@ target = "/workspace"
             .status()
             .unwrap();
         assert!(status.success());
-        std::os::unix::fs::symlink("/dev/zero", claude.join("settings.json")).unwrap();
+        let (stdin, mut piped) = std::io::pipe().unwrap();
+        piped
+            .write_all(br#"{"sandbox": {"network": {"allowedDomains": ["example.com"]}}}"#)
+            .unwrap();
+        drop(piped);
+        let stdin_link = format!("/proc/self/fd/{}", stdin.as_raw_fd());
+        std::os::unix::fs::symlink(stdin_link, claude.join("settings.json")).unwrap();
 
         let domains = claude_allowed_domains(project.path(), None);
 
