@@ -196,7 +196,7 @@ mod tests {
     }
 
     /// A guest whose clock trails the host's accepts a leaf minted this very
-    /// second, CA included.
+    /// second.
     #[test]
     fn leaf_is_valid_for_a_client_whose_clock_is_behind() {
         use rustls::client::danger::ServerCertVerifier;
@@ -222,6 +222,15 @@ mod tests {
                 five_seconds_ago,
             )
             .unwrap();
+    }
+
+    /// rustls doesn't check a trust anchor's dates, but OpenSSL in the guest
+    /// does, so the CA has to start before the guest's clock too.
+    #[test]
+    fn ca_is_valid_for_a_client_whose_clock_is_behind() {
+        let ca = MitmCa::generate().unwrap();
+        let five_seconds_ago = time::OffsetDateTime::now_utc() - time::Duration::seconds(5);
+        assert!(ca.ca_params.not_before < five_seconds_ago);
     }
 
     #[test]
