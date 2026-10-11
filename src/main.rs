@@ -294,8 +294,9 @@ enum Cli {
     ///
     /// A working-directory redan.toml that reads host env vars or Vault, mounts
     /// host paths, sets a rootfs, forwards host ports, writes host logs, or
-    /// turns the network allowlist off must be trusted first. Trust is a machine-local record keyed by the file's
-    /// contents, so editing the file requires trusting it again.
+    /// turns the network allowlist off must be trusted first. Trust is a
+    /// machine-local record keyed by the file's contents, so editing the file
+    /// requires trusting it again.
     Trust {
         /// Path to the config (default: ./redan.toml)
         path: Option<String>,
