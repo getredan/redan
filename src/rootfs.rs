@@ -83,20 +83,32 @@ impl Rootfs {
     /// # Errors
     ///
     /// Returns the I/O error if the file can't be opened, and `InvalidInput`
-    /// if what's there isn't a regular file. A FIFO fails right away instead
-    /// of waiting for a reader.
+    /// if what's there isn't a regular file or has other hard links. A FIFO
+    /// fails right away instead of waiting for a reader.
     pub fn create(&self, path: &Path) -> io::Result<File> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // Not truncated on open: a hard link isn't a path RESOLVE_IN_ROOT
+        // could catch, so the file is checked first, through the opened fd.
         let file = self.open_in_root(
             path,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NONBLOCK | libc::O_NOCTTY,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NONBLOCK | libc::O_NOCTTY,
             0o644,
         )?;
-        if !file.metadata()?.is_file() {
+        let meta = file.metadata()?;
+        if !meta.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{} isn't a regular file", path.display()),
             ));
         }
+        if meta.nlink() > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} has other hard links", path.display()),
+            ));
+        }
+        file.set_len(0)?;
         Ok(file)
     }
 
@@ -242,6 +254,20 @@ mod tests {
 
         let _ = root.create(Path::new("etc/policy"));
 
+        assert_untouched(yours.path());
+    }
+
+    /// A hard link in the image to one of your files isn't a path to
+    /// resolve, so `RESOLVE_IN_ROOT` can't catch it. The guest can only link
+    /// to what it can already reach, but an image could ship one.
+    #[test]
+    fn create_refuses_a_file_with_another_hard_link() {
+        let yours = your_files();
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::hard_link(yours.path().join("victim"), rootfs.path().join("policy")).unwrap();
+        let root = Rootfs::open(rootfs.path()).unwrap();
+
+        assert!(root.create(Path::new("policy")).is_err());
         assert_untouched(yours.path());
     }
 
