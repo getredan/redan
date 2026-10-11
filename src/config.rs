@@ -186,11 +186,6 @@ pub fn claude_allowed_domains(project: &Path, home: Option<&Path>) -> ClaudeDoma
     for dir in std::iter::once(project).chain(home) {
         for name in ["settings.local.json", "settings.json"] {
             let path = dir.join(".claude").join(name);
-            // The guest can write the project's `.claude/`, and a FIFO or a
-            // link to a device there would block before the session starts.
-            if !path.is_file() {
-                continue;
-            }
             let Ok(canonical) = path.canonicalize() else {
                 continue;
             };
@@ -209,8 +204,30 @@ pub fn claude_allowed_domains(project: &Path, home: Option<&Path>) -> ClaudeDoma
     domains
 }
 
+/// Largest settings file redan reads, far above any real one.
+const MAX_CLAUDE_SETTINGS_BYTES: u64 = 1 << 20;
+
 fn read_claude_settings(path: &Path) -> Option<ClaudeDomains> {
-    let content = std::fs::read_to_string(path).ok()?;
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // The guest can write the project's `.claude/`, and a FIFO or a link to a
+    // device there would block or never end before the session starts. So
+    // the file is opened without blocking, and that same handle has to be a
+    // regular file, since a check on the path could be raced by a second
+    // session on the project.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut content = String::new();
+    file.take(MAX_CLAUDE_SETTINGS_BYTES)
+        .read_to_string(&mut content)
+        .ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let entries = value
         .get("sandbox")?
