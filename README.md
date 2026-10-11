@@ -179,18 +179,23 @@ Default-deny outbound. You must explicitly allow hosts:
 redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
 ```
 
-Wildcard patterns work: `"*.amazonaws.com"` matches any subdomain.
+Each entry is a hostname or a `*.domain` pattern: `"*.amazonaws.com"`
+matches any subdomain of amazonaws.com, but not amazonaws.com itself.
 Hosts required by secrets are included automatically, and so are the
 `sandbox.network.allowedDomains` from Claude Code's settings (the
 project's `.claude/settings.json` / `settings.local.json` and your own
-`~/.claude/` ones) and, with `redan run`, your git remotes' hosts. Those
-imports can add hostnames and `*.domain` patterns but can't turn the
-allowlist off: anything else, like `"*"`, is skipped, with a warning for
-Claude Code settings. Pass `--allow-host '*'` yourself if you want
-allow-all. Connections to
-private IP ranges (RFC 1918, link-local, cloud metadata) are blocked
-even in allow-all mode. Domain fronting is blocked: HTTP Host must
-match TLS SNI.
+`~/.claude/` ones). When redan sets the agent up for you (`redan run`, or
+a bare `redan exec` with no `redan.toml`), it also allows the agent's own
+hosts and your git remotes' hosts. Those imports can add hosts but can't
+turn the allowlist off. Git remotes only add plain hostnames, and an
+entry in Claude Code's settings that isn't a hostname or a `*.domain`
+pattern, like `"*"`, is skipped with a warning. Pass `--allow-host '*'`
+yourself if you want allow-all.
+
+Connections to private IP ranges (RFC 1918, loopback, link-local, cloud
+metadata) are blocked unless the host is on your allowlist by name or
+pattern, and always in allow-all mode. Domain fronting is blocked: HTTP
+Host must match TLS SNI.
 
 **Discover mode** lets you figure out what hosts the agent needs:
 

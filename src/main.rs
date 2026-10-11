@@ -131,8 +131,8 @@ enum Cli {
         #[arg(long, value_name = "PATH")]
         secret_file: Option<String>,
 
-        /// Allow outbound HTTPS to a host. Default: deny all.
-        /// Hosts from --secret specs are included automatically.
+        /// Allow outbound HTTPS to a host or a *.domain pattern. Default: deny
+        /// all. Hosts from --secret specs are included automatically.
         /// Use '*' to allow all outbound connections.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
@@ -189,8 +189,8 @@ enum Cli {
         /// Agent to launch (e.g. `claude`, `pi`). Omit to auto-detect.
         agent: Option<String>,
 
-        /// Allow outbound HTTPS to a host (in addition to the agent's own).
-        /// Use '*' to allow all outbound connections.
+        /// Allow outbound HTTPS to a host or a *.domain pattern (in addition
+        /// to the agent's own). Use '*' to allow all outbound connections.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
 
@@ -293,8 +293,8 @@ enum Cli {
     /// Review and trust a redan.toml so redan will act on it
     ///
     /// A working-directory redan.toml that reads host env vars or Vault, mounts
-    /// host paths, sets a rootfs, forwards host ports, or writes host logs must
-    /// be trusted first. Trust is a machine-local record keyed by the file's
+    /// host paths, sets a rootfs, forwards host ports, writes host logs, or
+    /// turns the network allowlist off must be trusted first. Trust is a machine-local record keyed by the file's
     /// contents, so editing the file requires trusting it again.
     Trust {
         /// Path to the config (default: ./redan.toml)
