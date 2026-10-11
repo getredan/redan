@@ -5,9 +5,11 @@
 //! authority. It can read host env vars and Vault (`env://` / `vault://`
 //! secrets), mount host paths into the guest, set a host `rootfs`, forward
 //! host-local ports, and write host log files. So a config that reaches for any
-//! of that must be explicitly trusted before redan acts on it. A config that
-//! stays within a safe subset (image, command, guest env, allowlist, a project
-//! workspace mount) needs no trust, since none of it touches host authority.
+//! of that must be explicitly trusted before redan acts on it. So must a
+//! `"*"` in the allowlist, which turns default-deny egress off. A config that
+//! stays within a safe subset (image, command, guest env, allowlist hosts, a
+//! project workspace mount) needs no trust, since none of it touches host
+//! authority.
 //!
 //! Trust is a machine-local consent record, **not** a cryptographic signature.
 //! The store is `~/.local/state/redan/trust.json`, protected only by filesystem
@@ -22,7 +24,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::{ALLOW_ALL_HOSTS, Config};
 
 /// A capability in a config that reaches host authority and therefore needs
 /// trust. The list doubles as the summary shown when granting trust.
@@ -36,6 +38,8 @@ pub enum Capability {
     LogFile(String),
     /// `[network] forward`: exposes a host-local port to the guest.
     Forward(String),
+    /// `[network] allow = ["*"]`: turns the egress allowlist off.
+    AllowAllHosts,
     /// `[secrets.<name>] value = "env://<var>"`: reads a host env var.
     EnvSecret { name: String, var: String },
     /// `[secrets.<name>] value = "vault://<ref>"`: reads from Vault.
@@ -86,8 +90,12 @@ pub fn analyze(cfg: &Config, project_root: &Path) -> Vec<Capability> {
     if let Some(path) = log_file {
         caps.push(Capability::LogFile(path.clone()));
     }
-    // network.allow only widens reachable hosts; without a secret it cannot
-    // exfiltrate, so it is safe. forward exposes a host-local port to the guest.
+    // Hosts in network.allow only widen what the guest can reach and can't
+    // leak a secret on their own, so they are safe. "*" turns the allowlist
+    // off entirely. forward exposes a host-local port to the guest.
+    if network.allow.iter().any(|h| h == ALLOW_ALL_HOSTS) {
+        caps.push(Capability::AllowAllHosts);
+    }
     for spec in &network.forward {
         caps.push(Capability::Forward(spec.clone()));
     }
@@ -478,6 +486,19 @@ mod tests {
         );
         let issues = analyze(&cfg, dir.path());
         assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn allow_all_hosts_needs_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            network: NetworkConfig {
+                allow: vec!["api.anthropic.com".into(), "*".into()],
+                forward: vec![],
+            },
+            ..empty_config()
+        };
+        assert_eq!(analyze(&cfg, dir.path()), vec![Capability::AllowAllHosts]);
     }
 
     #[test]

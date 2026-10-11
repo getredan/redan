@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use redan::ca::MitmCa;
+use redan::config::ALLOW_ALL_HOSTS;
 use redan::proxy;
 use redan::secret::SecretBinding;
 use redan::session;
@@ -130,19 +131,11 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
         }
     }
 
-    // Validate --allow-host values
-    for host in cfg.allow_host_specs {
-        if host == "*" {
-            continue;
-        }
-        if host.contains("://") || host.contains('/') || host.contains(':') {
-            eprintln!("error: --allow-host takes a hostname, not a URL or host:port: {host}");
-            std::process::exit(1);
-        }
-    }
-
     // Default-deny: all outbound HTTPS blocked unless explicitly allowed.
-    let allowed_hosts: Option<Vec<String>> = if cfg.allow_host_specs.iter().any(|spec| spec == "*")
+    let allowed_hosts: Option<Vec<String>> = if cfg
+        .allow_host_specs
+        .iter()
+        .any(|spec| spec == ALLOW_ALL_HOSTS)
     {
         None
     } else {

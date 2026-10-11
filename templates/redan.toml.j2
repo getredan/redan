@@ -19,7 +19,8 @@ timeout = {{ timeout }}
 # Hosts Claude Code needs to function. Add project-specific
 # API hosts here. Remove any you don't need.
 {%- else %}
-# Allowed outbound hosts. Empty = deny all, ["*"] = allow all.
+# Allowed outbound hosts, as hostnames or *.domain patterns.
+# Empty = deny all, ["*"] = allow all (needs `redan trust`).
 {%- endif %}
 allow = [
 {%- for host in allow_hosts %}

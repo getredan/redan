@@ -131,8 +131,8 @@ enum Cli {
         #[arg(long, value_name = "PATH")]
         secret_file: Option<String>,
 
-        /// Allow outbound HTTPS to a host. Default: deny all.
-        /// Hosts from --secret specs are included automatically.
+        /// Allow outbound HTTPS to a host or a *.domain pattern. Default: deny
+        /// all. Hosts from --secret specs are included automatically.
         /// Use '*' to allow all outbound connections.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
@@ -189,8 +189,8 @@ enum Cli {
         /// Agent to launch (e.g. `claude`, `pi`). Omit to auto-detect.
         agent: Option<String>,
 
-        /// Allow outbound HTTPS to a host (in addition to the agent's own).
-        /// Use '*' to allow all outbound connections.
+        /// Allow outbound HTTPS to a host or a *.domain pattern (in addition
+        /// to the agent's own). Use '*' to allow all outbound connections.
         #[arg(long = "allow-host", value_name = "HOST")]
         allow_hosts: Vec<String>,
 
@@ -293,9 +293,10 @@ enum Cli {
     /// Review and trust a redan.toml so redan will act on it
     ///
     /// A working-directory redan.toml that reads host env vars or Vault, mounts
-    /// host paths, sets a rootfs, forwards host ports, or writes host logs must
-    /// be trusted first. Trust is a machine-local record keyed by the file's
-    /// contents, so editing the file requires trusting it again.
+    /// host paths, sets a rootfs, forwards host ports, writes host logs, or
+    /// turns the network allowlist off must be trusted first. Trust is a
+    /// machine-local record keyed by the file's contents, so editing the file
+    /// requires trusting it again.
     Trust {
         /// Path to the config (default: ./redan.toml)
         path: Option<String>,
@@ -754,14 +755,35 @@ fn launch(
     let mut allow_hosts = args.allow_hosts;
     allow_hosts.extend(cfg.network.allow.clone());
 
-    // Import allowedDomains from Claude Code settings if present.
-    let claude_domains = config::claude_allowed_domains();
-    if !claude_domains.is_empty() {
-        log::info!(
-            "imported {} domains from Claude Code settings",
-            claude_domains.len()
-        );
-        allow_hosts.extend(claude_domains);
+    // Import allowedDomains from Claude Code settings if present. With
+    // allow-all on there's nothing for them to add.
+    if !allow_hosts.iter().any(|h| h == config::ALLOW_ALL_HOSTS) {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let claude = config::claude_allowed_domains(std::path::Path::new("."), home.as_deref());
+        for warning in &claude.warnings {
+            eprintln!("warning: {warning}");
+        }
+        if !claude.hosts.is_empty() {
+            log::info!(
+                "allowing hosts from Claude Code settings: {}",
+                claude.hosts.join(", ")
+            );
+            allow_hosts.extend(claude.hosts);
+        }
+    }
+
+    // Validate the allowlist before anything touches the image or a detached
+    // session starts. Only "*" turns the allowlist off, and trust::analyze
+    // gates that one. Anything else that isn't a hostname or *.domain pattern
+    // either never matches or, like "*.", matches more than it says.
+    for host in &allow_hosts {
+        if host != config::ALLOW_ALL_HOSTS && !redan::proxy::is_host_pattern(host) {
+            eprintln!(
+                "error: --allow-host and [network] allow take a hostname or a *.domain pattern, \
+                 got {host:?}"
+            );
+            std::process::exit(1);
+        }
     }
 
     let mut forwards = args.forwards;

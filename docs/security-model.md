@@ -24,8 +24,16 @@ and are injected into HTTP requests at the network layer.
   attacker's authoritative nameserver.
 - **Unauthorized outbound connections**: default-deny networking blocks
   connections to hosts not in the allowlist. The guest can only reach
-  hosts explicitly permitted via `--allow-host` or `[network] allow`
-  in `redan.toml`. Secret hosts are auto-included.
+  hosts you allow with `--allow-host` or `[network] allow` in
+  `redan.toml`, your secrets' hosts, the `allowedDomains` in Claude
+  Code's settings, and, when redan sets the agent up for you, the agent
+  profile's own hosts and your git remotes' hosts. Entries from
+  `--allow-host`, `[network] allow` and the imports are hostnames or
+  `*.domain` patterns, and only `--allow-host`, your user config and a
+  trusted `redan.toml` can turn the allowlist off with `"*"`. The git and Claude Code imports come from files the repo or the
+  guest can write, so they can add hosts but never `"*"`. A host on the
+  allowlist may also resolve to a private address (that's how you reach
+  an internal git server), and that includes the imported ones.
 - **Secret exposure in logs**: `Debug` formatting on `SecretBinding`
   prints `[REDACTED]`. Secrets are wrapped in `Zeroizing<String>`
   and overwritten on drop.
@@ -164,9 +172,10 @@ repo you cloned could exfiltrate your credentials or expose host files, none of
 which the VM sandbox would stop, because the config runs before the sandbox.
 
 Redan gates this. A config that stays within a safe subset (`image`, `command`,
-guest `env`, `[network] allow`, and a project-workspace mount) needs no trust,
-since none of it touches host authority. A config that reaches for any of the
-above must be trusted first:
+guest `env`, hosts in `[network] allow`, and a project-workspace mount) needs no
+trust, since none of it touches host authority. A config that reaches for any of
+the above must be trusted first, and so must `allow = ["*"]`, which turns
+default-deny egress off:
 
 - Interactively, redan prints exactly what the config would be allowed to do and
   asks before acting on it.

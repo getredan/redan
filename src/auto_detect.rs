@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Config, MountConfig, NetworkConfig, SecretConfig};
 use crate::image;
+use crate::proxy;
 
 // ---------------------------------------------------------------------------
 // Agent registry
@@ -483,25 +484,28 @@ fn git_remote_hosts() -> Vec<String> {
 
 /// Extract hostname from a git remote URL.
 /// Handles HTTPS, HTTP, ssh://, and SCP-style (git@host:path) formats.
+///
+/// Returns `None` for anything that isn't a plain hostname. The guest can
+/// edit `.git/config` through the workspace mount, and a remote like
+/// `https://*/repo.git` would otherwise turn the allowlist off for the next
+/// session.
 fn host_from_remote_url(url: &str) -> Option<String> {
-    if let Some(rest) = url.strip_prefix("ssh://") {
-        let authority = rest.rsplit_once('@').map_or(rest, |(_, a)| a);
-        let host = authority.split('/').next()?;
-        return Some(host.split(':').next().unwrap_or(host).to_string());
+    remote_url_host(url).filter(|host| proxy::is_hostname(host))
+}
+
+fn remote_url_host(url: &str) -> Option<String> {
+    let after_scheme = ["ssh://", "https://", "http://"]
+        .iter()
+        .find_map(|scheme| url.strip_prefix(scheme));
+    if let Some(rest) = after_scheme {
+        // scheme://[user[:password]@]host[:port]/path
+        let authority = rest.split('/').next()?;
+        let host_and_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        return host_and_port.split(':').next().map(String::from);
     }
-    if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
-        return rest
-            .split('/')
-            .next()
-            .map(|h| h.split(':').next().unwrap_or(h).to_string());
-    }
-    if let Some((_user, host_and_path)) = url.split_once('@') {
-        return host_and_path.split(':').next().map(String::from);
-    }
-    None
+    // SCP style: user@host:path
+    let (_user, host_and_path) = url.split_once('@')?;
+    host_and_path.split(':').next().map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -882,6 +886,15 @@ mod tests {
         );
     }
 
+    /// The SSH relay reaches it, so it's allowed like any other host.
+    #[test]
+    fn host_from_ssh_host_with_an_underscore() {
+        assert_eq!(
+            host_from_remote_url("git@git_box.lan:team/repo.git"),
+            Some("git_box.lan".into())
+        );
+    }
+
     #[test]
     fn host_from_ssh_scheme() {
         assert_eq!(
@@ -898,8 +911,41 @@ mod tests {
         );
     }
 
+    /// A token in a remote URL is neither a host to allow nor something to
+    /// print, and an `@` in the path isn't the end of the user part.
+    #[test]
+    fn host_from_remote_url_skips_credentials_and_paths() {
+        for (url, host) in [
+            (
+                "https://x-access-token:ghs_secret@github.com/o/r.git",
+                "github.com",
+            ),
+            (
+                "https://oauth2:glpat-secret@gitlab.com/g/r.git",
+                "gitlab.com",
+            ),
+            ("https://ghp_secret@github.com/o/r.git", "github.com"),
+            ("https://chris@bitbucket.org/ws/r.git", "bitbucket.org"),
+            ("ssh://git@github.com/org/repo@v2.git", "github.com"),
+        ] {
+            assert_eq!(host_from_remote_url(url).as_deref(), Some(host), "{url}");
+        }
+    }
+
     #[test]
     fn host_from_nonsense_returns_none() {
         assert_eq!(host_from_remote_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn host_from_remote_url_skips_hosts_that_would_widen_the_allowlist() {
+        for url in [
+            "https://*/repo.git",
+            "https://*.com/repo.git",
+            "git@*:org/repo.git",
+            "ssh://git@*/org/repo.git",
+        ] {
+            assert_eq!(host_from_remote_url(url), None, "{url}");
+        }
     }
 }

@@ -179,11 +179,23 @@ Default-deny outbound. You must explicitly allow hosts:
 redan exec --allow-host api.anthropic.com --allow-host registry.npmjs.org
 ```
 
-Wildcard patterns work: `"*.amazonaws.com"` matches any subdomain.
-Hosts required by secrets are included automatically. Connections to
-private IP ranges (RFC 1918, link-local, cloud metadata) are blocked
-even in allow-all mode. Domain fronting is blocked: HTTP Host must
-match TLS SNI.
+Each entry is a hostname or a `*.domain` pattern: `"*.amazonaws.com"`
+matches any subdomain of amazonaws.com, but not amazonaws.com itself.
+Hosts required by secrets are included automatically, and so are the
+`sandbox.network.allowedDomains` from Claude Code's settings (the
+project's `.claude/settings.json` / `settings.local.json` and your own
+`~/.claude/` ones). When redan sets the agent up for you (`redan run`, or
+`redan exec` with no config file and no flags that set up the session), it
+also allows the agent's own hosts and your git remotes' hosts. Those imports can add hosts but can't
+turn the allowlist off. Git remotes only add plain hostnames, and an
+entry in Claude Code's settings that isn't a hostname or a `*.domain`
+pattern, like `"*"`, is skipped with a warning. Pass `--allow-host '*'`
+yourself if you want allow-all.
+
+Connections to private IP ranges (RFC 1918, loopback, link-local, cloud
+metadata) are blocked unless the host is on your allowlist by name or
+pattern, and always in allow-all mode. Domain fronting is blocked: HTTP
+Host must match TLS SNI.
 
 **Discover mode** lets you figure out what hosts the agent needs:
 
@@ -267,12 +279,14 @@ files, none of which the sandbox would catch, because it runs before the
 sandbox starts. redan trust-gates it.
 
 A config that only sets safe things (`image`, `command`, guest `env`,
-`[network] allow`, a literal secret, or a mount inside the project) loads with
-no prompt. A config that reaches for host authority has to be trusted first:
+hosts in `[network] allow`, a literal secret, or a mount inside the project)
+loads with no prompt. A config that reaches for host authority has to be
+trusted first:
 
 - reading host env vars or Vault (`env://` / `vault://` secrets)
 - mounting a path outside the project, or setting `rootfs`
 - forwarding a host-local port, or writing a host `audit_log` / `log_file`
+- turning the network allowlist off with `allow = ["*"]`
 
 When redan hits one of those and the config isn't trusted, it prints exactly
 what the config would be allowed to do and, in an interactive session, asks
