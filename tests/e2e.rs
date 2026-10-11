@@ -34,13 +34,6 @@ static VM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 /// reach the guest, so it must never show up in anything the guest prints.
 const CANARY: (&str, &str) = ("REDAN_E2E_CANARY", "redan-e2e-canary-4b1d7e");
 
-/// A made-up Claude token for the tests that never reach the API. redan only
-/// checks that one is set, and the leak checks look for it like a real one.
-const FAKE_CLAUDE_TOKEN: (&str, &str) = (
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "sk-ant-oat01-redan-e2e-fake-token",
-);
-
 /// A project `redan.toml` that turns the allowlist off and prints what the
 /// guest was told about its network.
 const ALLOW_ALL_CONFIG: &str = "image = \"test\"\ncommand = \"echo network=$REDAN_NETWORK\"\ntimeout = 60\n\n[network]\nallow = [\"*\"]\n";
@@ -380,8 +373,13 @@ fn claude_credentials() -> Vec<(&'static str, OsString)> {
     credentials
 }
 
+/// A made-up Claude token for the tests that never reach the API. redan only
+/// checks that one is set, and the leak checks look for it like a real one.
 fn fake_claude_credentials() -> Vec<(&'static str, OsString)> {
-    vec![(FAKE_CLAUDE_TOKEN.0, FAKE_CLAUDE_TOKEN.1.into())]
+    vec![(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "sk-ant-oat01-redan-e2e-fake-token".into(),
+    )]
 }
 
 /// Start Claude Code with `redan run claude`, passing `args` after `--`.
@@ -452,7 +450,7 @@ fn claude_guest_env_has_placeholders_instead_of_your_credentials() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains(&format!("{}=redan_ph_", FAKE_CLAUDE_TOKEN.0)),
+        stdout.contains("CLAUDE_CODE_OAUTH_TOKEN=redan_ph_"),
         "{}",
         sandbox.explain(&out)
     );

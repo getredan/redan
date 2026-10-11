@@ -213,15 +213,15 @@ mod tests {
             UnixTime::now().as_secs() - 5,
         ));
 
-        let result = verifier.verify_server_cert(
-            &leaf.cert[0],
-            &[],
-            &ServerName::try_from("example.com").unwrap(),
-            &[],
-            five_seconds_ago,
-        );
-
-        assert!(result.is_ok(), "{result:?}");
+        verifier
+            .verify_server_cert(
+                &leaf.cert[0],
+                &[],
+                &ServerName::try_from("example.com").unwrap(),
+                &[],
+                five_seconds_ago,
+            )
+            .unwrap();
     }
 
     #[test]
