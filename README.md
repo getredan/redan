@@ -185,8 +185,8 @@ Hosts required by secrets are included automatically, and so are the
 `sandbox.network.allowedDomains` from Claude Code's settings (the
 project's `.claude/settings.json` / `settings.local.json` and your own
 `~/.claude/` ones). When redan sets the agent up for you (`redan run`, or
-a bare `redan exec` with no `redan.toml`), it also allows the agent's own
-hosts and your git remotes' hosts. Those imports can add hosts but can't
+`redan exec` with no config file and no flags that set up the session), it
+also allows the agent's own hosts and your git remotes' hosts. Those imports can add hosts but can't
 turn the allowlist off. Git remotes only add plain hostnames, and an
 entry in Claude Code's settings that isn't a hostname or a `*.domain`
 pattern, like `"*"`, is skipped with a warning. Pass `--allow-host '*'`

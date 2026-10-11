@@ -27,10 +27,10 @@ and are injected into HTTP requests at the network layer.
   hosts you allow with `--allow-host` or `[network] allow` in
   `redan.toml`, your secrets' hosts, the `allowedDomains` in Claude
   Code's settings, and, when redan sets the agent up for you, the agent
-  profile's own hosts and your git remotes' hosts. Every entry is a
-  hostname or a `*.domain` pattern, and only `--allow-host`, your user
-  config and a trusted `redan.toml` can turn the allowlist off with
-  `"*"`. The git and Claude Code imports come from files the repo or the
+  profile's own hosts and your git remotes' hosts. Entries from
+  `--allow-host`, `[network] allow` and the imports are hostnames or
+  `*.domain` patterns, and only `--allow-host`, your user config and a
+  trusted `redan.toml` can turn the allowlist off with `"*"`. The git and Claude Code imports come from files the repo or the
   guest can write, so they can add hosts but never `"*"`. A host on the
   allowlist may also resolve to a private address (that's how you reach
   an internal git server), and that includes the imported ones.
