@@ -13,12 +13,14 @@
 /// the 2.0 API adds a returning entry point.
 /// See <https://github.com/libkrun/libkrun/issues/561>
 use std::ffi::CString;
+use std::io::Write as _;
 use std::os::raw::c_char;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::ffi;
+use crate::rootfs::Rootfs;
 
 const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 
@@ -403,30 +405,24 @@ pub fn net_setup_commands(gateway_ip: &str, guest_ip: &str) -> String {
 /// Also writes a standalone copy at `/etc/ssl/certs/redan-ca.pem`
 /// for tools that use `SSL_CERT_FILE`.
 ///
+/// Paths resolve the way the guest sees them (see [`Rootfs`]), so an
+/// absolute link in the image, like Fedora's `/etc/ssl/certs`, points into
+/// the rootfs, and a link the guest planted can't point out of it.
+///
 /// Safe to call multiple times (replaces previous cert).
 ///
 /// # Errors
 ///
-/// Returns the I/O error if `etc/ssl/certs` under `rootfs` cannot be
-/// replaced or created, if a stale `redan-ca.pem` symlink cannot be removed,
-/// or if the PEM cannot be written to the standalone path or to any of the
-/// distro CA source directories that exist.
+/// Returns the I/O error if the rootfs can't be opened, if `etc/ssl/certs`
+/// can't be created, or if the PEM can't be written to the standalone path
+/// or to any of the distro CA source directories that exist.
 pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
+    let root = Rootfs::open(rootfs)?;
+
     // Standalone PEM for SSL_CERT_FILE.
-    // Fedora has /etc/ssl/certs as a broken symlink; replace it.
-    let ssl_dir = rootfs.join("etc/ssl/certs");
-    if ssl_dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
-        std::fs::remove_file(&ssl_dir)?;
-    }
-    std::fs::create_dir_all(&ssl_dir)?;
-    let pem_path = ssl_dir.join("redan-ca.pem");
-    // update-ca-certificates may have replaced our file with an absolute
-    // symlink (e.g. -> /usr/local/share/ca-certificates/redan-ca.crt)
-    // which is broken from the host. Remove it before writing.
-    if pem_path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
-        std::fs::remove_file(&pem_path)?;
-    }
-    std::fs::write(&pem_path, pem)?;
+    root.create_dir_all(Path::new("etc/ssl/certs"))?;
+    root.create(Path::new("etc/ssl/certs/redan-ca.pem"))?
+        .write_all(pem.as_bytes())?;
 
     // Drop into each distro's CA source directory.
     // The distro's update tool reads from these and regenerates the
@@ -438,10 +434,10 @@ pub fn install_ca_cert(rootfs: &Path, pem: &str) -> std::io::Result<()> {
         "etc/ca-certificates/trust-source/anchors", // Arch
     ];
 
-    for rel in source_dirs {
-        let dir = rootfs.join(rel);
-        if dir.is_dir() {
-            std::fs::write(dir.join("redan-ca.crt"), pem)?;
+    for dir in source_dirs.map(Path::new) {
+        if root.is_dir(dir) {
+            root.create(&dir.join("redan-ca.crt"))?
+                .write_all(pem.as_bytes())?;
         }
     }
 
@@ -503,5 +499,60 @@ mod tests {
         assert_eq!(exit_code_from_wait_status(libc::SIGKILL), 137);
         assert_eq!(exit_code_from_wait_status(libc::SIGTERM), 143);
         assert_eq!(exit_code_from_wait_status(libc::SIGINT), 130);
+    }
+
+    /// The guest can replace anything in its rootfs with a symlink, and the
+    /// host installs the CA into that rootfs before the next boot. A link
+    /// that points out of the rootfs, absolute or relative, must not carry
+    /// that write to your files.
+    #[test]
+    fn install_ca_cert_never_writes_outside_the_rootfs() {
+        let host = tempfile::tempdir().unwrap();
+        let victim = host.path().join("victim");
+        let host_name = host.path().file_name().unwrap();
+        for (link, target) in [
+            ("etc/ssl", host.path().to_path_buf()),
+            ("etc/ssl", Path::new("../..").join(host_name)),
+            ("usr/local/share/ca-certificates", host.path().to_path_buf()),
+            (
+                "usr/local/share/ca-certificates/redan-ca.crt",
+                victim.clone(),
+            ),
+            ("etc/ssl/certs/redan-ca.pem", victim.clone()),
+        ] {
+            std::fs::write(&victim, "yours").unwrap();
+            let rootfs = tempfile::tempdir().unwrap();
+            let link = rootfs.path().join(link);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let _ = install_ca_cert(rootfs.path(), "PEM");
+
+            let left: Vec<_> = std::fs::read_dir(host.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(left, ["victim"], "{link:?} -> {target:?}");
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "yours");
+        }
+    }
+
+    /// Fedora links `/etc/ssl/certs` to `/etc/pki/tls/certs`. The link is
+    /// absolute, so it only makes sense inside the guest, and that's where
+    /// the CA has to end up.
+    #[test]
+    fn install_ca_cert_follows_absolute_links_inside_the_rootfs() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc/pki/tls/certs")).unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc/ssl")).unwrap();
+        std::os::unix::fs::symlink("/etc/pki/tls/certs", rootfs.path().join("etc/ssl/certs"))
+            .unwrap();
+
+        install_ca_cert(rootfs.path(), "PEM").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(rootfs.path().join("etc/pki/tls/certs/redan-ca.pem")).unwrap(),
+            "PEM"
+        );
     }
 }

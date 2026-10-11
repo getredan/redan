@@ -806,28 +806,17 @@ fn launch(
     // Runs on the host, no mount or runtime copy needed.
     let chown_dir: Option<String> = stage_files.first().map(|(_, d, _)| d.clone());
     for (host_path, guest_dir, filename) in stage_files {
-        let target_dir = std::path::Path::new(&rootfs_path)
-            .join(guest_dir.strip_prefix('/').unwrap_or(guest_dir));
-        if let Err(e) = std::fs::create_dir_all(&target_dir) {
-            eprintln!("error: cannot create {}: {e}", target_dir.display());
-            std::process::exit(1);
-        }
-        let target_file = target_dir.join(filename);
-        if let Err(e) = std::fs::copy(host_path, &target_file) {
+        if let Err(e) = stage_file(
+            std::path::Path::new(&rootfs_path),
+            host_path,
+            guest_dir,
+            filename,
+        ) {
             eprintln!(
-                "error: cannot stage credentials {} → {}: {e}",
-                host_path.display(),
-                target_file.display()
+                "error: cannot stage credentials {} into {guest_dir}: {e}",
+                host_path.display()
             );
             std::process::exit(1);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // World-writable so the run_as user can update credentials.
-            // Single-user VM; the VM itself is the security boundary.
-            let _ = std::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o777));
-            let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o666));
         }
     }
 
@@ -1030,6 +1019,29 @@ fn print_agent_auth_hint(agent: &redan::auto_detect::AgentDef) {
             }
         }
     }
+}
+
+/// Copy `host_path` into `guest_dir` in the rootfs as `filename`, before
+/// boot. The directory and file are world-writable so the agent's user can
+/// refresh the credentials. The VM is single-user, and the VM itself is the
+/// security boundary.
+fn stage_file(
+    rootfs: &std::path::Path,
+    host_path: &std::path::Path,
+    guest_dir: &str,
+    filename: &str,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut source = std::fs::File::open(host_path)?;
+    let root = redan::rootfs::Rootfs::open(rootfs)?;
+    let guest_dir = std::path::Path::new(guest_dir);
+    let target_dir = root.create_dir_all(guest_dir)?;
+    let mut target_file = root.create(&guest_dir.join(filename))?;
+    std::io::copy(&mut source, &mut target_file)?;
+    let _ = target_dir.set_permissions(std::fs::Permissions::from_mode(0o777));
+    let _ = target_file.set_permissions(std::fs::Permissions::from_mode(0o666));
+    Ok(())
 }
 
 /// Single-quote a shell argument so it survives `/bin/sh -c`.
@@ -1541,7 +1553,56 @@ fn build_bundled_image(name: &str) -> std::io::Result<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{kill_target, shell_quote};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::{kill_target, shell_quote, stage_file};
+
+    #[test]
+    fn stage_file_copies_credentials_the_agent_can_refresh() {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = home.path().join(".credentials.json");
+        std::fs::write(&credentials, "token").unwrap();
+        let rootfs = tempfile::tempdir().unwrap();
+
+        stage_file(
+            rootfs.path(),
+            &credentials,
+            "/home/dev/.claude",
+            ".credentials.json",
+        )
+        .unwrap();
+
+        let dir = rootfs.path().join("home/dev/.claude");
+        let file = dir.join(".credentials.json");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "token");
+        let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode(&dir) & 0o777, 0o777);
+        assert_eq!(mode(&file) & 0o777, 0o666);
+    }
+
+    /// The agent runs as `dev` and owns `/home/dev/.claude`, so it can swap
+    /// it for a link to your home before the next session stages into it.
+    #[test]
+    fn stage_file_never_writes_or_chmods_outside_the_rootfs() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let credentials = home.path().join(".credentials.json");
+        std::fs::write(&credentials, "token").unwrap();
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("home/dev")).unwrap();
+        std::os::unix::fs::symlink(home.path(), rootfs.path().join("home/dev/.claude")).unwrap();
+
+        let _ = stage_file(
+            rootfs.path(),
+            &credentials,
+            "/home/dev/.claude",
+            ".credentials.json",
+        );
+
+        let mode = std::fs::metadata(home.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(std::fs::read_to_string(&credentials).unwrap(), "token");
+    }
 
     #[test]
     fn shell_quote_wraps_plain_arg() {

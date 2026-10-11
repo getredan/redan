@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
 use redan::ca::MitmCa;
 use redan::proxy;
+use redan::rootfs::Rootfs;
 use redan::secret::SecretBinding;
 use redan::session;
 use redan::templates;
@@ -196,10 +198,10 @@ pub(crate) fn run(cfg: &ExecConfig<'_>) -> i32 {
         let ro_label = if read_only { " (ro)" } else { "" };
         log::info!("mount: {host_path} -> {guest_path}{ro_label} (tag={tag})");
 
-        // guest_path is validated above (absolute, no `..`), so this join
-        // stays within the rootfs.
-        let mp = Path::new(cfg.rootfs).join(guest_path.trim_start_matches('/'));
-        std::fs::create_dir_all(&mp).ok();
+        // The guest may have replaced a parent of guest_path with a link,
+        // and `Rootfs` keeps the mount point inside the rootfs anyway.
+        let _ = Rootfs::open(Path::new(cfg.rootfs))
+            .and_then(|root| root.create_dir_all(Path::new(&guest_path)));
 
         virtiofs_mounts.push((tag.clone(), host_path, read_only));
         let mount_opts = if read_only { " -o ro" } else { "" };
@@ -648,16 +650,33 @@ fn with_workdir(command: String, workdir: Option<&str>) -> String {
 }
 
 fn write_guest_policy(rootfs: &Path, allowed_hosts: Option<&Vec<String>>) {
-    let dir = rootfs.join("etc/redan");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let _ = std::fs::write(dir.join("policy"), templates::guest_policy(allowed_hosts));
+    let policy = templates::guest_policy(allowed_hosts);
+    let _ = Rootfs::open(rootfs).and_then(|root| {
+        root.create_dir_all(Path::new("etc/redan"))?;
+        root.create(Path::new("etc/redan/policy"))?
+            .write_all(policy.as_bytes())
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guest can replace `/etc/redan/policy` with a link to one of your
+    /// files, and the next session writes the policy before boot.
+    #[test]
+    fn guest_policy_never_writes_outside_the_rootfs() {
+        let host = tempfile::tempdir().unwrap();
+        let victim = host.path().join("victim");
+        std::fs::write(&victim, "yours").unwrap();
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc/redan")).unwrap();
+        std::os::unix::fs::symlink(&victim, rootfs.path().join("etc/redan/policy")).unwrap();
+
+        write_guest_policy(rootfs.path(), None);
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "yours");
+    }
 
     #[test]
     fn parse_secret_basic() {

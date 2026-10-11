@@ -10,6 +10,12 @@ and are injected into HTTP requests at the network layer.
 
 - **Secret exfiltration via file system**: secrets never touch the guest
   filesystem. The guest sees placeholder tokens in environment variables.
+- **Writes through links in the image**: the image directory is the guest's
+  `/`, so the guest can leave symlinks in it for the next session. When
+  redan writes into the image before a boot (the CA, `/etc/redan/policy`,
+  mount points, staged credentials, the image metadata), it resolves paths
+  with `openat2(RESOLVE_IN_ROOT)`, the way the guest sees them, so a link
+  can't carry those writes to your files.
 - **Secret exfiltration via unauthorized hosts**: the host allowlist
   gates injection. A request to `evil.com` carrying a GitHub placeholder
   gets the placeholder, not the token.
