@@ -21,14 +21,13 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use redan::auto_detect::{AuthMethod, agent_by_slug};
 use serde::Deserialize;
 
 /// `redan` installs its CA into the image it boots, and the tests share
-/// images, so VM runs in this binary take turns.
-static VM_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+/// images, so the `redan` runs in this binary take turns.
+static VM_LOCK: Mutex<()> = Mutex::new(());
 
 /// Set in redan's environment for every run. Nothing from your shell should
 /// reach the guest, so it must never show up in anything the guest prints.
@@ -36,7 +35,14 @@ const CANARY: (&str, &str) = ("REDAN_E2E_CANARY", "redan-e2e-canary-4b1d7e");
 
 /// A project `redan.toml` that turns the allowlist off and prints what the
 /// guest was told about its network.
-const ALLOW_ALL_CONFIG: &str = "image = \"test\"\ncommand = \"echo network=$REDAN_NETWORK\"\ntimeout = 60\n\n[network]\nallow = [\"*\"]\n";
+const ALLOW_ALL_CONFIG: &str = r#"
+image = "test"
+command = "echo network=$REDAN_NETWORK"
+timeout = 60
+
+[network]
+allow = ["*"]
+"#;
 
 /// One event from `redan logs --json`.
 #[derive(Debug, Deserialize)]
@@ -48,14 +54,9 @@ struct AuditEvent {
     reason: String,
 }
 
-impl AuditEvent {
-    fn is_rejection_of(&self, host: &str) -> bool {
-        self.event == "reject" && self.host == host && self.reason == "not_allowed"
-    }
-}
-
-/// Wait for this test's turn to boot a VM. A test that failed while holding
-/// the lock leaves it poisoned, and that shouldn't fail the tests after it.
+/// Wait for the `redan` run before this one to finish. A test that failed
+/// during its run leaves the lock poisoned, and that shouldn't fail the tests
+/// after it.
 fn vm_turn() -> MutexGuard<'static, ()> {
     VM_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -100,7 +101,7 @@ impl Sandbox {
     /// own `HOME` and state directory and the [`CANARY`] in its environment.
     /// `XDG_DATA_HOME` points at your real data directory so the images are
     /// found.
-    fn command(&self, program: impl AsRef<OsStr>) -> Command {
+    fn command(&self, program: &str) -> Command {
         // image_dir() is <data home>/redan/images.
         let images = redan::image::image_dir();
         let data_home = images.ancestors().nth(2).unwrap();
@@ -119,12 +120,13 @@ impl Sandbox {
     /// Run `redan` with no terminal attached, adding `env` to its
     /// environment.
     fn redan(&self, args: &[&str], env: &[(&str, OsString)]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_redan"))
+        let mut command = self.command(env!("CARGO_BIN_EXE_redan"));
+        command
             .args(args)
             .envs(env.iter().map(|(var, value)| (var, value)))
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdin(Stdio::null());
+        let _turn = vm_turn();
+        command.output().unwrap()
     }
 
     /// Run `redan` in a terminal, as you would from your shell, and type
@@ -133,6 +135,7 @@ impl Sandbox {
     /// plain words.
     fn redan_in_terminal(&self, args: &[&str], input: &str) -> Output {
         let command_line = format!("'{}' {}", env!("CARGO_BIN_EXE_redan"), args.join(" "));
+        let _turn = vm_turn();
         let mut child = self
             .command("script")
             .args(["-q", "-e", "-c", &command_line, "/dev/null"])
@@ -178,14 +181,17 @@ impl Sandbox {
     /// never did doesn't pass.
     fn assert_rejected(&self, host: &str, events: &[AuditEvent], run: &Output) {
         assert!(
-            events.iter().any(|e| e.is_rejection_of(host)),
+            events
+                .iter()
+                .any(|e| e.event == "reject" && e.host == host && e.reason == "not_allowed"),
             "no not_allowed reject for {host}: {events:?}\n{}",
             self.explain(run)
         );
     }
 
-    /// `run`'s output and redan's session logs, which is where redan logs to
-    /// when the agent runs interactively.
+    /// What `run` printed, and redan's session logs, which is where redan
+    /// logs to when it runs in a terminal. Every failure message about a
+    /// redan run uses it.
     fn explain(&self, run: &Output) -> String {
         let mut parts = vec![report(run)];
         parts.extend(
@@ -229,7 +235,6 @@ fn report(out: &Output) -> String {
 /// the guest's request to a host nobody allowed is rejected.
 #[test]
 fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("test");
     sandbox.write(
         ".claude/settings.local.json",
@@ -254,7 +259,8 @@ fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
         stderr.contains(
             r#"warning: ignoring "*" in ./.claude/settings.local.json: Claude Code settings can't turn off redan's allowlist"#
         ),
-        "{stderr}"
+        "{}",
+        sandbox.explain(&out)
     );
     let events = sandbox.audit_events(&out);
     sandbox.assert_rejected("example.com", &events, &out);
@@ -266,31 +272,37 @@ fn claude_settings_wildcard_does_not_turn_off_the_allowlist() {
 /// with the allowlist off.
 #[test]
 fn redan_toml_allow_all_is_refused_until_trusted() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("test");
     sandbox.write("redan.toml", ALLOW_ALL_CONFIG);
 
     let refused = sandbox.redan(&["exec"], &[]);
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "{}",
+        sandbox.explain(&refused)
+    );
     assert!(
         stderr.contains("needs trust and this is a non-interactive session"),
-        "{stderr}"
+        "{}",
+        sandbox.explain(&refused)
     );
     assert!(
         stderr.contains("turns off the network allowlist"),
-        "{stderr}"
+        "{}",
+        sandbox.explain(&refused)
     );
 
     let trusted = sandbox.redan(&["trust"], &[]);
-    assert!(trusted.status.success(), "{}", report(&trusted));
+    assert!(trusted.status.success(), "{}", sandbox.explain(&trusted));
 
     let ran = sandbox.redan(&["exec"], &[]);
-    assert!(ran.status.success(), "{}", report(&ran));
+    assert!(ran.status.success(), "{}", sandbox.explain(&ran));
     assert!(
         String::from_utf8_lossy(&ran.stdout).contains("network=allow-all"),
         "{}",
-        report(&ran)
+        sandbox.explain(&ran)
     );
 }
 
@@ -299,30 +311,44 @@ fn redan_toml_allow_all_is_refused_until_trusted() {
 /// it untrusted, yes runs it and remembers the answer.
 #[test]
 fn redan_toml_allow_all_asks_in_a_terminal() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("test");
     sandbox.write("redan.toml", ALLOW_ALL_CONFIG);
 
     let declined = sandbox.redan_in_terminal(&["exec"], "n\n");
     let output = String::from_utf8_lossy(&declined.stdout);
-    assert_eq!(declined.status.code(), Some(1), "{output}");
+    assert_eq!(
+        declined.status.code(),
+        Some(1),
+        "{}",
+        sandbox.explain(&declined)
+    );
     assert!(
         output.contains("let the guest reach any host  [turns off the network allowlist]"),
-        "{output}"
+        "{}",
+        sandbox.explain(&declined)
     );
     assert!(
         output.contains("Trust this config and continue? [y/N]"),
-        "{output}"
+        "{}",
+        sandbox.explain(&declined)
     );
-    assert!(output.contains("left untrusted; not running."), "{output}");
+    assert!(
+        output.contains("left untrusted; not running."),
+        "{}",
+        sandbox.explain(&declined)
+    );
 
     let accepted = sandbox.redan_in_terminal(&["exec"], "y\n");
     let output = String::from_utf8_lossy(&accepted.stdout);
-    assert!(accepted.status.success(), "{output}");
-    assert!(output.contains("network=allow-all"), "{output}");
+    assert!(accepted.status.success(), "{}", sandbox.explain(&accepted));
+    assert!(
+        output.contains("network=allow-all"),
+        "{}",
+        sandbox.explain(&accepted)
+    );
 
     let again = sandbox.redan(&["exec"], &[]);
-    assert!(again.status.success(), "{}", report(&again));
+    assert!(again.status.success(), "{}", sandbox.explain(&again));
 }
 
 /// `allow = ["*."]` isn't `"*"`, so it needs no trust, but as a pattern it
@@ -331,45 +357,45 @@ fn redan_toml_allow_all_asks_in_a_terminal() {
 /// pattern, before it starts a session.
 #[test]
 fn redan_toml_allow_entry_that_is_not_a_hostname_is_refused() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("test");
     sandbox.write(
         "redan.toml",
-        "image = \"test\"\ncommand = \"true\"\ntimeout = 60\n\n[network]\nallow = [\"*.\"]\n",
+        r#"
+image = "test"
+command = "true"
+timeout = 60
+
+[network]
+allow = ["*."]
+"#,
     );
 
     let out = sandbox.redan(&["exec"], &[]);
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{}", report(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", sandbox.explain(&out));
     assert!(
         stderr.contains(r#"take a hostname or a *.domain pattern, not a URL or host:port: "*.""#),
-        "{stderr}"
+        "{}",
+        sandbox.explain(&out)
     );
     let sessions = sandbox.redan(&["sessions"], &[]);
     assert!(
         String::from_utf8_lossy(&sessions.stderr).contains("no sessions"),
         "{}",
-        report(&sessions)
+        sandbox.explain(&sessions)
     );
 }
 
-/// The Claude credentials set in your environment, under the names redan's
-/// Claude profile reads them from.
-#[expect(
-    clippy::expect_used,
-    reason = "test helper outside a #[test] fn: a missing Claude profile must fail the eval with a message"
-)]
+/// The Claude credentials set in your environment, the way your shell passes
+/// them to `redan run claude`.
 fn claude_credentials() -> Vec<(&'static str, OsString)> {
-    let claude = agent_by_slug("claude").expect("redan has a claude agent profile");
-    let credentials: Vec<_> = claude
-        .auth
-        .iter()
-        .filter_map(|method| match method {
-            AuthMethod::EnvSecret { env_var, .. } => std::env::var_os(env_var)
+    let credentials: Vec<_> = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        .into_iter()
+        .filter_map(|var| {
+            std::env::var_os(var)
                 .filter(|value| !value.to_string_lossy().trim().is_empty())
-                .map(|value| (*env_var, value)),
-            AuthMethod::StagedFiles { .. } => None,
+                .map(|value| (var, value))
         })
         .collect();
     assert!(
@@ -447,10 +473,9 @@ fn ask_claude(sandbox: &Sandbox, prompt: &str) -> (Output, Vec<AuditEvent>) {
 #[test]
 #[ignore = "needs the claude-code image: mise run e2e"]
 fn claude_guest_env_has_placeholders_instead_of_your_credentials() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("claude-code");
     // A project's redan.toml overrides the agent's command, as it would for you.
-    sandbox.write("redan.toml", "command = \"env\"\n");
+    sandbox.write("redan.toml", r#"command = "env""#);
 
     let (out, _) = run_claude(&sandbox, &fake_claude_credentials(), &[]);
 
@@ -468,11 +493,10 @@ fn claude_guest_env_has_placeholders_instead_of_your_credentials() {
 #[test]
 #[ignore = "needs the claude-code image: mise run e2e"]
 fn git_remote_wildcard_does_not_turn_off_the_allowlist() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("claude-code");
     sandbox.write(
         "redan.toml",
-        "command = \"curl -sS -m 10 https://example.com/\"\n",
+        r#"command = "curl -sS -m 10 https://example.com/""#,
     );
     sandbox.git(&["init", "-q"]);
     sandbox.git(&[
@@ -495,20 +519,20 @@ fn git_remote_wildcard_does_not_turn_off_the_allowlist() {
 }
 
 /// Claude Code answers a prompt, so the placeholder in the guest was swapped
-/// for your real credential on the way to the API.
+/// for your real credential on the way to the API. The answer isn't in the
+/// prompt, so an echo of the command line or an error that quotes the prompt
+/// doesn't pass.
 #[test]
 #[ignore = "uses your Claude token and the real API: mise run e2e"]
 fn claude_answers_through_the_injected_credential() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("claude-code");
 
-    let (out, events) = ask_claude(
-        &sandbox,
-        "Reply with exactly REDAN_E2E_OK and nothing else.",
-    );
+    let (out, events) = ask_claude(&sandbox, "What is 17 + 25? Reply with only the number.");
 
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("REDAN_E2E_OK"),
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|line| line.trim() == "42"),
         "{}",
         sandbox.explain(&out)
     );
@@ -516,7 +540,8 @@ fn claude_answers_through_the_injected_credential() {
         events
             .iter()
             .any(|e| e.event == "inject" && e.host == "api.anthropic.com"),
-        "{events:?}"
+        "{events:?}\n{}",
+        sandbox.explain(&out)
     );
 }
 
@@ -525,7 +550,6 @@ fn claude_answers_through_the_injected_credential() {
 #[test]
 #[ignore = "uses your Claude token and the real API: mise run e2e"]
 fn claude_cannot_reach_other_hosts_when_project_settings_allow_all() {
-    let _turn = vm_turn();
     let sandbox = Sandbox::new("claude-code");
     sandbox.write(
         ".claude/settings.json",
