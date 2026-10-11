@@ -402,18 +402,18 @@ fn run_claude(
     let events = sandbox.audit_events(&out);
 
     let files = sandbox.files();
-    let secrets = credentials
-        .iter()
-        .map(|(var, value)| (*var, value.as_encoded_bytes()))
-        .chain([(CANARY.0, CANARY.1.as_bytes())]);
-    for (name, secret) in secrets {
-        let leaked = |bytes: &[u8]| bytes.windows(secret.len()).any(|w| w == secret);
-        assert!(!leaked(&out.stdout), "{name} in the guest's output");
-        assert!(!leaked(&out.stderr), "{name} in redan's stderr");
+    let assert_absent = |needle: &[u8], what: &str| {
+        let leaked = |bytes: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(!leaked(&out.stdout), "{what} in the guest's output");
+        assert!(!leaked(&out.stderr), "{what} in redan's stderr");
         for (file, content) in &files {
-            assert!(!leaked(content), "{name} in {}", file.display());
+            assert!(!leaked(content), "{what} in {}", file.display());
         }
+    };
+    for (_, value) in credentials {
+        assert_absent(value.as_encoded_bytes(), "your Claude credential");
     }
+    assert_absent(CANARY.1.as_bytes(), "the canary from redan's environment");
     for event in &events {
         assert!(
             event.event != "inject" || event.host == "api.anthropic.com",
