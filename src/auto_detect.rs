@@ -886,6 +886,15 @@ mod tests {
         );
     }
 
+    /// The SSH relay reaches it, so it's allowed like any other host.
+    #[test]
+    fn host_from_ssh_host_with_an_underscore() {
+        assert_eq!(
+            host_from_remote_url("git@git_box.lan:team/repo.git"),
+            Some("git_box.lan".into())
+        );
+    }
+
     #[test]
     fn host_from_ssh_scheme() {
         assert_eq!(

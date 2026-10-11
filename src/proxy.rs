@@ -974,9 +974,12 @@ fn tls_connection_thread(
 
     // Validate SNI is a reasonable hostname. Guest controls this value;
     // reject anything that isn't DNS-safe to prevent log injection
-    // (ANSI escapes) or weird resolver behavior. RFC 6066 section 3 sends
-    // the name without a trailing dot, so `evil.com.` is refused too.
-    if !is_hostname(&sni) {
+    // (ANSI escapes) or weird resolver behavior.
+    if sni.len() > 253
+        || !sni
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
         log::warn!("rejected invalid SNI: {sni:?}");
         return Err("invalid SNI hostname".to_string().into());
     }
@@ -1596,9 +1599,11 @@ fn request_has_upgrade(data: &[u8]) -> bool {
         .any(|header| header.name.eq_ignore_ascii_case("upgrade"))
 }
 
-/// Whether `name` is a plain DNS hostname: dot-separated labels of letters,
-/// digits and hyphens, none of them empty. It's what the proxy accepts in an
-/// SNI, so it's every name the allowlist can match.
+/// Whether `name` is a DNS hostname without a trailing dot.
+///
+/// Labels are letters, digits, hyphens and underscores, and none is empty. TLS
+/// names never have an underscore, but the SSH relay resolves names like
+/// `git_box.lan`.
 #[must_use]
 pub fn is_hostname(name: &str) -> bool {
     name.len() <= 253
@@ -1606,7 +1611,7 @@ pub fn is_hostname(name: &str) -> bool {
             !label.is_empty()
                 && label
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         })
 }
 
@@ -2151,6 +2156,7 @@ mod tests {
     fn is_hostname_rejects_wildcards_and_empty_labels() {
         assert!(is_hostname("github.com"));
         assert!(is_hostname("localhost"));
+        assert!(is_hostname("git_box.lan"));
         for name in [
             "",
             "*",
